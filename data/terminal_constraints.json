@@ -1,0 +1,38 @@
+{
+    "RMGC": {
+        "Number": 2,
+        "TravellingSpeed(m/s)": 4,
+        "TrolleySpeed(m/s)": 1.17,
+        "TrolleyAcceleration(m/s^2)": 0.5,
+        "TrolleyDeceleration(m/s^2)": 0.5,
+        "HoistSpeedMin(m/s)": 0.5,
+        "HoistSpeedMax(m/s)": 2.5,
+        "HoistAcceleration(m/s^2)": 0.5,
+        "HoistDeceleration(m/s^2)": 0.5,
+        "CanCrossOver": true
+    },
+    "Yard": {
+        "Bays": 58,
+        "Rows": 5,
+        "RowNames": ["A", "B", "C", "D", "E"],
+        "Tiers": 4,
+        "TierNames": ["1", "2", "3", "4"],
+        "SizeOfSlot(foot)": 40,
+        "DangerousGoods": {
+            "ToBeConsidered": true,
+            "BaysAssigned": [31, 32, 33, 34, 35],
+            "RowsAssigned": ["A", "B", "C"]
+        },
+        "Reefer": {
+            "ToBeConsidered": true,
+            "BaysAssigned": [1, 58],
+            "RowsAssigned": ["A", "B", "C", "D", "E"]
+        },
+        "Unconventional": {
+            "ToBeConsidered": true,
+            "BaysAssigned": "all",
+            "RowsAssigned": ["E"],
+            "Types": ["Swap Body", "Trailer"]
+        }
+    }
+}
