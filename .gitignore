@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# generated files
+distance_matrix.csv
+distance_matrix.pkl
+terminal_layout.png
+time_matrix.pkl
