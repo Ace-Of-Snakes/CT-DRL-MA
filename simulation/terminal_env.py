@@ -785,7 +785,111 @@ class TerminalEnvironment(gym.Env):
         print(f"Total reward: {final_reward:.2f}")
         
         return final_reward
-    
+    # Add these to the TerminalEnvironment class
+
+    def set_vehicle_limits(self, max_trucks=None, max_trains=None):
+        """
+        Set limits on the number of trucks and trains that can be generated per day
+        
+        Args:
+            max_trucks: Maximum number of trucks per day (None for unlimited)
+            max_trains: Maximum number of trains per day (None for unlimited)
+        """
+        self.max_trucks_per_day = max_trucks
+        self.max_trains_per_day = max_trains
+        self.daily_truck_count = 0
+        self.daily_train_count = 0
+        self.last_sim_day = 0
+        
+        # Store original functions if not already saved
+        if not hasattr(self, 'original_schedule_trucks'):
+            self.original_schedule_trucks = self._schedule_trucks_for_existing_containers
+        
+        if not hasattr(self, 'original_schedule_trains'):
+            self.original_schedule_trains = self._schedule_trains
+        
+        # Override with limited versions
+        if max_trucks is not None or max_trains is not None:
+            self._schedule_trucks_for_existing_containers = self._limited_schedule_trucks
+            self._schedule_trains = self._limited_schedule_trains
+        else:
+            # Reset to originals if limits removed
+            self._schedule_trucks_for_existing_containers = self.original_schedule_trucks
+            self._schedule_trains = self.original_schedule_trains
+
+    def _limited_schedule_trucks(self):
+        """Limited version of truck scheduling that respects max_trucks_per_day"""
+        # Check if we've reached the limit
+        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
+            # Calculate what day we're on
+            sim_day = int(self.current_simulation_time / 86400)
+            
+            # Reset counter if it's a new day
+            if sim_day > self.last_sim_day:
+                self.daily_truck_count = 0
+                self.last_sim_day = sim_day
+            
+            # Check if we're at the limit
+            if self.daily_truck_count >= self.max_trucks_per_day:
+                return  # Don't schedule more trucks
+            
+            # Count how many we're going to schedule
+            available_slots = self.max_trucks_per_day - self.daily_truck_count
+        else:
+            available_slots = len(self.stored_container_ids)  # No limit
+        
+        # Call original but limit how many we schedule
+        original_queue_size = self.truck_queue.size()
+        self.original_schedule_trucks()
+        
+        # Count how many were added
+        new_trucks = self.truck_queue.size() - original_queue_size
+        self.daily_truck_count += new_trucks
+        
+        # Remove excess if we went over the limit
+        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
+            excess = self.daily_truck_count - self.max_trucks_per_day
+            if excess > 0:
+                # Remove the excess trucks from the end of the queue
+                for _ in range(excess):
+                    # Find a truck in the queue that hasn't been assigned to the terminal yet
+                    if not self.truck_queue.is_empty():
+                        self.truck_queue.vehicles.queue.pop()
+                self.daily_truck_count = self.max_trucks_per_day
+
+    def _limited_schedule_trains(self):
+        """Limited version of train scheduling that respects max_trains_per_day"""
+        # Similar implementation to _limited_schedule_trucks
+        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
+            # Calculate what day we're on
+            sim_day = int(self.current_simulation_time / 86400)
+            
+            # Reset counter if it's a new day
+            if sim_day > self.last_sim_day:
+                self.daily_train_count = 0
+                self.last_sim_day = sim_day
+            
+            # Check if we're at the limit
+            if self.daily_train_count >= self.max_trains_per_day:
+                return  # Don't schedule more trains
+        
+        # Call original implementation
+        original_queue_size = self.train_queue.size()
+        self.original_schedule_trains()
+        
+        # Count how many were added
+        new_trains = self.train_queue.size() - original_queue_size
+        self.daily_train_count += new_trains
+        
+        # Remove excess if we went over the limit
+        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
+            excess = self.daily_train_count - self.max_trains_per_day
+            if excess > 0:
+                # Remove the excess trains from the end of the queue
+                for _ in range(excess):
+                    if not self.train_queue.is_empty():
+                        self.train_queue.vehicles.queue.pop()
+                self.daily_train_count = self.max_trains_per_day
     def _process_time_advancement(self, time_advanced):
         """Process events that occur during time advancement."""
         # Update current simulation datetime
