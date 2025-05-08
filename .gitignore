@@ -178,3 +178,9 @@ distance_matrix.csv
 distance_matrix.pkl
 terminal_layout.png
 time_matrix.pkl
+
+# Generated PNGs
+*.png
+
+# Generated Distribution files
+*.pkl
