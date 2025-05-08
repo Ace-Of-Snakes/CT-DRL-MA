@@ -1,0 +1,34 @@
+{
+    "env_name": "CTNürnberg",
+    "container_probabilities": {
+        "length": {
+            "20": {
+                "probability": 0.177,
+                "probability_high_cube": 0.00023,
+                "probability_reefer": 0.0066,
+                "probability_dangerous_goods": 0.0134,
+                "probability_regular": 0.98
+            },
+            "30": {
+                "probability": 0.018,
+                "probability_high_cube": 0,
+                "probability_reefer": 0.0066,
+                "probability_dangerous_goods": 0.2203,
+                "probability_regular": 0.7731
+            },
+            "40": {
+                "probability": 0.521,
+                "probability_high_cube": 0.1115,
+                "probability_reefer": 0.0066,
+                "probability_dangerous_goods": 0.0023,
+                "probability_regular": 0.9911
+            },
+            "swap body": {
+                "probability": 0.251
+            },
+            "trailer": {
+                "probability": 0.033
+            }
+        }
+    }
+}

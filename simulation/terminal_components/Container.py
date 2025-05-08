@@ -248,22 +248,72 @@ class Container:
         # If all checks pass, containers can stack
         return True
     
+    def can_be_stacked_on(self, container_below):
+        """
+        Check if this container can be safely stacked on another container.
+        
+        Args:
+            container_below: The container that would be below this one
+            
+        Returns:
+            Boolean indicating if stacking is safe
+        """
+        # First check the regular stacking compatibility
+        if not self.can_stack_with(container_below):
+            return False
+        
+        # Weight check - heavier containers cannot be stacked on lighter ones
+        # Use a ratio threshold - container below should not be less than 80% of the weight above
+        # This means the container above should not be more than 25% heavier than the one below
+        # This is a conservative threshold for safety
+        weight_ratio = self.weight / container_below.weight if container_below.weight > 0 else float('inf')
+        
+        # If the container above is more than 25% heavier than the one below, it's unsafe
+        if weight_ratio > 1.25:
+            return False
+        
+        return True
     def __str__(self):
         return f"Container {self.container_id} ({self.container_type}): {self.direction}, {self.goods_type}"
     
     def __repr__(self):
         return f"Container(id={self.container_id}, type={self.container_type}, goods={self.goods_type})"
 
-
 class ContainerFactory:
     """Factory class to easily create different types of containers."""
     
     @staticmethod
+    def sample_container_weight(config=None):
+        """
+        Sample a container weight from the KDE distribution.
+        
+        Args:
+            config: TerminalConfig object (optional)
+            
+        Returns:
+            Sampled weight in kg
+        """
+        # If config with KDE model is available, use it
+        if (config and hasattr(config, 'sample_from_kde') and 
+            'container_weight' in config.kde_models):
+            # Sample from KDE
+            weight = config.sample_from_kde('container_weight', n_samples=1, 
+                                        min_val=1000, max_val=31000)[0]
+            return weight
+        
+        # Fallback: return a random weight between 1000-31000 kg
+        return random.uniform(1000, 31000)
+    
+    @staticmethod
     def create_tweu(container_id, direction, goods_type="Regular", is_high_cube=False, 
-                  arrival_date=None, departure_date=None, weight=None):
+                  arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a TWEU container (Twenty-foot Equivalent Unit)."""
         # Define stack compatibility based on goods type
         stack_compatibility = "size"  # Can only stack with same size containers
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         return Container(
             container_id=container_id,
@@ -280,9 +330,13 @@ class ContainerFactory:
     
     @staticmethod
     def create_theu(container_id, direction, goods_type="Regular", is_high_cube=False,
-                   arrival_date=None, departure_date=None, weight=None):
+                   arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a THEU container (Thirty-foot Equivalent Unit)."""
         stack_compatibility = "size"  # Can only stack with same size containers
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         return Container(
             container_id=container_id,
@@ -299,9 +353,13 @@ class ContainerFactory:
     
     @staticmethod
     def create_feu(container_id, direction, goods_type="Regular", is_high_cube=False,
-                  arrival_date=None, departure_date=None, weight=None):
+                  arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a FEU container (Forty-foot Equivalent Unit)."""
         stack_compatibility = "size"  # Can only stack with same size containers
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         return Container(
             container_id=container_id,
@@ -318,9 +376,13 @@ class ContainerFactory:
     
     @staticmethod
     def create_ffeu(container_id, direction, goods_type="Regular", is_high_cube=False,
-                   arrival_date=None, departure_date=None, weight=None):
+                   arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a FFEU container (Forty-five-foot Equivalent Unit)."""
         stack_compatibility = "size"  # Can only stack with same size containers
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         return Container(
             container_id=container_id,
@@ -336,8 +398,12 @@ class ContainerFactory:
         )
     
     @staticmethod
-    def create_trailer(container_id, goods_type="Regular", arrival_date=None, departure_date=None):
+    def create_trailer(container_id, goods_type="Regular", arrival_date=None, 
+                      departure_date=None, config=None):
         """Create a Trailer container (non-stackable, Row E storage only)."""
+        # Sample weight if needed
+        weight = ContainerFactory.sample_container_weight(config)
+        
         return Container(
             container_id=container_id,
             direction="Export",  # Trailers are typically for export
@@ -348,12 +414,17 @@ class ContainerFactory:
             arrival_date=arrival_date,
             departure_date=departure_date,
             height=4.0,  # Approximate height
-            width=2.55   # Slightly wider than standard containers
+            width=2.55,  # Slightly wider than standard containers
+            weight=weight
         )
     
     @staticmethod
-    def create_swap_body(container_id, goods_type="Regular", arrival_date=None, departure_date=None):
+    def create_swap_body(container_id, goods_type="Regular", arrival_date=None, 
+                        departure_date=None, config=None):
         """Create a Swap Body container (stackable only as single unit)."""
+        # Sample weight if needed
+        weight = ContainerFactory.sample_container_weight(config)
+        
         return Container(
             container_id=container_id,
             direction="Export",  # Swap bodies are typically for export
@@ -365,16 +436,21 @@ class ContainerFactory:
             departure_date=departure_date,
             height=2.67,  # Typical height
             length=7.45,  # Typical length
-            width=2.55   # Typical width
+            width=2.55,   # Typical width
+            weight=weight
         )
     
     @staticmethod
     def create_reefer(container_id, container_type="TWEU", direction="Import",
-                     arrival_date=None, departure_date=None, weight=None):
+                     arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a Reefer container (temperature-controlled, needs electricity)."""
         # Validate container type
         if container_type not in ["TWEU", "THEU", "FEU", "FFEU"]:
             raise ValueError("Container type for reefer must be TWEU, THEU, FEU, or FFEU")
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         return Container(
             container_id=container_id,
@@ -390,11 +466,15 @@ class ContainerFactory:
     
     @staticmethod
     def create_dangerous(container_id, container_type="TWEU", direction="Import",
-                        arrival_date=None, departure_date=None, weight=None):
+                        arrival_date=None, departure_date=None, weight=None, config=None):
         """Create a Dangerous Goods container (needs special storage bays)."""
         # Validate container type
         if container_type not in ["TWEU", "THEU", "FEU", "FFEU", "Trailer", "Swap Body"]:
             raise ValueError("Container type must be a valid type")
+        
+        # Sample weight if not provided
+        if weight is None:
+            weight = ContainerFactory.sample_container_weight(config)
             
         # In our data, trailers have higher percentage of dangerous goods
         if container_type == "Trailer":
@@ -417,14 +497,157 @@ class ContainerFactory:
         )
     
     @staticmethod
-    def create_random(container_id=None):
-        """Create a random container for simulation purposes."""
+    def create_random(container_id=None, config=None):
+        """
+        Create a random container based on probability distributions.
+        
+        Args:
+            container_id: Optional container ID
+            config: TerminalConfig object with probability distributions
+            
+        Returns:
+            A Container object
+        """
         # Generate random container ID if not provided
         container_id = container_id or f"CONT{random.randint(100000, 999999)}"
         
-        # Random container properties
+        # Random container direction
         direction = random.choice(["Import", "Export"])
         
+        # If no config provided, use legacy implementation
+        if config is None:
+            return ContainerFactory._create_random_default(container_id, direction)
+        
+        # Get container probabilities from config
+        probs = config.get_container_type_probabilities()
+        
+        # Select container length/type based on probabilities
+        length_probs = probs["length"]
+        length_types = list(length_probs.keys())
+        length_weights = [length_probs[lt]["probability"] for lt in length_types]
+        
+        selected_length = random.choices(length_types, weights=length_weights)[0]
+        
+        # Sample weight
+        weight = ContainerFactory.sample_container_weight(config)
+        
+        # Handle trailer and swap body separately
+        if selected_length == "trailer":
+            container = ContainerFactory.create_trailer(
+                container_id, 
+                "Regular", 
+                datetime.now(), 
+                None,
+                config
+            )
+            return container
+        elif selected_length == "swap body":
+            container = ContainerFactory.create_swap_body(
+                container_id, 
+                "Regular", 
+                datetime.now(), 
+                None,
+                config
+            )
+            return container
+        
+        # For standard containers, determine high cube, reefer, and dangerous goods status
+        length_type_props = length_probs[selected_length]
+        
+        # Check for high cube
+        is_high_cube = random.random() < length_type_props.get("probability_high_cube", 0)
+        
+        # Determine goods type (reefer, dangerous, or regular)
+        goods_type_rand = random.random()
+        reefer_prob = length_type_props.get("probability_reefer", 0)
+        dg_prob = length_type_props.get("probability_dangerous_goods", 0)
+        
+        if goods_type_rand < reefer_prob:
+            goods_type = "Reefer"
+        elif goods_type_rand < (reefer_prob + dg_prob):
+            goods_type = "Dangerous"
+        else:
+            goods_type = "Regular"
+            
+        # Map length to container type
+        length_to_type = {
+            "20": "TWEU",
+            "30": "THEU",
+            "40": "FEU"
+        }
+        
+        container_type = length_to_type.get(selected_length, "TWEU")
+        
+        # Create container based on determined attributes
+        if goods_type == "Reefer":
+            return ContainerFactory.create_reefer(
+                container_id, 
+                container_type, 
+                direction,
+                datetime.now(), 
+                None, 
+                weight,
+                config
+            )
+        elif goods_type == "Dangerous":
+            return ContainerFactory.create_dangerous(
+                container_id, 
+                container_type, 
+                direction,
+                datetime.now(), 
+                None, 
+                weight,
+                config
+            )
+        else:
+            if container_type == "TWEU":
+                return ContainerFactory.create_tweu(
+                    container_id, 
+                    direction, 
+                    "Regular", 
+                    is_high_cube,
+                    datetime.now(), 
+                    None, 
+                    weight,
+                    config
+                )
+            elif container_type == "THEU":
+                return ContainerFactory.create_theu(
+                    container_id, 
+                    direction, 
+                    "Regular", 
+                    is_high_cube,
+                    datetime.now(), 
+                    None, 
+                    weight,
+                    config
+                )
+            elif container_type == "FEU":
+                return ContainerFactory.create_feu(
+                    container_id, 
+                    direction, 
+                    "Regular", 
+                    is_high_cube,
+                    datetime.now(), 
+                    None, 
+                    weight,
+                    config
+                )
+            else:  # Default fallback
+                return ContainerFactory.create_tweu(
+                    container_id, 
+                    direction, 
+                    "Regular", 
+                    is_high_cube,
+                    datetime.now(), 
+                    None, 
+                    weight,
+                    config
+                )
+
+    @staticmethod
+    def _create_random_default(container_id, direction):
+        """Legacy method for random container creation without config."""
         # Container type distribution based on the provided data
         container_types = ["FEU", "Swap Body", "TWEU", "Trailer", "THEU", "FFEU"]
         container_type_weights = [0.532, 0.256, 0.180, 0.032, 0.014, 0.011]
@@ -469,129 +692,85 @@ class ContainerFactory:
         stay_duration = random.randint(3, 15)  # 3 to 15 days stay
         departure_date = arrival_date + timedelta(days=stay_duration)
         
-        # Random weight based on container type
-        if container_type == "TWEU":
-            base_weight = 18000
-        elif container_type == "THEU":
-            base_weight = 22000
-        elif container_type == "FEU":
-            base_weight = 25000
-        elif container_type == "FFEU":
-            base_weight = 27000
-        elif container_type == "Trailer":
-            base_weight = 15000
-        else:  # Swap Body
-            base_weight = 12000
-            
-        weight_variation = random.uniform(0.8, 1.2)
-        weight = base_weight * weight_variation
+        # Sample weight using the new method, but without config
+        weight = ContainerFactory.sample_container_weight(None)
         
-        # Use appropriate factory method based on container type and goods type
+        # Use the appropriate factory method
         if goods_type == "Dangerous":
-            return ContainerFactory.create_dangerous(container_id, container_type, direction,
-                                                arrival_date, departure_date, weight)
+            return ContainerFactory.create_dangerous(
+                container_id, 
+                container_type, 
+                direction,
+                arrival_date, 
+                departure_date, 
+                weight
+            )
         elif goods_type == "Reefer":
-            # This will only execute for container types that can be reefers (TWEU, THEU, FEU, FFEU)
-            return ContainerFactory.create_reefer(container_id, container_type, direction, 
-                                             arrival_date, departure_date, weight)
+            return ContainerFactory.create_reefer(
+                container_id, 
+                container_type, 
+                direction, 
+                arrival_date, 
+                departure_date, 
+                weight
+            )
         elif container_type == "Trailer":
-            return ContainerFactory.create_trailer(container_id, "Regular", 
-                                              arrival_date, departure_date)
+            trailer = ContainerFactory.create_trailer(
+                container_id, 
+                "Regular", 
+                arrival_date, 
+                departure_date
+            )
+            # Set weight since create_trailer doesn't have a weight parameter in the original version
+            trailer.weight = weight
+            return trailer
         elif container_type == "Swap Body":
-            return ContainerFactory.create_swap_body(container_id, "Regular", 
-                                                arrival_date, departure_date)
+            swap_body = ContainerFactory.create_swap_body(
+                container_id, 
+                "Regular", 
+                arrival_date, 
+                departure_date
+            )
+            # Set weight since create_swap_body doesn't have a weight parameter in the original version
+            swap_body.weight = weight
+            return swap_body
         elif container_type == "TWEU":
-            return ContainerFactory.create_tweu(container_id, direction, "Regular", is_high_cube,
-                                          arrival_date, departure_date, weight)
+            return ContainerFactory.create_tweu(
+                container_id, 
+                direction, 
+                "Regular", 
+                is_high_cube,
+                arrival_date, 
+                departure_date, 
+                weight
+            )
         elif container_type == "THEU":
-            return ContainerFactory.create_theu(container_id, direction, "Regular", is_high_cube,
-                                           arrival_date, departure_date, weight)
+            return ContainerFactory.create_theu(
+                container_id, 
+                direction, 
+                "Regular", 
+                is_high_cube,
+                arrival_date, 
+                departure_date, 
+                weight
+            )
         elif container_type == "FEU":
-            return ContainerFactory.create_feu(container_id, direction, "Regular", is_high_cube,
-                                          arrival_date, departure_date, weight)
+            return ContainerFactory.create_feu(
+                container_id, 
+                direction, 
+                "Regular", 
+                is_high_cube,
+                arrival_date, 
+                departure_date, 
+                weight
+            )
         else:  # FFEU
-            return ContainerFactory.create_ffeu(container_id, direction, "Regular", is_high_cube,
-                                           arrival_date, departure_date, weight)
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create different container examples
-    tweu = ContainerFactory.create_tweu("TWEU123456", "Import")
-    theu = ContainerFactory.create_theu("THEU234567", "Export")
-    feu = ContainerFactory.create_feu("FEU789012", "Export", is_high_cube=True)
-    ffeu = ContainerFactory.create_ffeu("FFEU567890", "Import")
-    reefer = ContainerFactory.create_reefer("REF345678", "TWEU", "Import")
-    dangerous = ContainerFactory.create_dangerous("DNG901234", "FEU", "Export")
-    trailer = ContainerFactory.create_trailer("TRL567890")
-    dangerous_trailer = ContainerFactory.create_dangerous("DTR123456", "Trailer", "Export")
-    swap_body = ContainerFactory.create_swap_body("SWP123789")
-    
-    # Print container information
-    containers = [tweu, theu, feu, ffeu, reefer, dangerous, trailer, dangerous_trailer, swap_body]
-    for container in containers:
-        print(f"\n{container}")
-        print(f"  Dimensions: {container.length}m x {container.width}m x {container.height}m")
-        print(f"  Weight: {container.weight}kg")
-        print(f"  Stackable: {container.is_stackable} (compatibility: {container.stack_compatibility})")
-        print(f"  Priority: {container.priority}")
-        
-    # Test stacking compatibility
-    print("\nStacking compatibility test:")
-    print(f"Can TWEU stack on TWEU? {tweu.can_stack_with(tweu)}")
-    print(f"Can TWEU stack on FEU? {tweu.can_stack_with(feu)}")
-    print(f"Can THEU stack on THEU? {theu.can_stack_with(theu)}")
-    print(f"Can Reefer stack on Regular TWEU? {reefer.can_stack_with(tweu)}")
-    print(f"Can Regular stack on Reefer? {tweu.can_stack_with(reefer)}")
-    print(f"Can Dangerous stack on Regular? {dangerous.can_stack_with(feu)}")
-    print(f"Can anything stack on Trailer? {tweu.can_stack_with(trailer)}")
-    print(f"Can same size containers stack? {tweu.can_stack_with(tweu)}")
-    
-    # Create and test random containers
-    print("\nRandom container distribution test:")
-    container_types = {
-        "TWEU": 0,
-        "THEU": 0,
-        "FEU": 0,
-        "FFEU": 0,
-        "Trailer": 0,
-        "Swap Body": 0
-    }
-    
-    goods_types = {
-        "Regular": 0,
-        "Reefer": 0,
-        "Dangerous": 0
-    }
-    
-    # Generate 1000 random containers to verify distribution
-    random_containers = []
-    for i in range(1000):
-        container = ContainerFactory.create_random()
-        random_containers.append(container)
-        container_types[container.container_type] += 1
-        goods_types[container.goods_type] += 1
-    
-    # Print distribution
-    print("\nContainer type distribution:")
-    for container_type, count in container_types.items():
-        print(f"  {container_type}: {count/10:.1f}%")
-    
-    print("\nGoods type distribution:")
-    for goods_type, count in goods_types.items():
-        print(f"  {goods_type}: {count/10:.1f}%")
-    
-    # Check dangerous goods distribution by container type
-    dg_by_container = {container_type: 0 for container_type in container_types}
-    dg_total_by_container = {container_type: 0 for container_type in container_types}
-    
-    for container in random_containers:
-        dg_total_by_container[container.container_type] += 1
-        if container.goods_type == "Dangerous":
-            dg_by_container[container.container_type] += 1
-    
-    print("\nDangerous goods percentage by container type:")
-    for container_type in container_types:
-        if dg_total_by_container[container_type] > 0:
-            percentage = (dg_by_container[container_type] / dg_total_by_container[container_type]) * 100
-            print(f"  {container_type}: {percentage:.2f}%")
+            return ContainerFactory.create_ffeu(
+                container_id, 
+                direction, 
+                "Regular", 
+                is_high_cube,
+                arrival_date, 
+                departure_date, 
+                weight
+            )

@@ -155,6 +155,10 @@ class RMGCrane:
         else:
             return None, 0
         
+        # Track the source position in the container for rule enforcement
+        if hasattr(removed_container, '__dict__'):
+            removed_container._source_position = source_position
+
         # Calculate the time required for the move
         time_taken = self.calculate_movement_time(source_position, destination_position, container)
         
@@ -482,13 +486,13 @@ class RMGCrane:
         return source_positions
     
     def _get_destination_positions(self, 
-                                  source_position: str,
-                                  container: Any,
-                                  storage_yard: Any,
-                                  trucks_in_terminal: Dict[str, Any],
-                                  trains_in_terminal: Dict[str, Any]) -> List[str]:
+                                source_position: str,
+                                container: Any,
+                                storage_yard: Any,
+                                trucks_in_terminal: Dict[str, Any],
+                                trains_in_terminal: Dict[str, Any]) -> List[str]:
         """
-        Get all positions where a container can be placed.
+        Get all positions where a container can be placed based on strict movement rules.
         
         Args:
             source_position: Source position of the container
@@ -501,42 +505,86 @@ class RMGCrane:
             List of position strings where the container can be placed
         """
         destinations = []
+        source_type = self._get_position_type(source_position)
         
-        # Storage positions
-        for row in storage_yard.row_names:
-            for bay in range(storage_yard.num_bays):
-                position = f"{row}{bay+1}"
-                if position != source_position and self._is_position_in_crane_area(position):
-                    if storage_yard.can_accept_container(position, container):
-                        destinations.append(position)
+        # Rule 1: Container on train -> can only move to a truck with matching container ID
+        if source_type == 'train':
+            # Only allow moves to trucks with matching pickup container ID
+            for spot, truck in trucks_in_terminal.items():
+                if self._is_position_in_crane_area(spot) and hasattr(truck, 'pickup_container_ids'):
+                    if container.container_id in truck.pickup_container_ids:
+                        if not truck.is_full() and truck.has_space_for_container(container):
+                            destinations.append(spot)
+                            
+            # If no matching truck is available, allow storage based on container type
+            if not destinations:
+                # For swap body/trailer - only nearest row to driving lane
+                if container.container_type in ["Trailer", "Swap Body"]:
+                    # Get the row nearest to driving lane
+                    nearest_row = storage_yard.row_names[0]
+                    
+                    # Only allow storage in this row
+                    for bay in range(storage_yard.num_bays):
+                        position = f"{nearest_row}{bay+1}"
+                        if position != source_position and self._is_position_in_crane_area(position):
+                            if storage_yard.can_accept_container(position, container):
+                                destinations.append(position)
+                else:
+                    # For regular/reefer/dangerous goods containers
+                    for row in storage_yard.row_names:
+                        for bay in range(storage_yard.num_bays):
+                            position = f"{row}{bay+1}"
+                            if position != source_position and self._is_position_in_crane_area(position):
+                                if storage_yard.can_accept_container(position, container):
+                                    destinations.append(position)
         
-        # Truck positions
-        for spot, truck in trucks_in_terminal.items():
-            if spot != source_position and self._is_position_in_crane_area(spot):
-                # Check if this is a pickup truck looking for this container
-                if hasattr(truck, 'pickup_container_ids') and container.container_id in truck.pickup_container_ids:
-                    # Priority destination for pickup
-                    if not truck.is_full() and truck.has_space_for_container(container):
-                        destinations.append(spot)
-                elif hasattr(truck, 'is_pickup_truck') and not truck.is_pickup_truck:
-                    # Delivery truck can receive containers
-                    if not truck.is_full() and truck.has_space_for_container(container):
-                        destinations.append(spot)
-        
-        # Train positions
-        for track, train in trains_in_terminal.items():
-            for i, wagon in enumerate(train.wagons):
-                slot = f"{track.lower()}_{i+1}"
-                if slot != source_position and self._is_position_in_crane_area(slot):
-                    # Check if this wagon has a pickup request for this container
-                    if container.container_id in wagon.pickup_container_ids:
-                        # Priority destination for pickup
-                        if wagon.get_available_length() >= container.length:
+        # Rule 2: Container on truck -> can only move to wagons looking for that container
+        elif source_type == 'truck':
+            # Only allow moves to wagons that have this container in their pickup list
+            for track, train in trains_in_terminal.items():
+                for i, wagon in enumerate(train.wagons):
+                    slot = f"{track.lower()}_{i+1}"
+                    if slot != source_position and self._is_position_in_crane_area(slot):
+                        if container.container_id in wagon.pickup_container_ids:
                             destinations.append(slot)
-                    elif source_position.startswith('p_'):
-                        # Container is from a truck, check if train is accepting deliveries
-                        if wagon.get_available_length() >= container.length:
+                            
+            # If no matching wagon, allow storage
+            if not destinations:
+                for row in storage_yard.row_names:
+                    for bay in range(storage_yard.num_bays):
+                        position = f"{row}{bay+1}"
+                        if position != source_position and self._is_position_in_crane_area(position):
+                            if storage_yard.can_accept_container(position, container):
+                                destinations.append(position)
+        
+        # Rule 3: Container in storage -> allowed to move to assigned truck/train or other storage
+        elif source_type == 'storage':
+            # Check for trucks looking for this container
+            for spot, truck in trucks_in_terminal.items():
+                if spot != source_position and self._is_position_in_crane_area(spot):
+                    if hasattr(truck, 'pickup_container_ids') and container.container_id in truck.pickup_container_ids:
+                        if not truck.is_full() and truck.has_space_for_container(container):
+                            destinations.append(spot)
+            
+            # Check for trains looking for this container
+            for track, train in trains_in_terminal.items():
+                for i, wagon in enumerate(train.wagons):
+                    slot = f"{track.lower()}_{i+1}"
+                    if slot != source_position and self._is_position_in_crane_area(slot):
+                        if container.container_id in wagon.pickup_container_ids:
                             destinations.append(slot)
+            
+            # Allow pre-marshalling within the 5-bay distance limit
+            source_bay = int(source_position[1:]) - 1  # Extract bay number
+            for row in storage_yard.row_names:
+                for bay in range(storage_yard.num_bays):
+                    position = f"{row}{bay+1}"
+                    if position != source_position and self._is_position_in_crane_area(position):
+                        # Check pre-marshalling distance constraint
+                        dest_bay = bay
+                        if abs(source_bay - dest_bay) <= 5:  # Limit to 5 positions
+                            if storage_yard.can_accept_container(position, container):
+                                destinations.append(position)
         
         return destinations
     
@@ -669,13 +717,13 @@ class RMGCrane:
         return None
     
     def _can_place_container(self, 
-                           position: str,
-                           container: Any,
-                           storage_yard: Any,
-                           trucks_in_terminal: Dict[str, Any],
-                           trains_in_terminal: Dict[str, Any]) -> bool:
+                        position: str,
+                        container: Any,
+                        storage_yard: Any,
+                        trucks_in_terminal: Dict[str, Any],
+                        trains_in_terminal: Dict[str, Any]) -> bool:
         """
-        Check if a container can be placed at a position.
+        Check if a container can be placed at a position based on strict rules.
         
         Args:
             position: Position string
@@ -687,25 +735,30 @@ class RMGCrane:
         Returns:
             Boolean indicating if the container can be placed
         """
-        if self._is_storage_position(position):
-            # Check if container can be added to storage
+        # Get the type of the position
+        position_type = self._get_position_type(position)
+        
+        if position_type == 'storage':
+            # Check if container can be added to storage with all constraints
             return storage_yard.can_accept_container(position, container)
             
-        elif self._is_truck_position(position):
+        elif position_type == 'truck':
             # Check if container can be added to truck
             truck = self._get_truck_at_position(position, trucks_in_terminal)
             if truck and hasattr(truck, 'add_container'):
-                # Check if this is a pickup truck looking for this container
+                # Only allow if this truck is specifically looking for this container
                 if hasattr(truck, 'pickup_container_ids') and hasattr(container, 'container_id'):
                     if container.container_id in truck.pickup_container_ids:
                         # Verify truck has space
                         return not truck.is_full() and truck.has_space_for_container(container)
-                elif hasattr(truck, 'is_pickup_truck') and not truck.is_pickup_truck:
-                    # Check if delivery truck has space
+                # Or it's a delivery truck with space (only for containers from storage)
+                elif (hasattr(container, '_source_position') and 
+                    self._is_storage_position(container._source_position) and
+                    not truck.is_pickup_truck):
                     return not truck.is_full() and truck.has_space_for_container(container)
             return False
             
-        elif self._is_train_position(position):
+        elif position_type == 'train':
             # Check if container can be added to train
             train_id, wagon_index = self._parse_train_position(position, trains_in_terminal)
             if train_id and wagon_index is not None:
@@ -713,12 +766,9 @@ class RMGCrane:
                 if train and 0 <= wagon_index < len(train.wagons):
                     wagon = train.wagons[wagon_index]
                     
-                    # Check if wagon is looking for this container
+                    # Only allow if wagon is looking for this specific container
                     if hasattr(container, 'container_id') and container.container_id in wagon.pickup_container_ids:
-                        return True
-                    
-                    # Check if wagon has space
-                    return wagon.get_available_length() >= container.length
+                        return wagon.get_available_length() >= container.length
             return False
             
         return False
