@@ -184,3 +184,9 @@ time_matrix.pkl
 
 # Generated Distribution files
 *.pkl
+
+# Models
+checkpoints/
+checklist
+# Results of different runs
+results/
