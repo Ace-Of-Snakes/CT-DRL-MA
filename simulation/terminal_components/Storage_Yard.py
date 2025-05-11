@@ -21,12 +21,14 @@ class StorageYard:
         yard: 3D dictionary mapping positions to containers
     """
     
+    # Add to the StorageYard class initialization
+
     def __init__(self, 
-                 num_rows: int, 
-                 num_bays: int, 
-                 max_tier_height: int = 5,
-                 row_names: List[str] = None,
-                 special_areas: Dict[str, List[Tuple[str, int, int]]] = None):
+                num_rows: int, 
+                num_bays: int, 
+                max_tier_height: int = 5,
+                row_names: List[str] = None,
+                special_areas: Dict[str, List[Tuple[str, int, int]]] = None):
         """
         Initialize the storage yard.
         
@@ -36,9 +38,10 @@ class StorageYard:
             max_tier_height: Maximum stacking height
             row_names: Names for each row (defaults to A, B, C...)
             special_areas: Dictionary mapping special types to areas
-                           e.g., {'reefer': [('A', 1, 5), ('B', 6, 10)],
-                                  'dangerous': [('F', 1, 10)]}
-                           where each tuple is (row, bay_start, bay_end) inclusive
+                        e.g., {'reefer': [('A', 1, 5)],
+                                'dangerous': [('F', 6, 10)],
+                                'trailer': [('A', 15, 25)],
+                                'swap_body': [('A', 30, 40)]}
         """
         self.num_rows = num_rows
         self.num_bays = num_bays
@@ -50,12 +53,14 @@ class StorageYard:
         else:
             self.row_names = row_names[:num_rows]  # Use provided names up to num_rows
         
-        # Special areas for different container types
+        # Special areas for different container types (including trailer/swap body)
         if special_areas is None:
-            # Default special areas: first 5 bays of row A for reefer, last 5 bays of row F for dangerous
+            # Default special areas
             self.special_areas = {
                 'reefer': [('A', 1, 5)],  # Row A, bays 1-5
-                'dangerous': [('F', 6, 10)]  # Row F, bays 6-10
+                'dangerous': [('F', 6, 10)],  # Row F, bays 6-10
+                'trailer': [('A', 15, 25)],  # Row A, bays 15-25
+                'swap_body': [('A', 30, 40)]  # Row A, bays 30-40
             }
         else:
             self.special_areas = special_areas
@@ -67,12 +72,60 @@ class StorageYard:
         # yard[row][bay][tier] = container
         self.yard = {row: {bay: {} for bay in range(1, num_bays + 1)} for row in self.row_names}
         
-        # Keep track of bay occupancy for each row
+        # Keep track of bay occupancy for each row (using numpy arrays for performance)
         self.bay_occupancy = {row: np.zeros(num_bays + 1, dtype=int) for row in self.row_names}
         
         # Mapping from position string to (row, bay) tuple
         self.position_to_coordinates = {}
         self._build_position_mapping()
+        
+        # Pre-compute special area lookups for faster checking
+        self._precompute_special_areas()
+
+    def _precompute_special_areas(self):
+        """Pre-compute which positions belong to which special areas for quick lookup."""
+        self._special_area_positions = {area_type: set() for area_type in self.special_areas}
+        
+        for area_type, areas in self.special_areas.items():
+            for area_row, start_bay, end_bay in areas:
+                for bay in range(start_bay, end_bay + 1):
+                    position = f"{area_row}{bay}"
+                    self._special_area_positions[area_type].add(position)
+        
+    def is_position_in_special_area(self, position: str, container_type: str) -> bool:
+        """
+        Check if a position is in a special area for a specific container type.
+        
+        Args:
+            position: Position string (e.g., 'A1')
+            container_type: Container type to check (e.g., 'Reefer', 'Dangerous', 'Trailer', 'Swap Body')
+            
+        Returns:
+            Boolean indicating if the position is in a special area for the container type
+        """
+        # Convert container type to lowercase for lookup
+        container_type_lower = container_type.lower()
+        
+        # Use pre-computed positions if available
+        if hasattr(self, '_special_area_positions'):
+            return position in self._special_area_positions.get(container_type_lower, set())
+        
+        # Convert position to row, bay
+        if position not in self.position_to_coordinates:
+            return False
+            
+        row, bay = self.position_to_coordinates[position]
+        
+        # Check if container type has special areas
+        if container_type_lower not in self.special_areas:
+            return False
+            
+        # Check if position is in any of the special areas for this container type
+        for area_row, bay_start, bay_end in self.special_areas[container_type_lower]:
+            if row == area_row and bay_start <= bay <= bay_end:
+                return True
+                
+        return False
     
     def _validate_special_areas(self):
         """Validate that special areas are within the yard boundaries."""

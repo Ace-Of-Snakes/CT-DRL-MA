@@ -1,3 +1,4 @@
+# simulation/terminal_env.py (optimized version)
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -15,23 +16,24 @@ from simulation.terminal_layout.CTSimulator import ContainerTerminal
 from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
+from simulation.terminal_components.TerminalTruck import TerminalTruck  # New class
 from simulation.terminal_components.Storage_Yard import StorageYard
 from simulation.terminal_components.RMGCrane import RMGCrane
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 
 class TerminalEnvironment(gym.Env):
-    """
-    Container Terminal Environment for RL agents.
-    """
+    """Container Terminal Environment for RL agents."""
     metadata = {'render.modes': ['human', 'rgb_array']}
 
+    # Fix for the TerminalEnvironment initialization
     def __init__(self, 
-                 terminal_config_path: str = None,
-                 terminal_config=None,
-                 distance_matrix_path: str = None,
-                 max_simulation_time: float = 86400,  # 24 hours in seconds
-                 num_cranes: int = 2):
+                terminal_config_path: str = None,
+                terminal_config=None,
+                distance_matrix_path: str = None,
+                max_simulation_time: float = 86400,  # 24 hours in seconds
+                num_cranes: int = 2,
+                num_terminal_trucks: int = 3):
         """Initialize the terminal environment."""
         super(TerminalEnvironment, self).__init__()
 
@@ -48,22 +50,41 @@ class TerminalEnvironment(gym.Env):
         if distance_matrix_path and os.path.exists(distance_matrix_path):
             self.terminal.load_distance_matrix(distance_matrix_path)
         
+        # Initialize caches and lookup tables
+        self._position_type_cache = {}  # Cache for position type lookups
+        self._valid_actions_cache = {}  # Cache for valid actions
+        self._action_mask_cache = None  # Cache for action masks
+        self._last_action_mask_time = -1  # Timestamp for action mask cache
+        
+        # Pre-initialize matrix attributes that will be filled later
+        self._storage_positions = np.array([])
+        self._rail_positions = np.array([])
+        self._truck_positions = np.array([])
+        self._storage_pos_to_rowbay = {}
+        
         # Initialize environment components
         self.storage_yard = self._create_storage_yard()
         self.cranes = self._create_cranes(num_cranes)
         self.truck_queue = VehicleQueue(vehicle_type="Truck")
         self.train_queue = VehicleQueue(vehicle_type="Train")
         
+        # Terminal trucks for handling swap bodies and trailers
+        self.terminal_trucks = [TerminalTruck(f"TTR{i+1}") for i in range(num_terminal_trucks)]
+        self.terminal_truck_available_times = np.zeros(num_terminal_trucks)
+        
         # Track current state
         self.current_simulation_time = 0.0
         self.max_simulation_time = max_simulation_time
-        self.crane_available_times = [0.0] * num_cranes
+        self.crane_available_times = np.zeros(num_cranes)
         
         self.trucks_in_terminal = {}
         self.trains_in_terminal = {}
         
-        # Create position mappings
+        # Create position mappings - this needs to happen before precalculate_location_matrices
         self._setup_position_mappings()
+        
+        # Now precalculate location matrices using the position mappings
+        self._precalculate_location_matrices()
         
         # Define action and observation spaces
         self._setup_spaces()
@@ -78,9 +99,193 @@ class TerminalEnvironment(gym.Env):
             base_date=self.base_simulation_date
         )
 
+        # Initialize simplified rendering flag
+        self.simplified_rendering = False
+
         # Initialize the environment state
         self.reset()
-    
+
+
+    def evaluate_need_for_premarshalling(self):
+        """Determine if pre-marshalling is needed based on yard state."""
+        # Get all stacks in yard
+        yard = self.storage_yard
+        
+        # Count problematic stacks (higher priority below lower)
+        problem_stacks = 0
+        total_stacks = 0
+        
+        for row in yard.row_names:
+            for bay in range(1, yard.num_bays + 1):
+                position = f"{row}{bay}"
+                containers = yard.get_containers_at_position(position)
+                
+                if len(containers) > 1:
+                    total_stacks += 1
+                    # Check if priorities are ordered correctly (higher on top)
+                    priorities = [containers[tier].priority for tier in sorted(containers.keys())]
+                    
+                    # Check if priorities are in descending order
+                    if not all(priorities[i] >= priorities[i+1] for i in range(len(priorities)-1)):
+                        problem_stacks += 1
+        
+        # Only allow pre-marshalling if enough problematic stacks exist
+        return problem_stacks > 0
+    def set_vehicle_limits(self, max_trucks=None, max_trains=None):
+        """
+        Set limits on the number of trucks and trains that can be generated per day
+        
+        Args:
+            max_trucks: Maximum number of trucks per day (None for unlimited)
+            max_trains: Maximum number of trains per day (None for unlimited)
+        """
+        self.max_trucks_per_day = max_trucks
+        self.max_trains_per_day = max_trains
+        self.daily_truck_count = 0
+        self.daily_train_count = 0
+        self.last_sim_day = 0
+        
+        # Store original functions if not already saved
+        if not hasattr(self, 'original_schedule_trucks'):
+            self.original_schedule_trucks = self._schedule_trucks_for_existing_containers
+        
+        if not hasattr(self, 'original_schedule_trains'):
+            self.original_schedule_trains = self._schedule_trains
+        
+        # Override with limited versions
+        if max_trucks is not None or max_trains is not None:
+            self._schedule_trucks_for_existing_containers = self._limited_schedule_trucks
+            self._schedule_trains = self._limited_schedule_trains
+        else:
+            # Reset to originals if limits removed
+            self._schedule_trucks_for_existing_containers = self.original_schedule_trucks
+            self._schedule_trains = self.original_schedule_trains
+
+    def _limited_schedule_trucks(self):
+        """Limited version of truck scheduling that respects max_trucks_per_day"""
+        # Check if we've reached the limit
+        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
+            # Calculate what day we're on
+            sim_day = int(self.current_simulation_time / 86400)
+            
+            # Reset counter if it's a new day
+            if sim_day > self.last_sim_day:
+                self.daily_truck_count = 0
+                self.last_sim_day = sim_day
+            
+            # Check if we're at the limit
+            if self.daily_truck_count >= self.max_trucks_per_day:
+                return  # Don't schedule more trucks
+            
+            # Count how many we're going to schedule
+            available_slots = self.max_trucks_per_day - self.daily_truck_count
+        else:
+            available_slots = len(self.stored_container_ids)  # No limit
+        
+        # Call original but limit how many we schedule
+        original_queue_size = self.truck_queue.size()
+        self.original_schedule_trucks()
+        
+        # Count how many were added
+        new_trucks = self.truck_queue.size() - original_queue_size
+        self.daily_truck_count += new_trucks
+        
+        # Remove excess if we went over the limit
+        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
+            excess = self.daily_truck_count - self.max_trucks_per_day
+            if excess > 0:
+                # Remove the excess trucks from the end of the queue
+                for _ in range(excess):
+                    # Find a truck in the queue that hasn't been assigned to the terminal yet
+                    if not self.truck_queue.is_empty():
+                        self.truck_queue.vehicles.queue.pop()
+                self.daily_truck_count = self.max_trucks_per_day
+
+    def _limited_schedule_trains(self):
+        """Limited version of train scheduling that respects max_trains_per_day"""
+        # Similar implementation to _limited_schedule_trucks
+        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
+            # Calculate what day we're on
+            sim_day = int(self.current_simulation_time / 86400)
+            
+            # Reset counter if it's a new day
+            if sim_day > self.last_sim_day:
+                self.daily_train_count = 0
+                self.last_sim_day = sim_day
+            
+            # Check if we're at the limit
+            if self.daily_train_count >= self.max_trains_per_day:
+                return  # Don't schedule more trains
+        
+        # Call original implementation
+        original_queue_size = self.train_queue.size()
+        self.original_schedule_trains()
+        
+        # Count how many were added
+        new_trains = self.train_queue.size() - original_queue_size
+        self.daily_train_count += new_trains
+        
+        # Remove excess if we went over the limit
+        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
+            excess = self.daily_train_count - self.max_trains_per_day
+            if excess > 0:
+                # Remove the excess trains from the end of the queue
+                for _ in range(excess):
+                    if not self.train_queue.is_empty():
+                        self.train_queue.vehicles.queue.pop()
+                self.daily_train_count = self.max_trains_per_day
+
+    def set_simplified_rendering(self, simplified=True):
+        """
+        Set simplified rendering mode for faster training.
+        
+        Args:
+            simplified: Whether to use simplified rendering
+        """
+        self.simplified_rendering = simplified
+
+    def _precalculate_location_matrices(self):
+        """Pre-calculate matrices for faster location lookups."""
+        # Create binary matrices for position types
+        num_positions = len(self.position_to_idx)
+        self._storage_positions = np.zeros(num_positions, dtype=bool)
+        self._rail_positions = np.zeros(num_positions, dtype=bool)
+        self._truck_positions = np.zeros(num_positions, dtype=bool)
+        
+        # Fill matrices based on position types
+        for pos, idx in self.position_to_idx.items():
+            if pos[0].isalpha() and pos[1:].isdigit():
+                self._storage_positions[idx] = True
+            elif pos.startswith('t') and '_' in pos:
+                self._rail_positions[idx] = True
+            elif pos.startswith('p_'):
+                self._truck_positions[idx] = True
+        
+        # Create a map from positions to rows/bays for storage positions
+        self._storage_pos_to_rowbay = {}
+        
+        # Extract row and bay number for each storage position
+        for row in self.terminal.storage_row_names:
+            for bay in range(1, self.terminal.num_storage_slots_per_row + 1):
+                position = f"{row}{bay}"
+                if position in self.position_to_idx:
+                    self._storage_pos_to_rowbay[position] = (row, bay)
+
+    def _is_in_special_area(self, position, area_type):
+        """Check if a position is in a special area like trailer or swap body section."""
+        if not self._is_storage_position(position):
+            return False
+                
+        if position not in self._storage_pos_to_rowbay:
+            return False
+                
+        row, bay = self._storage_pos_to_rowbay[position]
+        
+        for area_row, start_bay, end_bay in self.storage_yard.special_areas.get(area_type, []):
+            if row == area_row and start_bay <= bay <= end_bay:
+                return True
+                    
+        return False
     def _load_config(self, config_path):
         """Load terminal configuration."""
         from config import TerminalConfig
@@ -110,17 +315,24 @@ class TerminalEnvironment(gym.Env):
         # Define special areas for different container types
         special_areas = {
             'reefer': [],
-            'dangerous': []
+            'dangerous': [],
+            'trailer': [],        # New section
+            'swap_body': []       # New section
         }
         
         # Add reefer areas in first and last column of each row
         for row in self.terminal.storage_row_names:
             special_areas['reefer'].append((row, 1, 1))
-            special_areas['reefer'].append((row, 58, 58))
+            special_areas['reefer'].append((row, self.terminal.num_storage_slots_per_row, self.terminal.num_storage_slots_per_row))
             
         # Add dangerous goods area in middle columns
         for row in self.terminal.storage_row_names:
             special_areas['dangerous'].append((row, 33, 35))
+        
+        # Add trailer and swap body areas - only in the first row (closest to driving lane)
+        first_row = self.terminal.storage_row_names[0]
+        special_areas['trailer'].append((first_row, 5, 15))
+        special_areas['swap_body'].append((first_row, 20, 30))
         
         return StorageYard(
             num_rows=self.terminal.num_storage_rows,
@@ -169,20 +381,58 @@ class TerminalEnvironment(gym.Env):
             
         # Add parking spots and storage positions
         all_positions.extend(self.parking_spots)
-        all_positions.extend([f"{row}{i+1}" for row in self.terminal.storage_row_names 
-                             for i in range(self.terminal.num_storage_slots_per_row)])
         
+        # Add storage positions
+        storage_positions = [f"{row}{i+1}" for row in self.terminal.storage_row_names 
+                           for i in range(self.terminal.num_storage_slots_per_row)]
+        all_positions.extend(storage_positions)
+        
+        # Create mapping dictionaries (using np.array for faster lookups)
         self.position_to_idx = {pos: i for i, pos in enumerate(all_positions)}
         self.idx_to_position = {i: pos for i, pos in enumerate(all_positions)}
+        
+        # Pre-calculate position types for faster lookups
+        for pos in all_positions:
+            self._position_type_cache[pos] = self._get_position_type_direct(pos)
+    
+    def _precalculate_location_matrices(self):
+        """Pre-calculate matrices for faster location lookups."""
+        # Create binary matrices for position types
+        num_positions = len(self.position_to_idx)
+        self._storage_positions = np.zeros(num_positions, dtype=bool)
+        self._rail_positions = np.zeros(num_positions, dtype=bool)
+        self._truck_positions = np.zeros(num_positions, dtype=bool)
+        
+        # Fill matrices based on position types
+        for pos, idx in self.position_to_idx.items():
+            pos_type = self._position_type_cache[pos]
+            if pos_type == 'storage':
+                self._storage_positions[idx] = True
+            elif pos_type == 'train':
+                self._rail_positions[idx] = True
+            elif pos_type == 'truck':
+                self._truck_positions[idx] = True
+        
+        # Create a map from positions to rows/bays for storage positions
+        self._storage_pos_to_rowbay = {}
+        
+        # Extract row and bay number for each storage position
+        for row in self.terminal.storage_row_names:
+            for bay in range(1, self.terminal.num_storage_slots_per_row + 1):
+                position = f"{row}{bay}"
+                if position in self.position_to_idx:
+                    self._storage_pos_to_rowbay[position] = (row, bay)
     
     def _setup_spaces(self):
         """Set up action and observation spaces."""
         num_positions = len(self.position_to_idx)
         num_cranes = len(self.cranes)
+        num_terminal_trucks = len(self.terminal_trucks)
         
-        # Action space: crane_id, source, destination or truck_idx, parking_spot
+        # Action space: action_type, crane_id, source, destination or truck_idx, parking_spot
+        # Added terminal truck actions
         self.action_space = spaces.Dict({
-            'action_type': spaces.Discrete(2),  # 0: crane movement, 1: truck parking
+            'action_type': spaces.Discrete(3),  # 0: crane movement, 1: truck parking, 2: terminal truck 
             'crane_movement': spaces.MultiDiscrete([
                 num_cranes,        # Crane index
                 num_positions,     # Source position index
@@ -191,10 +441,15 @@ class TerminalEnvironment(gym.Env):
             'truck_parking': spaces.MultiDiscrete([
                 10,                # Max trucks in queue to consider
                 len(self.parking_spots)  # Parking spot index
+            ]),
+            'terminal_truck': spaces.MultiDiscrete([
+                num_terminal_trucks,  # Terminal truck index
+                num_positions,       # Source position index
+                num_positions        # Destination position index
             ])
         })
         
-        # Create an action mask space
+        # Create an action mask space with terminal truck actions
         self.action_mask_space = spaces.Dict({
             'crane_movement': spaces.Box(
                 low=0,
@@ -206,6 +461,12 @@ class TerminalEnvironment(gym.Env):
                 low=0,
                 high=1,
                 shape=(10, len(self.parking_spots)),
+                dtype=np.int8
+            ),
+            'terminal_truck': spaces.Box(
+                low=0,
+                high=1,
+                shape=(num_terminal_trucks, num_positions, num_positions),
                 dtype=np.int8
             )
         })
@@ -222,6 +483,12 @@ class TerminalEnvironment(gym.Env):
                 low=0,
                 high=np.inf,
                 shape=(num_cranes,),
+                dtype=np.float32
+            ),
+            'terminal_truck_available_times': spaces.Box(
+                low=0,
+                high=np.inf,
+                shape=(num_terminal_trucks,),
                 dtype=np.float32
             ),
             'current_time': spaces.Box(
@@ -264,7 +531,8 @@ class TerminalEnvironment(gym.Env):
         self.stored_container_ids = []
         self.current_simulation_time = 0.0
         self.current_simulation_datetime = self.base_simulation_date
-        self.crane_available_times = [0.0] * len(self.cranes)
+        self.crane_available_times = np.zeros(len(self.cranes))
+        self.terminal_truck_available_times = np.zeros(len(self.terminal_trucks))
         
         # Clear terminal state
         self.trucks_in_terminal = {}
@@ -277,6 +545,15 @@ class TerminalEnvironment(gym.Env):
         for i, crane in enumerate(self.cranes):
             start_bay = i * (self.terminal.num_storage_slots_per_row // len(self.cranes))
             crane.reset(position=(start_bay, 0))
+        
+        # Reset terminal trucks
+        for truck in self.terminal_trucks:
+            truck.containers = []
+        
+        # Clear caches
+        self._valid_actions_cache = {}
+        self._action_mask_cache = None
+        self._last_action_mask_time = -1
         
         # Initialize with some random containers in the storage yard
         self._initialize_storage_yard()
@@ -309,8 +586,6 @@ class TerminalEnvironment(gym.Env):
                 if len(valid_actions) > 0:
                     valid_idx = np.random.randint(0, len(valid_actions))
                     crane_idx, source_idx, destination_idx = valid_actions[valid_idx]
-                    print(f"Warning: Invalid crane action replaced with valid action: "
-                         f"Crane {crane_idx+1}: {self.idx_to_position[source_idx]} → {self.idx_to_position[destination_idx]}")
                 else:
                     # No valid crane actions - wait until next time
                     observation = current_obs
@@ -333,8 +608,6 @@ class TerminalEnvironment(gym.Env):
                 if len(valid_actions) > 0:
                     valid_idx = np.random.randint(0, len(valid_actions))
                     truck_idx, parking_spot_idx = valid_actions[valid_idx]
-                    print(f"Warning: Invalid truck parking action replaced with valid action: "
-                         f"Truck {truck_idx} → Parking spot {self.parking_spots[parking_spot_idx]}")
                 else:
                     # No valid truck parking actions - wait until next time
                     observation = current_obs
@@ -346,6 +619,150 @@ class TerminalEnvironment(gym.Env):
             
             # Execute truck parking action
             return self._execute_truck_parking(truck_idx, parking_spot_idx)
+            
+        elif action_type == 2:  # Terminal truck action
+            truck_idx, source_idx, destination_idx = action['terminal_truck']
+            
+            # Check if the terminal truck action is valid
+            if current_obs['action_mask']['terminal_truck'][truck_idx, source_idx, destination_idx] == 0:
+                # Try to find a valid action instead
+                valid_actions = np.argwhere(current_obs['action_mask']['terminal_truck'] == 1)
+                if len(valid_actions) > 0:
+                    valid_idx = np.random.randint(0, len(valid_actions))
+                    truck_idx, source_idx, destination_idx = valid_actions[valid_idx]
+                else:
+                    # No valid terminal truck actions - wait until next time
+                    observation = current_obs
+                    reward = 0
+                    terminated = self.current_simulation_time >= self.max_simulation_time
+                    truncated = False
+                    info = {"action": "wait", "reason": "No valid terminal truck actions available"}
+                    return observation, reward, terminated, truncated, info
+            
+            # Execute terminal truck action
+            return self._execute_terminal_truck_movement(truck_idx, source_idx, destination_idx)
+
+    def _execute_terminal_truck_movement(self, truck_idx, source_idx, destination_idx):
+        """Execute a terminal truck movement action."""
+        source_position = self.idx_to_position[source_idx]
+        destination_position = self.idx_to_position[destination_idx]
+        
+        # Check if the selected terminal truck is available
+        if self.current_simulation_time < self.terminal_truck_available_times[truck_idx]:
+            # Truck is not available yet - skip to when it becomes available
+            time_advanced = self.terminal_truck_available_times[truck_idx] - self.current_simulation_time
+            self.current_simulation_time = self.terminal_truck_available_times[truck_idx]
+            
+            # Process time advancement
+            self._process_time_advancement(time_advanced)
+            
+            # Return observation with no reward (waiting is neutral)
+            observation = self._get_observation()
+            reward = 0
+            terminated = self.current_simulation_time >= self.max_simulation_time
+            truncated = False
+            info = {"action": "wait", "time_advanced": time_advanced}
+            return observation, reward, terminated, truncated, info
+        
+        # Get terminal truck and source container
+        terminal_truck = self.terminal_trucks[truck_idx]
+        container = self._get_container_at_position(source_position)
+        
+        # Only allow terminal trucks to move swap bodies and trailers
+        if container is None or container.container_type not in ["Trailer", "Swap Body"]:
+            observation = self._get_observation()
+            reward = -1  # Penalty for invalid container type
+            terminated = self.current_simulation_time >= self.max_simulation_time
+            truncated = False
+            info = {"action": "terminal_truck", "result": "invalid_container_type"}
+            return observation, reward, terminated, truncated, info
+        
+        # Calculate time needed for the movement (faster than crane)
+        # Simple distance-based calculation
+        source_pos = self.terminal.positions.get(source_position, (0, 0))
+        dest_pos = self.terminal.positions.get(destination_position, (0, 0))
+        distance = np.sqrt(np.sum((np.array(source_pos) - np.array(dest_pos))**2))
+        
+        # Terminal trucks move at 25 km/h = ~7 m/s
+        terminal_truck_speed = 7.0  # m/s
+        time_taken = max(60, distance / terminal_truck_speed + 120)  # At least 1 minute, plus 2 minutes for loading/unloading
+        
+        # Remove container from source position
+        if self._is_storage_position(source_position):
+            removed_container = self.storage_yard.remove_container(source_position)
+        else:
+            removed_container = None  # Not implemented for other source types
+        
+        # Place container at destination (only storage positions supported)
+        success = False
+        if removed_container is not None and self._is_storage_position(destination_position):
+            success = self.storage_yard.add_container(destination_position, removed_container)
+        
+        # Calculate reward (higher for freeing up trailer/swap body spots)
+        if success:
+            # Check if we freed up a valuable spot
+            is_trailer_area = self._is_in_special_area(source_position, 'trailer')
+            is_swap_body_area = self._is_in_special_area(source_position, 'swap_body')
+            
+            if is_trailer_area or is_swap_body_area:
+                # Higher reward for freeing up specialized areas
+                reward = 5.0  # Significant bonus
+            else:
+                # Lower reward for regular moves
+                reward = 2.0
+        else:
+            # Failed to move container
+            reward = -2.0
+            # Put container back
+            if removed_container is not None:
+                self.storage_yard.add_container(source_position, removed_container)
+        
+        # Update terminal truck availability time
+        self.terminal_truck_available_times[truck_idx] = self.current_simulation_time + time_taken
+        
+        # Check if any trucks are still available
+        if not any(t <= self.current_simulation_time for t in self.terminal_truck_available_times):
+            # All terminal trucks busy, advance to earliest available
+            next_available_time = min(self.terminal_truck_available_times)
+            time_advanced = next_available_time - self.current_simulation_time
+            self.current_simulation_time = next_available_time
+            
+            # Process time advancement
+            self._process_time_advancement(time_advanced)
+        
+        # Get the next observation
+        observation = self._get_observation()
+        
+        # Check if the episode is over
+        terminated = self.current_simulation_time >= self.max_simulation_time
+        truncated = False
+        
+        # Additional info
+        info = {
+            "action_type": "terminal_truck",
+            "time_taken": time_taken,
+            "container_moved": removed_container.container_id if removed_container else None,
+            "success": success,
+            "current_time": self.current_simulation_time
+        }
+        
+        return observation, reward, terminated, truncated, info
+    
+    def _is_in_special_area(self, position, area_type):
+        """Check if a position is in a special area like trailer or swap body section."""
+        if not self._is_storage_position(position):
+            return False
+            
+        if position not in self._storage_pos_to_rowbay:
+            return False
+            
+        row, bay = self._storage_pos_to_rowbay[position]
+        
+        for area_row, start_bay, end_bay in self.storage_yard.special_areas.get(area_type, []):
+            if row == area_row and start_bay <= bay <= end_bay:
+                return True
+                
+        return False
 
     def _initialize_storage_yard(self):
         """Initialize the storage yard with random containers."""
@@ -381,7 +798,12 @@ class TerminalEnvironment(gym.Env):
             
             # Respect trailer/swap body placement constraint
             if container.container_type in ["Trailer", "Swap Body"]:
-                if row != self.terminal.storage_row_names[0]:
+                # Check if this is a valid area for trailer/swap body
+                if container.container_type == "Trailer" and not self._is_in_special_area(position, 'trailer'):
+                    container = ContainerFactory.create_random(config=self.config)
+                    if container.container_type in ["Trailer", "Swap Body"]:
+                        continue
+                elif container.container_type == "Swap Body" and not self._is_in_special_area(position, 'swap_body'):
                     container = ContainerFactory.create_random(config=self.config)
                     if container.container_type in ["Trailer", "Swap Body"]:
                         continue
@@ -492,17 +914,13 @@ class TerminalEnvironment(gym.Env):
         self.crane_available_times[crane_idx] = self.current_simulation_time + time_taken
         
         # Check if any crane is still available at the current time
-        if any(t <= self.current_simulation_time for t in self.crane_available_times):
-            # Some cranes still available, don't advance time
-            time_advanced = 0.0
-        else:
+        if not np.any(self.crane_available_times <= self.current_simulation_time):
             # All cranes busy, advance to earliest available
-            next_available_time = min(self.crane_available_times)
+            next_available_time = np.min(self.crane_available_times)
             time_advanced = next_available_time - self.current_simulation_time
             self.current_simulation_time = next_available_time
-        
-        # Process time advancement if needed
-        if time_advanced > 0:
+            
+            # Process time advancement
             self._process_time_advancement(time_advanced)
         
         # Get the next observation
@@ -512,11 +930,6 @@ class TerminalEnvironment(gym.Env):
         terminated = self.current_simulation_time >= self.max_simulation_time
         truncated = False
         
-        # Track last action for rendering
-        self.last_action = f"Crane {crane_idx+1}: {source_position} → {destination_position}"
-        if container:
-            self.last_action += f" - Container: {container.container_id}"
-        
         # Additional info
         info = {
             "action_type": "crane_movement",
@@ -525,8 +938,7 @@ class TerminalEnvironment(gym.Env):
             "crane_position": crane.current_position,
             "trucks_waiting": self.truck_queue.size(),
             "trains_waiting": self.train_queue.size(),
-            "current_time": self.current_simulation_time,
-            "valid_action": True
+            "current_time": self.current_simulation_time
         }
         
         return observation, reward, terminated, truncated, info
@@ -583,9 +995,6 @@ class TerminalEnvironment(gym.Env):
         terminated = self.current_simulation_time >= self.max_simulation_time
         truncated = False
         
-        # Track last action for rendering
-        self.last_action = f"Truck {truck.truck_id} → Parking {parking_spot}"
-        
         # Additional info
         info = {
             "action_type": "truck_parking",
@@ -594,8 +1003,7 @@ class TerminalEnvironment(gym.Env):
             "parking_spot": parking_spot,
             "trucks_waiting": self.truck_queue.size(),
             "trains_waiting": self.train_queue.size(),
-            "current_time": self.current_simulation_time,
-            "valid_action": True
+            "current_time": self.current_simulation_time
         }
         
         return observation, reward, terminated, truncated, info
@@ -692,7 +1100,7 @@ class TerminalEnvironment(gym.Env):
     
     def _calculate_reward(self, container, source_position, destination_position, time_taken):
         """Calculate the reward for moving a container."""
-        reward = 2.0  # Base reward
+        reward = 0.0  # Base reward
         
         # Get source and destination information
         source_type = self._get_position_type(source_position)
@@ -709,27 +1117,20 @@ class TerminalEnvironment(gym.Env):
         
         # Empty crane movement penalty
         if container is None:
-            empty_move_penalty = -1.0
+            empty_move_penalty = -5.0
             distance_time_penalty = -0.05 * distance - time_taken / 60.0
-            
-            print(f"Empty move: base={empty_move_penalty}, distance={distance:.2f}m, time={time_taken:.2f}s")
-            print(f"Distance-time penalty: {distance_time_penalty:.2f}")
-            
             return empty_move_penalty + distance_time_penalty
         
         # Determine the reward based on move type
         if source_type == 'train' and dest_type == 'truck':
             # GOLDEN MOVE: DIRECT TRAIN TO TRUCK
-            move_type_reward = 30.0
-            print(f"Golden move (train→truck): +{move_type_reward:.2f}")
+            move_type_reward = 10.0
         elif source_type == 'truck' and dest_type == 'train':
             # GOLDEN MOVE: DIRECT TRUCK TO TRAIN
-            move_type_reward = 30.0
-            print(f"Golden move (truck→train): +{move_type_reward:.2f}")
+            move_type_reward = 10.0
         elif source_type == 'storage' and (dest_type == 'truck' or dest_type == 'train'):
             # GOOD MOVE: STORAGE TO TRUCK OR TRAIN
-            move_type_reward = 15.0
-            print(f"Good move (storage→{dest_type}): +{move_type_reward:.2f}")
+            move_type_reward = 3.0
             
             # DEADLINE BONUS: Container moved before deadline
             if hasattr(container, 'departure_date') and container.departure_date:
@@ -739,19 +1140,15 @@ class TerminalEnvironment(gym.Env):
                     time_factor = min(1.0, 24*3600 / max(3600, time_until_deadline))
                     deadline_bonus = 5.0 * time_factor
                     move_type_reward += deadline_bonus
-                    print(f"Deadline bonus: +{deadline_bonus:.2f} (due in {time_until_deadline/3600:.1f}h)")
         elif (source_type == 'train' or source_type == 'truck') and dest_type == 'storage':
             # STANDARD MOVES: TRAIN/TRUCK TO STORAGE
-            move_type_reward = 5.0
-            print(f"Standard move ({source_type}→storage): +{move_type_reward:.2f}")
+            move_type_reward = 2.0
         elif source_type == 'storage' and dest_type == 'storage':
             # RESHUFFLING: STORAGE TO STORAGE
-            move_type_reward = -0.5
-            print(f"Reshuffling penalty: {move_type_reward:.2f}")
+            move_type_reward = -4.0
         elif source_type == 'truck' and dest_type == 'parking':
             # TRUCK PARKING: ASSIGN TRUCK TO SPOT
-            move_type_reward = 6.0
-            print(f"Truck parking assignment: +{move_type_reward:.2f}")
+            move_type_reward = 2.0
         
         # Add the move type reward
         reward += move_type_reward
@@ -763,14 +1160,12 @@ class TerminalEnvironment(gym.Env):
                 past_deadline_hours = time_past_deadline / 3600
                 deadline_penalty = -min(10.0, past_deadline_hours * 0.5)  # Cap at -10
                 reward += deadline_penalty
-                print(f"Past deadline penalty: {deadline_penalty:.2f} ({past_deadline_hours:.1f}h late)")
         
         # PRIORITY BONUS: Based on container priority
         if hasattr(container, 'priority'):
             priority_factor = max(0, (100 - container.priority) / 100)
             priority_bonus = priority_factor * 2.0
             reward += priority_bonus
-            print(f"Priority bonus: +{priority_bonus:.2f} (priority {container.priority})")
         
         # DISTANCE AND TIME PENALTY
         distance_penalty = -0.02 * distance  # -0.02 per meter
@@ -778,118 +1173,20 @@ class TerminalEnvironment(gym.Env):
         distance_time_penalty = distance_penalty + time_penalty
         reward += distance_time_penalty
         
-        print(f"Distance-time penalty: {distance_time_penalty:.2f} (dist={distance:.1f}m, time={time_taken:.1f}s)")
+        # Special bonus for moving swap bodies and trailers
+        if container and container.container_type in ["Trailer", "Swap Body"]:
+            # Check if moved to appropriate area
+            if dest_type == 'storage':
+                if container.container_type == "Trailer" and self._is_in_special_area(destination_position, 'trailer'):
+                    reward += 2.0  # Bonus for placing trailer in correct area
+                elif container.container_type == "Swap Body" and self._is_in_special_area(destination_position, 'swap_body'):
+                    reward += 2.0  # Bonus for placing swap body in correct area
+            
+            # Bonus for handling these special containers
+            reward += 1.0
         
-        # Final reward
-        final_reward = round(reward, 2)
-        print(f"Total reward: {final_reward:.2f}")
-        
-        return final_reward
-    # Add these to the TerminalEnvironment class
+        return reward
 
-    def set_vehicle_limits(self, max_trucks=None, max_trains=None):
-        """
-        Set limits on the number of trucks and trains that can be generated per day
-        
-        Args:
-            max_trucks: Maximum number of trucks per day (None for unlimited)
-            max_trains: Maximum number of trains per day (None for unlimited)
-        """
-        self.max_trucks_per_day = max_trucks
-        self.max_trains_per_day = max_trains
-        self.daily_truck_count = 0
-        self.daily_train_count = 0
-        self.last_sim_day = 0
-        
-        # Store original functions if not already saved
-        if not hasattr(self, 'original_schedule_trucks'):
-            self.original_schedule_trucks = self._schedule_trucks_for_existing_containers
-        
-        if not hasattr(self, 'original_schedule_trains'):
-            self.original_schedule_trains = self._schedule_trains
-        
-        # Override with limited versions
-        if max_trucks is not None or max_trains is not None:
-            self._schedule_trucks_for_existing_containers = self._limited_schedule_trucks
-            self._schedule_trains = self._limited_schedule_trains
-        else:
-            # Reset to originals if limits removed
-            self._schedule_trucks_for_existing_containers = self.original_schedule_trucks
-            self._schedule_trains = self.original_schedule_trains
-
-    def _limited_schedule_trucks(self):
-        """Limited version of truck scheduling that respects max_trucks_per_day"""
-        # Check if we've reached the limit
-        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
-            # Calculate what day we're on
-            sim_day = int(self.current_simulation_time / 86400)
-            
-            # Reset counter if it's a new day
-            if sim_day > self.last_sim_day:
-                self.daily_truck_count = 0
-                self.last_sim_day = sim_day
-            
-            # Check if we're at the limit
-            if self.daily_truck_count >= self.max_trucks_per_day:
-                return  # Don't schedule more trucks
-            
-            # Count how many we're going to schedule
-            available_slots = self.max_trucks_per_day - self.daily_truck_count
-        else:
-            available_slots = len(self.stored_container_ids)  # No limit
-        
-        # Call original but limit how many we schedule
-        original_queue_size = self.truck_queue.size()
-        self.original_schedule_trucks()
-        
-        # Count how many were added
-        new_trucks = self.truck_queue.size() - original_queue_size
-        self.daily_truck_count += new_trucks
-        
-        # Remove excess if we went over the limit
-        if hasattr(self, 'max_trucks_per_day') and self.max_trucks_per_day is not None:
-            excess = self.daily_truck_count - self.max_trucks_per_day
-            if excess > 0:
-                # Remove the excess trucks from the end of the queue
-                for _ in range(excess):
-                    # Find a truck in the queue that hasn't been assigned to the terminal yet
-                    if not self.truck_queue.is_empty():
-                        self.truck_queue.vehicles.queue.pop()
-                self.daily_truck_count = self.max_trucks_per_day
-
-    def _limited_schedule_trains(self):
-        """Limited version of train scheduling that respects max_trains_per_day"""
-        # Similar implementation to _limited_schedule_trucks
-        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
-            # Calculate what day we're on
-            sim_day = int(self.current_simulation_time / 86400)
-            
-            # Reset counter if it's a new day
-            if sim_day > self.last_sim_day:
-                self.daily_train_count = 0
-                self.last_sim_day = sim_day
-            
-            # Check if we're at the limit
-            if self.daily_train_count >= self.max_trains_per_day:
-                return  # Don't schedule more trains
-        
-        # Call original implementation
-        original_queue_size = self.train_queue.size()
-        self.original_schedule_trains()
-        
-        # Count how many were added
-        new_trains = self.train_queue.size() - original_queue_size
-        self.daily_train_count += new_trains
-        
-        # Remove excess if we went over the limit
-        if hasattr(self, 'max_trains_per_day') and self.max_trains_per_day is not None:
-            excess = self.daily_train_count - self.max_trains_per_day
-            if excess > 0:
-                # Remove the excess trains from the end of the queue
-                for _ in range(excess):
-                    if not self.train_queue.is_empty():
-                        self.train_queue.vehicles.queue.pop()
-                self.daily_train_count = self.max_trains_per_day
     def _process_time_advancement(self, time_advanced):
         """Process events that occur during time advancement."""
         # Update current simulation datetime
@@ -900,6 +1197,9 @@ class TerminalEnvironment(gym.Env):
         
         # Process vehicle departures
         self._process_vehicle_departures()
+        
+        # Invalidate action mask cache
+        self._action_mask_cache = None
     
     def _process_vehicle_arrivals(self, time_advanced):
         """Process vehicle arrivals based on elapsed time."""
@@ -978,24 +1278,165 @@ class TerminalEnvironment(gym.Env):
     
     def _get_observation(self):
         """Get the current observation with proper action masking."""
-        # Create basic observation dictionary
+        # Use cached action mask if recent enough
+        if (self._action_mask_cache is not None and 
+            self.current_simulation_time == self._last_action_mask_time):
+            action_mask = self._action_mask_cache
+        else:
+            action_mask = self._generate_action_masks()
+            # Cache for future use
+            self._action_mask_cache = action_mask
+            self._last_action_mask_time = self.current_simulation_time
+        
+        # Create observation dictionary
         observation = {
             'crane_positions': np.array([crane.current_position for crane in self.cranes], dtype=np.int32),
             'crane_available_times': np.array(self.crane_available_times, dtype=np.float32),
+            'terminal_truck_available_times': np.array(self.terminal_truck_available_times, dtype=np.float32),
             'current_time': np.array([self.current_simulation_time], dtype=np.float32),
             'yard_state': self.storage_yard.get_state_representation(),
-            'parking_status': np.zeros(len(self.parking_spots), dtype=np.int32),
-            'rail_status': np.zeros((len(self.terminal.track_names), self.terminal.num_railslots_per_track), dtype=np.int32),
-            'queue_sizes': np.array([self.truck_queue.size(), self.train_queue.size()], dtype=np.int32)
+            'parking_status': self._generate_parking_status(),
+            'rail_status': self._generate_rail_status(),
+            'queue_sizes': np.array([self.truck_queue.size(), self.train_queue.size()], dtype=np.int32),
+            'action_mask': action_mask
         }
         
-        # Generate crane movement action mask
-        crane_action_mask = np.zeros((
-            len(self.cranes), 
-            len(self.position_to_idx),
-            len(self.position_to_idx)
-        ), dtype=np.int8)
+        return observation
+    # Add to the TerminalEnvironment class
+
+    def _get_observation_tensor(self):
+        """Get the current observation as tensors for faster processing."""
+        # Create observation tensors with numpy for GPU compatibility later
         
+        # Crane positions and availability
+        crane_positions = np.array([crane.current_position for crane in self.cranes], dtype=np.float32)
+        crane_available_times = np.array(self.crane_available_times, dtype=np.float32)
+        terminal_truck_available_times = np.array(self.terminal_truck_available_times, dtype=np.float32)
+        current_time = np.array([self.current_simulation_time], dtype=np.float32)
+        
+        # Yard state - compress format for efficiency
+        yard_state = self.storage_yard.get_state_representation()
+        
+        # Parking status - use binary array
+        parking_status = np.zeros(len(self.parking_spots), dtype=np.int8)
+        for i, spot in enumerate(self.parking_spots):
+            if spot in self.trucks_in_terminal:
+                parking_status[i] = 1
+        
+        # Rail status - use binary array
+        rail_status = np.zeros((len(self.terminal.track_names), self.terminal.num_railslots_per_track), dtype=np.int8)
+        for i, track in enumerate(self.terminal.track_names):
+            if track in self.trains_in_terminal:
+                rail_status[i, :] = 1
+        
+        # Queue sizes
+        queue_sizes = np.array([self.truck_queue.size(), self.train_queue.size()], dtype=np.int32)
+        
+        # Action masks (the most computationally expensive part)
+        if (self._action_mask_cache is not None and 
+            self.current_simulation_time == self._last_action_mask_time):
+            action_mask = self._action_mask_cache
+        else:
+            action_mask = self._generate_action_masks_tensor()
+            # Cache for future use
+            self._action_mask_cache = action_mask
+            self._last_action_mask_time = self.current_simulation_time
+        
+        # Return combined observation dict
+        return {
+            'crane_positions': crane_positions,
+            'crane_available_times': crane_available_times,
+            'terminal_truck_available_times': terminal_truck_available_times,
+            'current_time': current_time,
+            'yard_state': yard_state,
+            'parking_status': parking_status,
+            'rail_status': rail_status,
+            'queue_sizes': queue_sizes,
+            'action_mask': action_mask
+        }
+
+    def _generate_action_masks_tensor(self):
+        """Generate action masks as tensors for faster processing."""
+        num_cranes = len(self.cranes)
+        num_terminal_trucks = len(self.terminal_trucks)
+        num_positions = len(self.position_to_idx)
+        
+        # Pre-allocate arrays
+        crane_action_mask = np.zeros((num_cranes, num_positions, num_positions), dtype=np.int8)
+        truck_parking_mask = np.zeros((10, len(self.parking_spots)), dtype=np.int8)
+        terminal_truck_mask = np.zeros((num_terminal_trucks, num_positions, num_positions), dtype=np.int8)
+        
+        # Generate masks in parallel using vectorized operations where possible
+        
+        # 1. Truck parking mask (simplest to vectorize)
+        available_spots = np.array([i for i, spot in enumerate(self.parking_spots) 
+                                if spot not in self.trucks_in_terminal])
+        
+        # For each truck in queue (up to 10), mark all available spots as valid
+        trucks_in_queue = list(self.truck_queue.vehicles.queue)
+        for truck_idx, _ in enumerate(trucks_in_queue[:10]):
+            truck_parking_mask[truck_idx, available_spots] = 1
+        
+        # 2. Crane and terminal truck masks are harder to vectorize due to complex rules
+        # Use the original implementations but with performance optimizations
+        self._generate_crane_action_mask(crane_action_mask)
+        self._generate_terminal_truck_mask(terminal_truck_mask)
+        
+        return {
+            'crane_movement': crane_action_mask,
+            'truck_parking': truck_parking_mask,
+            'terminal_truck': terminal_truck_mask
+        }
+    def _generate_parking_status(self):
+        """Generate parking status array."""
+        parking_status = np.zeros(len(self.parking_spots), dtype=np.int32)
+        
+        for i, spot in enumerate(self.parking_spots):
+            if spot in self.trucks_in_terminal:
+                parking_status[i] = 1
+                
+        return parking_status
+    
+    def _generate_rail_status(self):
+        """Generate rail status array."""
+        rail_status = np.zeros((len(self.terminal.track_names), self.terminal.num_railslots_per_track), dtype=np.int32)
+        
+        for i, track in enumerate(self.terminal.track_names):
+            if track in self.trains_in_terminal:
+                # Mark the entire track as occupied
+                rail_status[i, :] = 1
+                
+        return rail_status
+    
+    def _generate_action_masks(self):
+        """Generate action masks for all action types."""
+        num_cranes = len(self.cranes)
+        num_terminal_trucks = len(self.terminal_trucks)
+        num_positions = len(self.position_to_idx)
+        
+        # Initialize action masks
+        crane_action_mask = np.zeros((num_cranes, num_positions, num_positions), dtype=np.int8)
+        truck_parking_mask = np.zeros((10, len(self.parking_spots)), dtype=np.int8)
+        terminal_truck_mask = np.zeros((num_terminal_trucks, num_positions, num_positions), dtype=np.int8)
+        
+        # Generate crane movement action mask
+        self._generate_crane_action_mask(crane_action_mask)
+        
+        # Generate truck parking action mask
+        self._generate_truck_parking_mask(truck_parking_mask)
+        
+        # Generate terminal truck action mask
+        self._generate_terminal_truck_mask(terminal_truck_mask)
+        
+        # Return combined action masks
+        return {
+            'crane_movement': crane_action_mask,
+            'truck_parking': truck_parking_mask,
+            'terminal_truck': terminal_truck_mask
+        }
+    
+    def _generate_crane_action_mask(self, crane_action_mask):
+        """Generate action mask for crane movements."""
         # For each crane, calculate valid moves
         for i, crane in enumerate(self.cranes):
             # Skip if crane is not available yet
@@ -1019,47 +1460,47 @@ class TerminalEnvironment(gym.Env):
                 
                 # Update action mask for each valid source->destination pair
                 for dest_position in destinations:
-                    source_idx = self.position_to_idx[source_position]
-                    dest_idx = self.position_to_idx[dest_position]
-                    
-                    # Apply operational constraints
-                    if self._is_rail_position(source_position) and self._is_rail_position(dest_position):
-                        # No rail slot to rail slot movements
-                        continue
+                    if source_position in self.position_to_idx and dest_position in self.position_to_idx:
+                        source_idx = self.position_to_idx[source_position]
+                        dest_idx = self.position_to_idx[dest_position]
+                        
+                        # Apply operational constraints
+                        if self._is_rail_position(source_position) and self._is_rail_position(dest_position):
+                            # No rail slot to rail slot movements
+                            continue
 
-                    if self._is_storage_position(source_position) and self._is_storage_position(dest_position):
-                        # Extract bay numbers
-                        source_bay = int(re.findall(r'\d+', source_position)[0]) - 1
-                        dest_bay = int(re.findall(r'\d+', dest_position)[0]) - 1
-                        
-                        # Check pre-marshalling distance constraint
-                        if abs(source_bay - dest_bay) > 5:
-                            continue
-                        
-                        # Check for stacking compatibility
-                        existing_container, _ = self.storage_yard.get_top_container(dest_position)
-                        
-                        # If there's a container at the destination and we're trying to stack on top of it
-                        if existing_container is not None and container is not None:
-                            # Check if stacking is safe
-                            if not container.can_be_stacked_on(existing_container):
+                        if self._is_storage_position(source_position) and self._is_storage_position(dest_position):
+                            # Extract bay numbers
+                            source_bay = int(re.findall(r'\d+', source_position)[0]) - 1
+                            dest_bay = int(re.findall(r'\d+', dest_position)[0]) - 1
+                            
+                            # Check pre-marshalling distance constraint
+                            if abs(source_bay - dest_bay) > 5:
                                 continue
-                    
-                    # Swap body/trailer placement restrictions in storage
-                    if (container and container.container_type in ["Trailer", "Swap Body"] 
-                        and self._is_storage_position(dest_position)):
-                        # Must be placed in the row nearest to driving lane
-                        dest_row = dest_position[0]
-                        nearest_row = self.terminal.storage_row_names[0]
-                        if dest_row != nearest_row:
-                            continue
-                    
-                    # Update the action mask
-                    crane_action_mask[i, source_idx, dest_idx] = 1
-        
-        # Generate truck parking action mask
-        truck_parking_mask = np.zeros((10, len(self.parking_spots)), dtype=np.int8)
-        
+                            
+                            # Check for stacking compatibility
+                            existing_container, _ = self.storage_yard.get_top_container(dest_position)
+                            
+                            # If there's a container at the destination and we're trying to stack on top of it
+                            if existing_container is not None and container is not None:
+                                # Check if stacking is safe
+                                if not container.can_be_stacked_on(existing_container):
+                                    continue
+                        
+                        # Swap body/trailer placement restrictions in storage
+                        if (container and container.container_type in ["Trailer", "Swap Body"] 
+                            and self._is_storage_position(dest_position)):
+                            # Must be placed in appropriate area
+                            if container.container_type == "Trailer" and not self._is_in_special_area(dest_position, 'trailer'):
+                                continue
+                            elif container.container_type == "Swap Body" and not self._is_in_special_area(dest_position, 'swap_body'):
+                                continue
+                        
+                        # Update the action mask
+                        crane_action_mask[i, source_idx, dest_idx] = 1
+    
+    def _generate_truck_parking_mask(self, truck_parking_mask):
+        """Generate action mask for truck parking."""
         # Check which parking spots are available
         available_spots = [i for i, spot in enumerate(self.parking_spots) 
                           if spot not in self.trucks_in_terminal]
@@ -1074,106 +1515,70 @@ class TerminalEnvironment(gym.Env):
                 
             # First check: Can only park in available spots
             for spot_idx in available_spots:
-                parking_spot = self.parking_spots[spot_idx]
-                
-                # Default: all available spots are valid
                 truck_parking_mask[truck_idx, spot_idx] = 1
+    
+    def _generate_terminal_truck_mask(self, terminal_truck_mask):
+        """Generate action mask for terminal truck movements."""
+        for truck_idx, truck in enumerate(self.terminal_trucks):
+            # Skip if truck is not available yet
+            if self.current_simulation_time < self.terminal_truck_available_times[truck_idx]:
+                continue
+            
+            # Terminal trucks can only handle trailers and swap bodies
+            # Find all swap bodies and trailers in storage
+            for position, (row, bay) in self._storage_pos_to_rowbay.items():
+                container = self._get_container_at_position(position)
                 
-                # Apply the parallel parking rule for pickup trucks
-                if truck.is_pickup_truck and truck.pickup_container_ids:
-                    # Find the wagon that has the container this truck needs to pick up
-                    valid_spot = False
-                    for track_id, train in self.trains_in_terminal.items():
-                        for i, wagon in enumerate(train.wagons):
-                            for container in wagon.containers:
-                                if container.container_id in truck.pickup_container_ids:
-                                    # This wagon has a container the truck needs to pick up
-                                    target_position = f"{track_id.lower()}_{i+1}"
-                                    
-                                    # Get the rail slot index
-                                    slot_num = int(target_position.split('_')[1])
-                                    
-                                    # Get the parallel parking spots and one spot on each side
-                                    parallel_spot_names = []
-                                    if slot_num > 1:
-                                        parallel_spot_names.append(f"p_{slot_num-1}")
-                                    parallel_spot_names.append(f"p_{slot_num}")
-                                    if slot_num < self.terminal.num_railslots_per_track:
-                                        parallel_spot_names.append(f"p_{slot_num+1}")
-                                    
-                                    # Check if this parking spot is one of the valid ones
-                                    if parking_spot in parallel_spot_names:
-                                        valid_spot = True
-                                        break
-                            if valid_spot:
-                                break
-                        if valid_spot:
-                            break
-                    
-                    # If this is a pickup truck and the parking spot is not valid per our rules,
-                    # mask it as invalid
-                    if not valid_spot:
-                        truck_parking_mask[truck_idx, spot_idx] = 0
+                if container is None or container.container_type not in ["Trailer", "Swap Body"]:
+                    continue
                 
-                # Apply the rule for delivery trucks (bringing containers)
-                elif not truck.is_pickup_truck and truck.containers:
-                    # For delivery trucks, check if they're bringing containers for specific wagons
-                    valid_spot = False
-                    for container in truck.containers:
-                        if hasattr(container, 'destination_id'):
-                            # Find the wagon that needs this container
-                            for track_id, train in self.trains_in_terminal.items():
-                                for i, wagon in enumerate(train.wagons):
-                                    if container.destination_id in wagon.pickup_container_ids:
-                                        # This wagon is expecting this container
-                                        target_position = f"{track_id.lower()}_{i+1}"
-                                        
-                                        # Get the rail slot index
-                                        slot_num = int(target_position.split('_')[1])
-                                        
-                                        # Get the parallel parking spots and one spot on each side
-                                        parallel_spot_names = []
-                                        if slot_num > 1:
-                                            parallel_spot_names.append(f"p_{slot_num-1}")
-                                        parallel_spot_names.append(f"p_{slot_num}")
-                                        if slot_num < self.terminal.num_railslots_per_track:
-                                            parallel_spot_names.append(f"p_{slot_num+1}")
-                                        
-                                        # Check if this parking spot is one of the valid ones
-                                        if parking_spot in parallel_spot_names:
-                                            valid_spot = True
-                                            break
-                                if valid_spot:
-                                    break
-                            if valid_spot:
-                                break
+                # Source position must be in position_to_idx
+                if position not in self.position_to_idx:
+                    continue
+                
+                source_idx = self.position_to_idx[position]
+                
+                # Find valid destinations (only storage positions)
+                for dest_position, (dest_row, dest_bay) in self._storage_pos_to_rowbay.items():
+                    # Only consider storage positions with appropriate area
+                    if container.container_type == "Trailer" and not self._is_in_special_area(dest_position, 'trailer'):
+                        continue
+                    elif container.container_type == "Swap Body" and not self._is_in_special_area(dest_position, 'swap_body'):
+                        continue
                     
-                    # If this is a delivery truck and the parking spot is not valid per our rules,
-                    # mask it as invalid
-                    if not valid_spot:
-                        truck_parking_mask[truck_idx, spot_idx] = 0
-        
-        # Add action masks to observation
-        observation['action_mask'] = {
-            'crane_movement': crane_action_mask,
-            'truck_parking': truck_parking_mask
-        }
-        
-        return observation
+                    # Destination must be empty
+                    if self.storage_yard.get_top_container(dest_position)[0] is not None:
+                        continue
+                    
+                    # Destination must be in position_to_idx
+                    if dest_position not in self.position_to_idx:
+                        continue
+                    
+                    dest_idx = self.position_to_idx[dest_position]
+                    
+                    # Can't move to the same position
+                    if source_idx == dest_idx:
+                        continue
+                    
+                    # Update mask
+                    terminal_truck_mask[truck_idx, source_idx, dest_idx] = 1
     
     def _get_container_at_position(self, position):
         """Helper to get container at a position."""
-        if self._is_storage_position(position):
+        # Use cached position type if available
+        position_type = self._position_type_cache.get(position)
+        
+        if position_type == 'storage':
             # Get top container from storage
             container, _ = self.storage_yard.get_top_container(position)
             return container
-        elif self._is_truck_position(position):
+        elif position_type == 'truck':
             # Get container from truck
             truck = self.trucks_in_terminal.get(position)
             if truck and hasattr(truck, 'containers') and truck.containers:
                 return truck.containers[0]  # Return the first container
             return None
-        elif self._is_rail_position(position):
+        elif position_type == 'train':
             # Parse train position
             parts = position.split('_')
             if len(parts) != 2:
@@ -1193,7 +1598,16 @@ class TerminalEnvironment(gym.Env):
         return None
     
     def _get_position_type(self, position):
-        """Determine the type of a position (train, truck, storage)."""
+        """Determine the type of a position (train, truck, storage) with caching."""
+        if position in self._position_type_cache:
+            return self._position_type_cache[position]
+        else:
+            pos_type = self._get_position_type_direct(position)
+            self._position_type_cache[position] = pos_type
+            return pos_type
+    
+    def _get_position_type_direct(self, position):
+        """Directly determine position type without caching."""
         if self._is_rail_position(position):
             return 'train'
         elif self._is_truck_position(position):
@@ -1201,67 +1615,86 @@ class TerminalEnvironment(gym.Env):
         else:
             return 'storage'
     
-    def _is_storage_position(self, position: str) -> bool:
+    def _is_storage_position(self, position):
         """Check if a position is in the storage yard."""
-        return position[0].isalpha() and position[1:].isdigit()
+        if position in self._position_type_cache:
+            return self._position_type_cache[position] == 'storage'
+        
+        # Look up position in the position index
+        if position in self.position_to_idx:
+            pos_idx = self.position_to_idx[position]
+            if pos_idx < len(self._storage_positions):
+                return self._storage_positions[pos_idx]
+        
+        # Fallback to regex check
+        return bool(position and position[0].isalpha() and position[1:].isdigit())
     
-    def _is_truck_position(self, position: str) -> bool:
+    def _is_truck_position(self, position):
         """Check if a position is a truck parking spot."""
+        if position in self._position_type_cache:
+            return self._position_type_cache[position] == 'truck'
+        
+        # Look up position in the position index
+        if position in self.position_to_idx:
+            pos_idx = self.position_to_idx[position]
+            if pos_idx < len(self._truck_positions):
+                return self._truck_positions[pos_idx]
+        
+        # Fallback to string check
         return position.startswith('p_')
     
-    def _is_rail_position(self, position: str) -> bool:
+    def _is_rail_position(self, position):
         """Check if a position is a rail slot."""
+        if position in self._position_type_cache:
+            return self._position_type_cache[position] == 'train'
+        
+        # Look up position in the position index
+        if position in self.position_to_idx:
+            pos_idx = self.position_to_idx[position]
+            if pos_idx < len(self._rail_positions):
+                return self._rail_positions[pos_idx]
+        
+        # Fallback to string check
         return position.startswith('t') and '_' in position
     
+    # Add to TerminalEnvironment class
+
+    def set_simplified_rendering(self, simplified=True):
+        """
+        Set simplified rendering mode for faster training.
+        
+        Args:
+            simplified: Whether to use simplified rendering
+        """
+        self.simplified_rendering = simplified
+
     def render(self, mode='human'):
-        """Render the terminal environment."""
+        """
+        Render the terminal environment with optimization for training.
+        
+        Args:
+            mode: Rendering mode ('human' or 'rgb_array')
+            
+        Returns:
+            Figure or numpy array depending on mode
+        """
+        if hasattr(self, 'simplified_rendering') and self.simplified_rendering and mode == 'human':
+            # During training, don't actually render to save time
+            # Just return a dummy figure object
+            from matplotlib.figure import Figure
+            return Figure()
+        
+        # Regular rendering for human viewing or rgb_array mode
+        # (Implementation remains the same as before)
         if mode == 'human':
             # Render the terminal for human viewing
             fig, ax = self.terminal.visualize(figsize=(15, 10), show_labels=True)
             
-            # Draw cranes
-            for i, crane in enumerate(self.cranes):
-                pos = crane.current_position
-                crane_color = f'C{i}'  # Different color for each crane
-                
-                # Convert bay, row to x, y
-                x_pos = pos[0] * self.terminal.rail_slot_length + self.terminal.rail_slot_length / 2
-                y_pos = 0  # Placeholder
-                
-                # Draw crane as a rectangle
-                crane_width = self.terminal.rail_slot_length
-                crane_height = 3.0
-                crane_rect = plt.Rectangle((x_pos - crane_width/2, y_pos - crane_height/2), 
-                                        crane_width, crane_height, 
-                                        color=crane_color, alpha=0.7, label=f"Crane {i+1}")
-                ax.add_patch(crane_rect)
-                
-                # Indicate if crane is busy
-                if self.current_simulation_time < self.crane_available_times[i]:
-                    busy_until = self.crane_available_times[i] - self.current_simulation_time
-                    ax.text(x_pos, y_pos + crane_height, 
-                           f"Busy for {busy_until:.1f}s", 
-                           ha='center', va='bottom', color=crane_color)
-            
             # Add key simulation information
-            title = f"Container Terminal Simulation - Time: {self.current_simulation_time:.1f}s"
-            if hasattr(self, 'last_action'):
-                title += f" - Last Action: {self.last_action}"
+            title = f"Terminal Simulation - Time: {self.current_simulation_time:.1f}s"
             ax.set_title(title, fontsize=16)
             
-            # Add simulation stats as text
-            stats_text = [
-                f"Trucks in terminal: {len(self.trucks_in_terminal)}",
-                f"Trucks waiting: {self.truck_queue.size()}",
-                f"Trains in terminal: {len(self.trains_in_terminal)}",
-                f"Trains waiting: {self.train_queue.size()}",
-                f"Containers in yard: {self.storage_yard.get_container_count()}"
-            ]
-            
-            for i, text in enumerate(stats_text):
-                fig.text(0.02, 0.95 - i*0.05, text, fontsize=10, 
-                       ha='left', va='top', transform=fig.transFigure)
-            
+            plt.close()  # Close the figure to avoid memory issues
             return fig
         
         elif mode == 'rgb_array':
@@ -1278,95 +1711,3 @@ class TerminalEnvironment(gym.Env):
     def close(self):
         """Clean up environment resources."""
         plt.close('all')
-
-
-def test_environment(num_steps=5, render=True):
-    """Test the terminal environment with random actions."""
-    # Create terminal config
-    from config import TerminalConfig
-    config = TerminalConfig()
-    
-    # Create environment with the config
-    env = TerminalEnvironment(terminal_config=config)
-    obs, info = env.reset()
-    
-    print(f"Environment initialized with {len(env.cranes)} cranes")
-    
-    # Print all valid moves
-    print("\n=== VALID MOVES BEFORE FIRST ACTION ===\n")
-    for i, crane in enumerate(env.cranes):
-        valid_moves = crane.get_valid_moves(env.storage_yard, env.trucks_in_terminal, env.trains_in_terminal)
-        print(f"Crane {i+1} can make {len(valid_moves)} valid moves:")
-        
-        # Sort moves by source for better readability
-        sorted_moves = sorted(valid_moves.items(), key=lambda x: x[0][0])
-        
-        # Print first 10 moves as sample
-        for j, ((source, dest), time) in enumerate(sorted_moves[:10]):
-            print(f"  {source} → {dest} (Est. time: {time:.1f}s)")
-        
-        # If there are more moves, show a count
-        if len(valid_moves) > 10:
-            print(f"  ...and {len(valid_moves) - 10} more moves\n")
-    
-    total_reward = 0
-    for i in range(num_steps):
-        # Get a random action
-        action = {
-            'action_type': np.random.randint(0, 2),
-            'crane_movement': env.action_space['crane_movement'].sample(),
-            'truck_parking': env.action_space['truck_parking'].sample()
-        }
-        
-        # Take a step
-        obs, reward, terminated, truncated, info = env.step(action)
-        total_reward += reward
-        
-        # Print step information
-        print(f"\nStep {i+1}, Reward: {reward:.2f}, Total Reward: {total_reward:.2f}")
-        print(f"Simulation Time: {env.current_simulation_time:.2f}s")
-        print(f"Crane Positions: {obs['crane_positions']}")
-        print(f"Crane Available Times: {obs['crane_available_times']}")
-        
-        # Print valid moves after action
-        if i < num_steps - 1:  # Skip on last step
-            print("\n=== VALID MOVES AFTER ACTION ===\n")
-            for j, crane in enumerate(env.cranes):
-                valid_moves = crane.get_valid_moves(env.storage_yard, env.trucks_in_terminal, env.trains_in_terminal)
-                print(f"Crane {j+1} can make {len(valid_moves)} valid moves:")
-                
-                # Sort and print a sample of moves
-                sorted_moves = sorted(valid_moves.items(), key=lambda x: x[0][0])
-                for k, ((source, dest), time) in enumerate(sorted_moves[:5]):
-                    print(f"  {source} → {dest} (Est. time: {time:.1f}s)")
-                
-                if len(valid_moves) > 5:
-                    print(f"  ...and {len(valid_moves) - 5} more moves\n")
-        
-        # Render the environment
-        if render:
-            fig = env.render()
-            plt.savefig(f"terminal_step_{i+1}.png")
-            plt.show()
-            plt.close()
-        
-        if terminated or truncated:
-            print("Episode finished!")
-            break
-    
-    # Final render
-    if render:
-        fig = env.render()
-        plt.savefig("terminal_final.png")
-        plt.show()
-        plt.close()
-    
-    env.close()
-    
-    return total_reward
-
-if __name__ == "__main__":
-    # Test the environment with rendering
-    print("Testing environment with 5 steps:")
-    total_reward = test_environment(num_steps=5, render=True)
-    print(f"\nTotal reward: {total_reward:.2f}")

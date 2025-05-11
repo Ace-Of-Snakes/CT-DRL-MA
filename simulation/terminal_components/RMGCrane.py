@@ -1,19 +1,10 @@
+# simulation/terminal_components/RMGCrane.py (optimized version)
 from typing import List, Dict, Tuple, Optional, Set, Any
 import numpy as np
-
+import re
 
 class RMGCrane:
-    """
-    Rail Mounted Gantry (RMG) Crane for moving containers in the terminal.
-    
-    Attributes:
-        crane_id: Unique identifier for the crane
-        terminal: Reference to the terminal object for distance calculations
-        start_bay: Starting bay of this crane's operational area
-        end_bay: Ending bay of this crane's operational area
-        current_position: Current position of the crane as (bay, row)
-        movement_time_cache: Cache for movement time calculations
-    """
+    """Rail Mounted Gantry (RMG) Crane for moving containers in the terminal."""
     
     def __init__(self, 
                  crane_id: str,
@@ -21,16 +12,7 @@ class RMGCrane:
                  start_bay: int,
                  end_bay: int,
                  current_position: Tuple[int, int] = (0, 0)):
-        """
-        Initialize a new RMG crane.
-        
-        Args:
-            crane_id: Unique identifier for the crane
-            terminal: Reference to the terminal object
-            start_bay: Starting bay of operational area
-            end_bay: Ending bay of operational area
-            current_position: Initial position as (bay, row)
-        """
+        """Initialize a new RMG crane."""
         self.crane_id = crane_id
         self.terminal = terminal
         self.start_bay = start_bay
@@ -54,35 +36,31 @@ class RMGCrane:
             "default": 2.59
         }
         self.ground_vehicle_height = 1.5  # meters
+        
+        # Cache for position checks
+        self._position_type_cache = {}
+        self._valid_moves_cache = {}
+        self._cache_valid = True
     
     def reset(self, position: Tuple[int, int] = None):
-        """
-        Reset the crane to its initial position.
-        
-        Args:
-            position: New position for the crane (if None, uses start_bay, 0)
-        """
+        """Reset the crane to its initial position."""
         if position is None:
             self.current_position = (self.start_bay, 0)
         else:
             self.current_position = position
         self.movement_time_cache = {}
+        self._valid_moves_cache = {}
+        self._cache_valid = False
     
     def get_valid_moves(self, 
                         storage_yard: Any, 
                         trucks_in_terminal: Dict[str, Any],
                         trains_in_terminal: Dict[str, Any]) -> Dict[Tuple[str, str], float]:
-        """
-        Get all valid moves the crane can make from its current position.
+        """Get all valid moves the crane can make from its current position."""
+        # Use cached valid moves if available and environment hasn't changed
+        if self._cache_valid and self._valid_moves_cache:
+            return self._valid_moves_cache
         
-        Args:
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Dictionary mapping (source, destination) tuples to estimated time
-        """
         # First, get all source positions where a container can be picked up
         source_positions = self._get_source_positions(storage_yard, trucks_in_terminal, trains_in_terminal)
         
@@ -103,8 +81,20 @@ class RMGCrane:
                 # Check if the move is within this crane's operational area
                 if self._is_position_in_crane_area(source_position) and self._is_position_in_crane_area(dest_position):
                     # Calculate the estimated time for this move
-                    time_estimate = self.estimate_movement_time(source_position, dest_position, container)
+                    cache_key = (source_position, dest_position, container.container_id if hasattr(container, 'container_id') else str(container))
+                    
+                    # Use cached time if available
+                    if cache_key in self.movement_time_cache:
+                        time_estimate = self.movement_time_cache[cache_key]
+                    else:
+                        time_estimate = self.estimate_movement_time(source_position, dest_position, container)
+                        self.movement_time_cache[cache_key] = time_estimate
+                        
                     valid_moves[(source_position, dest_position)] = time_estimate
+        
+        # Cache the result
+        self._valid_moves_cache = valid_moves
+        self._cache_valid = True
         
         return valid_moves
     
@@ -114,19 +104,7 @@ class RMGCrane:
                       storage_yard: Any,
                       trucks_in_terminal: Dict[str, Any],
                       trains_in_terminal: Dict[str, Any]) -> Tuple[Optional[Any], float]:
-        """
-        Move a container from source to destination.
-        
-        Args:
-            source_position: Source position string
-            destination_position: Destination position string
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Tuple of (container, time_taken) or (None, 0) if move failed
-        """
+        """Move a container from source to destination."""
         # Check if both positions are in this crane's area
         if not (self._is_position_in_crane_area(source_position) and 
                 self._is_position_in_crane_area(destination_position)):
@@ -145,14 +123,18 @@ class RMGCrane:
             return None, 0
         
         # Remove the container from its source
+        removed_container = None
+        
         if self._is_storage_position(source_position):
             removed_container = storage_yard.remove_container(source_position)
         elif self._is_truck_position(source_position):
             truck = self._get_truck_at_position(source_position, trucks_in_terminal)
-            removed_container = truck.remove_container(container.container_id if hasattr(container, 'container_id') else None)
+            if truck:
+                removed_container = truck.remove_container(container.container_id if hasattr(container, 'container_id') else None)
         elif self._is_train_position(source_position):
             removed_container = self._remove_container_from_train(source_position, container, trains_in_terminal)
-        else:
+        
+        if removed_container is None:
             return None, 0
         
         # Track the source position in the container for rule enforcement
@@ -160,61 +142,63 @@ class RMGCrane:
             removed_container._source_position = source_position
 
         # Calculate the time required for the move
-        time_taken = self.calculate_movement_time(source_position, destination_position, container)
+        cache_key = (source_position, destination_position, container.container_id if hasattr(container, 'container_id') else str(container))
+        
+        if cache_key in self.movement_time_cache:
+            time_taken = self.movement_time_cache[cache_key]
+        else:
+            time_taken = self.calculate_movement_time(source_position, destination_position, container)
+            self.movement_time_cache[cache_key] = time_taken
         
         # Place the container at its destination
+        success = False
+        
         if self._is_storage_position(destination_position):
-            success = storage_yard.add_container(destination_position, container)
+            success = storage_yard.add_container(destination_position, removed_container)
         elif self._is_truck_position(destination_position):
             truck = self._get_truck_at_position(destination_position, trucks_in_terminal)
-            success = truck.add_container(container)
-            
-            # Check if this container completes a pickup request
-            if hasattr(truck, 'pickup_container_ids') and container.container_id in truck.pickup_container_ids:
-                truck.remove_pickup_container_id(container.container_id)
+            if truck:
+                success = truck.add_container(removed_container)
                 
+                # Check if this container completes a pickup request
+                if hasattr(truck, 'pickup_container_ids') and hasattr(removed_container, 'container_id'):
+                    if removed_container.container_id in truck.pickup_container_ids:
+                        truck.remove_pickup_container_id(removed_container.container_id)
         elif self._is_train_position(destination_position):
-            success = self._add_container_to_train(destination_position, container, trains_in_terminal)
+            success = self._add_container_to_train(destination_position, removed_container, trains_in_terminal)
             
             # Check if this container completes a pickup request
             for train in trains_in_terminal.values():
                 for wagon in train.wagons:
-                    if container.container_id in wagon.pickup_container_ids:
-                        wagon.remove_pickup_container(container.container_id)
+                    if hasattr(removed_container, 'container_id') and removed_container.container_id in wagon.pickup_container_ids:
+                        wagon.remove_pickup_container(removed_container.container_id)
                         break
-        else:
-            success = False
         
-        # Update the crane's position to the destination
+        # Update the crane's position and caches
         if success:
             # Extract bay and row from position strings
             dest_bay, dest_row = self._position_to_bay_row(destination_position)
             self.current_position = (dest_bay, dest_row)
-            return container, time_taken
+            
+            # Invalidate caches
+            self._cache_valid = False
+            
+            return removed_container, time_taken
         else:
             # If the placement failed, we need to put the container back
             if self._is_storage_position(source_position):
                 storage_yard.add_container(source_position, removed_container)
             elif self._is_truck_position(source_position):
                 truck = self._get_truck_at_position(source_position, trucks_in_terminal)
-                truck.add_container(removed_container)
+                if truck:
+                    truck.add_container(removed_container)
             elif self._is_train_position(source_position):
                 self._add_container_to_train(source_position, removed_container, trains_in_terminal)
                 
             return None, 0
     
     def calculate_movement_time(self, source_position: str, destination_position: str, container: Any) -> float:
-        """
-        Calculate the time needed to move a container from source to destination.
-        
-        Args:
-            source_position: Source position string
-            destination_position: Destination position string
-            container: Container to move
-            
-        Returns:
-            Time in seconds needed for the movement
-        """
+        """Calculate the time needed to move a container."""
         # Check the cache first
         cache_key = (source_position, destination_position, container.container_id if hasattr(container, 'container_id') else str(container))
         if cache_key in self.movement_time_cache:
@@ -352,18 +336,7 @@ class RMGCrane:
         return total_time
     
     def estimate_movement_time(self, source_position: str, destination_position: str, container: Any) -> float:
-        """
-        Estimate movement time without detailed calculations.
-        Used when terminal position data is not available.
-        
-        Args:
-            source_position: Source position string
-            destination_position: Destination position string
-            container: Container to move
-            
-        Returns:
-            Estimated time in seconds
-        """
+        """Estimate movement time without detailed calculations."""
         # Calculate time based on the current position of the crane
         source_bay, source_row = self._position_to_bay_row(source_position)
         dest_bay, dest_row = self._position_to_bay_row(destination_position)
@@ -412,17 +385,7 @@ class RMGCrane:
         return total_time
     
     def _calculate_travel_time(self, distance: float, max_speed: float, acceleration: float) -> float:
-        """
-        Calculate travel time with acceleration and deceleration.
-        
-        Args:
-            distance: Distance to travel in meters
-            max_speed: Maximum speed in meters per second
-            acceleration: Acceleration/deceleration in meters per second squared
-        
-        Returns:
-            Time in seconds needed for the travel
-        """
+        """Calculate travel time with acceleration and deceleration."""
         # No movement needed
         if distance <= 0:
             return 0.0
@@ -448,23 +411,13 @@ class RMGCrane:
                              storage_yard: Any, 
                              trucks_in_terminal: Dict[str, Any],
                              trains_in_terminal: Dict[str, Any]) -> List[str]:
-        """
-        Get all positions where a container can be picked up.
-        
-        Args:
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            List of position strings where containers can be picked up
-        """
+        """Get all positions where a container can be picked up."""
         source_positions = []
         
         # Check storage yard
         for row in storage_yard.row_names:
-            for bay in range(storage_yard.num_bays):
-                position = f"{row}{bay+1}"
+            for bay in range(1, storage_yard.num_bays + 1):
+                position = f"{row}{bay}"
                 if self._is_position_in_crane_area(position):
                     container, _ = storage_yard.get_top_container(position)
                     if container is not None:
@@ -491,19 +444,7 @@ class RMGCrane:
                                 storage_yard: Any,
                                 trucks_in_terminal: Dict[str, Any],
                                 trains_in_terminal: Dict[str, Any]) -> List[str]:
-        """
-        Get all positions where a container can be placed based on strict movement rules.
-        
-        Args:
-            source_position: Source position of the container
-            container: Container to be moved
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            List of position strings where the container can be placed
-        """
+        """Get all positions where a container can be placed based on strict movement rules."""
         destinations = []
         source_type = self._get_position_type(source_position)
         
@@ -518,26 +459,34 @@ class RMGCrane:
                             
             # If no matching truck is available, allow storage based on container type
             if not destinations:
-                # For swap body/trailer - only nearest row to driving lane
+                # For swap body/trailer - only allowed areas
                 if container.container_type in ["Trailer", "Swap Body"]:
-                    # Get the row nearest to driving lane
-                    nearest_row = storage_yard.row_names[0]
+                    # Get the appropriate special area
+                    area_type = 'trailer' if container.container_type == "Trailer" else 'swap_body'
                     
-                    # Only allow storage in this row
-                    for bay in range(storage_yard.num_bays):
-                        position = f"{nearest_row}{bay+1}"
-                        if position != source_position and self._is_position_in_crane_area(position):
-                            if storage_yard.can_accept_container(position, container):
-                                destinations.append(position)
+                    # Only allow storage in this area
+                    for row in storage_yard.row_names:
+                        for bay in range(1, storage_yard.num_bays + 1):
+                            position = f"{row}{bay}"
+                            if position != source_position and self._is_position_in_crane_area(position):
+                                # Check if position is in the correct special area
+                                for area_row, start_bay, end_bay in storage_yard.special_areas.get(area_type, []):
+                                    if row == area_row and start_bay <= bay <= end_bay:
+                                        if storage_yard.can_accept_container(position, container):
+                                            destinations.append(position)
+                                            break
                 else:
                     # For regular/reefer/dangerous goods containers
                     for row in storage_yard.row_names:
-                        for bay in range(storage_yard.num_bays):
-                            position = f"{row}{bay+1}"
+                        for bay in range(1, storage_yard.num_bays + 1):
+                            position = f"{row}{bay}"
                             if position != source_position and self._is_position_in_crane_area(position):
                                 if storage_yard.can_accept_container(position, container):
                                     destinations.append(position)
         
+        # Rule 2: Container on truck -> can only move to wagons looking
+        # Continuing RMGCrane class implementation
+
         # Rule 2: Container on truck -> can only move to wagons looking for that container
         elif source_type == 'truck':
             # Only allow moves to wagons that have this container in their pickup list
@@ -551,8 +500,8 @@ class RMGCrane:
             # If no matching wagon, allow storage
             if not destinations:
                 for row in storage_yard.row_names:
-                    for bay in range(storage_yard.num_bays):
-                        position = f"{row}{bay+1}"
+                    for bay in range(1, storage_yard.num_bays + 1):
+                        position = f"{row}{bay}"
                         if position != source_position and self._is_position_in_crane_area(position):
                             if storage_yard.can_accept_container(position, container):
                                 destinations.append(position)
@@ -575,42 +524,40 @@ class RMGCrane:
                             destinations.append(slot)
             
             # Allow pre-marshalling within the 5-bay distance limit
-            source_bay = int(source_position[1:]) - 1  # Extract bay number
+            source_bay = int(re.findall(r'\d+', source_position)[0]) - 1  # Extract bay number
             for row in storage_yard.row_names:
-                for bay in range(storage_yard.num_bays):
-                    position = f"{row}{bay+1}"
+                for bay in range(1, storage_yard.num_bays + 1):
+                    position = f"{row}{bay}"
                     if position != source_position and self._is_position_in_crane_area(position):
                         # Check pre-marshalling distance constraint
-                        dest_bay = bay
+                        dest_bay = bay - 1
                         if abs(source_bay - dest_bay) <= 5:  # Limit to 5 positions
                             if storage_yard.can_accept_container(position, container):
                                 destinations.append(position)
         
         return destinations
-    
+
     def _is_position_in_crane_area(self, position: str) -> bool:
-        """
-        Check if a position is within this crane's operational area.
-        
-        Args:
-            position: Position string to check
-            
-        Returns:
-            Boolean indicating if position is in this crane's area
-        """
+        """Check if a position is within this crane's operational area."""
         bay, _ = self._position_to_bay_row(position)
         return self.start_bay <= bay <= self.end_bay
-    
-    def _position_to_bay_row(self, position: str) -> Tuple[int, int]:
-        """
-        Convert a position string to (bay, row) coordinates.
-        
-        Args:
-            position: Position string (e.g., 'A1', 't1_2', 'p_3')
+    def _get_position_type(self, position: str) -> str:
+        """Determine the type of a position (train, truck, storage) with caching."""
+        if position in self._position_type_cache:
+            return self._position_type_cache[position]
             
-        Returns:
-            Tuple of (bay, row) indices
-        """
+        if self._is_train_position(position):
+            position_type = 'train'
+        elif self._is_truck_position(position):
+            position_type = 'truck'
+        else:
+            position_type = 'storage'
+            
+        # Cache the result
+        self._position_type_cache[position] = position_type
+        return position_type
+    def _position_to_bay_row(self, position: str) -> Tuple[int, int]:
+        """Convert a position string to (bay, row) coordinates."""
         if position.startswith('t') and '_' in position:
             # Train position (e.g., 't1_2')
             parts = position.split('_')
@@ -638,18 +585,19 @@ class RMGCrane:
             # Storage is above train tracks and parking
             row_offset = len(self.terminal.track_names) + 1 if hasattr(self.terminal, 'track_names') else 4
             return bay_number - 1, row_index + row_offset
-    
+    def _is_storage_position(self, position: str) -> bool:
+        """Check if a position is in the storage yard."""
+        return bool(position and position[0].isalpha() and position[1:].isdigit())
+
+    def _is_truck_position(self, position: str) -> bool:
+        """Check if a position is a truck parking spot."""
+        return bool(position and position.startswith('p_'))
+
+    def _is_train_position(self, position: str) -> bool:
+        """Check if a position is a train slot."""
+        return bool(position and position.startswith('t') and '_' in position)
     def _calculate_crane_movement_time(self, from_pos: Tuple[int, int], to_pos: Tuple[int, int]) -> float:
-        """
-        Calculate time for crane to move from current position to source position.
-        
-        Args:
-            from_pos: Current position as (bay, row)
-            to_pos: Target position as (bay, row)
-            
-        Returns:
-            Time in seconds
-        """
+        """Calculate time for crane to move from current position to source position."""
         # These are rough estimates, adjust based on actual terminal dimensions
         meters_per_bay = 6  # Approximate meters per bay
         meters_per_row = 10  # Approximate meters per row
@@ -673,37 +621,29 @@ class RMGCrane:
         
         # Return the maximum (movements can happen in parallel)
         return max(bay_time, row_time)
-    
+
     def _get_container_at_position(self, 
-                                  position: str,
-                                  storage_yard: Any,
-                                  trucks_in_terminal: Dict[str, Any],
-                                  trains_in_terminal: Dict[str, Any]) -> Optional[Any]:
-        """
-        Get the container at a position.
+                                position: str,
+                                storage_yard: Any,
+                                trucks_in_terminal: Dict[str, Any],
+                                trains_in_terminal: Dict[str, Any]) -> Optional[Any]:
+        """Get the container at a position."""
+        # Get position type
+        position_type = self._get_position_type(position)
         
-        Args:
-            position: Position string
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Container object or None if no container is found
-        """
-        if self._is_storage_position(position):
+        if position_type == 'storage':
             # Get top container from storage
             container, _ = storage_yard.get_top_container(position)
             return container
             
-        elif self._is_truck_position(position):
+        elif position_type == 'truck':
             # Get container from truck
             truck = self._get_truck_at_position(position, trucks_in_terminal)
             if truck and hasattr(truck, 'containers') and truck.containers:
                 return truck.containers[0]  # Return the first container
             return None
             
-        elif self._is_train_position(position):
+        elif position_type == 'train':
             # Get container from train
             train_id, wagon_index = self._parse_train_position(position, trains_in_terminal)
             if train_id and wagon_index is not None:
@@ -715,26 +655,14 @@ class RMGCrane:
             return None
             
         return None
-    
+
     def _can_place_container(self, 
                         position: str,
                         container: Any,
                         storage_yard: Any,
                         trucks_in_terminal: Dict[str, Any],
                         trains_in_terminal: Dict[str, Any]) -> bool:
-        """
-        Check if a container can be placed at a position based on strict rules.
-        
-        Args:
-            position: Position string
-            container: Container to place
-            storage_yard: Reference to the storage yard
-            trucks_in_terminal: Dictionary of trucks currently in the terminal
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Boolean indicating if the container can be placed
-        """
+        """Check if a container can be placed at a position based on strict rules."""
         # Get the type of the position
         position_type = self._get_position_type(position)
         
@@ -772,52 +700,42 @@ class RMGCrane:
             return False
             
         return False
-    
+
     def _get_position_type(self, position: str) -> str:
-        """
-        Determine the type of a position (train, truck, storage).
-        
-        Args:
-            position: Position string
+        """Determine the type of a position (train, truck, storage) with caching."""
+        if position in self._position_type_cache:
+            return self._position_type_cache[position]
             
-        Returns:
-            Type of the position ('train', 'truck', or 'storage')
-        """
         if self._is_train_position(position):
-            return 'train'
+            position_type = 'train'
         elif self._is_truck_position(position):
-            return 'truck'
+            position_type = 'truck'
         else:
-            return 'storage'
-    
+            position_type = 'storage'
+            
+        # Cache the result
+        self._position_type_cache[position] = position_type
+        return position_type
+
     def _is_storage_position(self, position: str) -> bool:
         """Check if a position is in the storage yard."""
         # Storage positions typically start with a letter and are followed by a number
-        return position[0].isalpha() and position[1:].isdigit()
-    
+        return position and position[0].isalpha() and position[1:].isdigit()
+
     def _is_truck_position(self, position: str) -> bool:
         """Check if a position is a truck parking spot."""
-        return position.startswith('p_')
-    
+        return position and position.startswith('p_')
+
     def _is_train_position(self, position: str) -> bool:
         """Check if a position is a train slot."""
-        return position.startswith('t') and '_' in position
-    
+        return position and position.startswith('t') and '_' in position
+
     def _get_truck_at_position(self, position: str, trucks_in_terminal: Dict[str, Any]) -> Optional[Any]:
         """Get the truck at a position."""
         return trucks_in_terminal.get(position)
-    
+
     def _parse_train_position(self, position: str, trains_in_terminal: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
-        """
-        Parse a train position string to get train ID and wagon index.
-        
-        Args:
-            position: Position string (e.g., 't1_2')
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Tuple of (train_id, wagon_index) or (None, None) if invalid
-        """
+        """Parse a train position string to get train ID and wagon index."""
         if not self._is_train_position(position):
             return None, None
         
@@ -839,19 +757,9 @@ class RMGCrane:
         wagon_index = slot_num - 1
         
         return track_id, wagon_index
-    
+
     def _remove_container_from_train(self, position: str, container: Any, trains_in_terminal: Dict[str, Any]) -> Optional[Any]:
-        """
-        Remove a container from a train.
-        
-        Args:
-            position: Train position string
-            container: Container to remove
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Removed container or None if removal failed
-        """
+        """Remove a container from a train."""
         train_id, wagon_index = self._parse_train_position(position, trains_in_terminal)
         if train_id and wagon_index is not None:
             train = trains_in_terminal.get(train_id)
@@ -865,19 +773,9 @@ class RMGCrane:
                         return wagon.containers.pop(i)
         
         return None
-    
+
     def _add_container_to_train(self, position: str, container: Any, trains_in_terminal: Dict[str, Any]) -> bool:
-        """
-        Add a container to a train.
-        
-        Args:
-            position: Train position string
-            container: Container to add
-            trains_in_terminal: Dictionary of trains currently in the terminal
-            
-        Returns:
-            Boolean indicating success
-        """
+        """Add a container to a train."""
         train_id, wagon_index = self._parse_train_position(position, trains_in_terminal)
         if train_id and wagon_index is not None:
             train = trains_in_terminal.get(train_id)
@@ -886,138 +784,3 @@ class RMGCrane:
                 return wagon.add_container(container)
         
         return False
-
-
-if __name__ == "__main__":
-    # Mock classes for testing
-    class MockTerminal:
-        def __init__(self):
-            self.track_names = ['T1', 'T2', 'T3']
-            self.positions = {
-                'A1': (0, 10),
-                'A2': (1, 10),
-                'B1': (0, 11),
-                'B2': (1, 11),
-                't1_1': (0, 0),
-                't1_2': (1, 0),
-                't2_1': (0, 1),
-                'p_1': (0, 5),
-                'p_2': (1, 5)
-            }
-    
-    class MockContainer:
-        def __init__(self, container_id, container_type, length=6.0, weight=20000, goods_type="Regular"):
-            self.container_id = container_id
-            self.container_type = container_type
-            self.length = length
-            self.weight = weight
-            self.goods_type = goods_type
-        
-        def can_stack_with(self, other_container):
-            return True
-    
-    class MockStorageYard:
-        def __init__(self):
-            self.row_names = ['A', 'B', 'C']
-            self.num_bays = 5
-            self.containers = {
-                'A1': MockContainer("CONT1", "TWEU"),
-                'B2': MockContainer("CONT2", "FEU")
-            }
-        
-        def get_top_container(self, position):
-            return self.containers.get(position), 1
-        
-        def can_accept_container(self, position, container):
-            return position not in self.containers
-        
-        def remove_container(self, position):
-            if position in self.containers:
-                return self.containers.pop(position)
-            return None
-        
-        def add_container(self, position, container):
-            if position not in self.containers:
-                self.containers[position] = container
-                return True
-            return False
-    
-    class MockTruck:
-        def __init__(self, truck_id, containers=None):
-            self.truck_id = truck_id
-            self.containers = containers or []
-            self.pickup_container_ids = set()
-            self.is_pickup_truck = len(self.containers) == 0
-            self.is_full = False
-        
-        def has_containers(self):
-            return len(self.containers) > 0
-        
-        def remove_container(self, container_id=None):
-            if self.containers:
-                return self.containers.pop(0)
-            return None
-        
-        def add_container(self, container):
-            self.containers.append(container)
-            return True
-        
-        def has_space_for_container(self, container):
-            return not self.is_full
-    
-    class MockTrain:
-        def __init__(self, train_id, num_wagons=3):
-            self.train_id = train_id
-            self.wagons = [MockWagon(f"{train_id}_W{i+1}") for i in range(num_wagons)]
-    
-    class MockWagon:
-        def __init__(self, wagon_id, containers=None):
-            self.wagon_id = wagon_id
-            self.containers = containers or []
-            self.pickup_container_ids = set()
-        
-        def add_container(self, container):
-            self.containers.append(container)
-            return True
-        
-        def get_available_length(self):
-            return 20.0  # Always has space
-    
-    # Create test objects
-    terminal = MockTerminal()
-    storage_yard = MockStorageYard()
-    
-    trucks_in_terminal = {
-        'p_1': MockTruck("T1", [MockContainer("CONT3", "TWEU")]),
-        'p_2': MockTruck("T2")
-    }
-    
-    # Add a container to pickup list
-    trucks_in_terminal['p_2'].pickup_container_ids.add("CONT1")
-    
-    trains_in_terminal = {
-        'T1': MockTrain("TR1", 3)
-    }
-    
-    # Add containers to train
-    trains_in_terminal['T1'].wagons[0].containers.append(MockContainer("CONT4", "FEU"))
-    
-    # Create crane and test functionality
-    crane = RMGCrane("RMG1", terminal, 0, 10, (0, 0))
-    
-    print("Testing RMG Crane functionality:")
-    print("Initial position:", crane.current_position)
-    
-    # Get valid moves
-    valid_moves = crane.get_valid_moves(storage_yard, trucks_in_terminal, trains_in_terminal)
-    print(f"Found {len(valid_moves)} valid moves:")
-    for (source, dest), time in valid_moves.items():
-        print(f"  {source} -> {dest}: {time:.2f} seconds")
-    
-    # Test a move
-    if valid_moves:
-        source, dest = list(valid_moves.keys())[0]
-        container, time = crane.move_container(source, dest, storage_yard, trucks_in_terminal, trains_in_terminal)
-        print(f"\nMoved container {container.container_id} from {source} to {dest}")
-        print(f"Time taken: {time:.2f} seconds")
-        print(f"New crane position: {crane.current_position}")

@@ -1,3 +1,5 @@
+# training.py
+
 import os
 import numpy as np
 import torch
@@ -9,6 +11,8 @@ from tqdm import tqdm
 import pandas as pd
 import sys
 from pathlib import Path
+import logging
+import json
 
 # Add project root to path to ensure imports work correctly
 project_root = str(Path(__file__).parent.parent)
@@ -20,120 +24,220 @@ from simulation.agents.dual_head_q import OptimizedTerminalAgent
 from simulation.terminal_env import TerminalEnvironment
 from simulation.config import TerminalConfig
 
+class TrainingLogger:
+    """Logger for training with file output and console display."""
+    
+    def __init__(self, log_dir='logs', experiment_name=None, quiet_console=True):
+        """
+        Initialize logger.
+        
+        Args:
+            log_dir: Directory to save logs
+            experiment_name: Name of experiment (auto-generated if None)
+            quiet_console: If True, only show warnings, errors and tqdm on console
+        """
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Generate experiment name if not provided
+        if experiment_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            experiment_name = f"terminal_training_{timestamp}"
+        
+        self.experiment_name = experiment_name
+        self.log_path = os.path.join(log_dir, f"{experiment_name}.log")
+        self.quiet_console = quiet_console
+        
+        # Configure logger
+        self.logger = logging.getLogger(experiment_name)
+        self.logger.setLevel(logging.INFO)  # Main logger level stays at INFO
+        
+        # Clear any existing handlers
+        if self.logger.handlers:
+            self.logger.handlers.clear()
+        
+        # Create file handler - ALWAYS logs everything to file
+        file_handler = logging.FileHandler(self.log_path)
+        file_handler.setLevel(logging.INFO)
+        
+        # Create console handler - set to WARNING level if quiet_console is True
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.WARNING if quiet_console else logging.INFO)
+        
+        # Create formatter and add to handlers
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Add handlers to logger
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+        
+        # Initialize metrics tracking
+        self.metrics = {
+            'episode_rewards': [],
+            'episode_lengths': [],
+            'losses': [],
+            'curriculum_stages': [],
+            'action_types': {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0},
+            'times': []
+        }
+        
+        self.start_time = time.time()
+        
+        # Log start message (will be in file but may be suppressed on console)
+        self.logger.info(f"Started training experiment: {experiment_name}")
+        self.logger.info(f"Log file: {self.log_path}")
+        
+        # Important messages should use warning level to always show on console
+        if quiet_console:
+            self.logger.warning(f"Running in quiet mode - only warnings and errors will show on console")
+            self.logger.warning(f"All logs are still saved to: {self.log_path}")
+    
+    def log_episode(self, episode, reward, steps, loss, stage, action_counts=None):
+        """
+        Log episode metrics.
+        
+        Args:
+            episode: Episode number
+            reward: Episode total reward
+            steps: Number of steps in episode
+            loss: Mean loss for episode
+            stage: Curriculum stage
+            action_counts: Dictionary of action type counts
+        """
+        # Record metrics
+        self.metrics['episode_rewards'].append(reward)
+        self.metrics['episode_lengths'].append(steps)
+        self.metrics['losses'].append(loss if loss is not None else 0)
+        self.metrics['curriculum_stages'].append(stage)
+        self.metrics['times'].append(time.time() - self.start_time)
+        
+        # Update action counts if provided
+        if action_counts:
+            for action_type, count in action_counts.items():
+                if action_type in self.metrics['action_types']:
+                    self.metrics['action_types'][action_type] += count
+        
+        # Calculate averages for logging
+        avg_reward = np.mean(self.metrics['episode_rewards'][-10:]) if len(self.metrics['episode_rewards']) >= 10 else np.mean(self.metrics['episode_rewards'])
+        avg_steps = np.mean(self.metrics['episode_lengths'][-10:]) if len(self.metrics['episode_lengths']) >= 10 else np.mean(self.metrics['episode_lengths'])
+        
+        # Format loss string properly outside the f-string
+        loss_str = f"{loss:.4f}" if loss is not None else "N/A"
+        
+        # Log episode summary
+        self.logger.info(f"Episode {episode} | Stage {stage} | Reward: {reward:.2f} | Avg(10): {avg_reward:.2f} | Steps: {steps} | Loss: {loss_str}")
+        
+        # Log action type distribution every 10 episodes
+        if episode % 10 == 0 and action_counts:
+            action_str = " | ".join([f"{key}: {count}" for key, count in action_counts.items()])
+            self.logger.info(f"Action counts for last episode: {action_str}")
+    
+    def log_stage_complete(self, stage, episodes, avg_reward):
+        """Log completion of a curriculum stage."""
+        self.logger.info(f"Stage {stage} completed after {episodes} episodes!")
+        self.logger.info(f"Average reward for last 10 episodes: {avg_reward:.2f}")
+    
+    def log_training_complete(self, total_episodes, total_time):
+        """Log completion of training."""
+        hours, remainder = divmod(total_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        self.logger.info(f"Training completed! Total episodes: {total_episodes}")
+        self.logger.info(f"Total training time: {int(hours)}h {int(minutes)}m {seconds:.2f}s")
+        
+        # Log final action type distribution
+        action_counts = self.metrics['action_types']
+        total_actions = sum(action_counts.values())
+        if total_actions > 0:
+            action_pcts = {key: count/total_actions*100 for key, count in action_counts.items()}
+            action_str = " | ".join([f"{key}: {count} ({pct:.1f}%)" for key, (count, pct) in zip(action_counts.keys(), action_pcts.items())])
+            self.logger.info(f"Action type distribution: {action_str}")
+    
+    def save_metrics(self, results_dir='results'):
+        """
+        Save training metrics to files.
+        
+        Args:
+            results_dir: Directory to save results
+        """
+        os.makedirs(results_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save metrics to CSV
+        results_file = os.path.join(results_dir, f"{self.experiment_name}_metrics_{timestamp}.csv")
+        results_df = pd.DataFrame({
+            'episode': range(1, len(self.metrics['episode_rewards']) + 1),
+            'reward': self.metrics['episode_rewards'],
+            'length': self.metrics['episode_lengths'],
+            'loss': self.metrics['losses'],
+            'stage': self.metrics['curriculum_stages'],
+            'time': self.metrics['times']
+        })
+        results_df.to_csv(results_file, index=False)
+        self.logger.info(f"Training metrics saved to {results_file}")
+        
+        # Save action counts
+        action_counts_file = os.path.join(results_dir, f"{self.experiment_name}_actions_{timestamp}.json")
+        with open(action_counts_file, 'w') as f:
+            json.dump(self.metrics['action_types'], f, indent=2)
+        
+        # Create and save plots
+        self._save_training_plots(results_dir, timestamp)
+    
+    def _save_training_plots(self, results_dir, timestamp):
+        """Create and save plots of training metrics."""
+        # Create figure with subplots
+        fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Plot rewards
+        axs[0, 0].plot(self.metrics['episode_rewards'])
+        axs[0, 0].set_title('Episode Rewards')
+        axs[0, 0].set_xlabel('Episode')
+        axs[0, 0].set_ylabel('Reward')
+        axs[0, 0].grid(True)
+        
+        # Plot smoothed rewards
+        if len(self.metrics['episode_rewards']) > 10:
+            smoothed_rewards = pd.Series(self.metrics['episode_rewards']).rolling(10).mean()
+            axs[0, 1].plot(smoothed_rewards)
+            axs[0, 1].set_title('Smoothed Episode Rewards (10-ep window)')
+            axs[0, 1].set_xlabel('Episode')
+            axs[0, 1].set_ylabel('Reward')
+            axs[0, 1].grid(True)
+        
+        # Plot episode lengths
+        axs[1, 0].plot(self.metrics['episode_lengths'])
+        axs[1, 0].set_title('Episode Lengths')
+        axs[1, 0].set_xlabel('Episode')
+        axs[1, 0].set_ylabel('Steps')
+        axs[1, 0].grid(True)
+        
+        # Plot losses
+        if any(self.metrics['losses']):
+            axs[1, 1].plot(self.metrics['losses'])
+            axs[1, 1].set_title('Training Loss')
+            axs[1, 1].set_xlabel('Episode')
+            axs[1, 1].set_ylabel('Loss')
+            axs[1, 1].grid(True)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_file = os.path.join(results_dir, f"{self.experiment_name}_plots_{timestamp}.png")
+        plt.savefig(plot_file)
+        plt.close()
+        self.logger.info(f"Training plots saved to {plot_file}")
+
 def action_to_tuple(action, action_type):
     """Convert action dictionary to tuple based on action type."""
-    if action_type == 0 or action_type == 1:  # Pre-Marshalling or Crane Movement
+    if action_type == 0:  # Crane Movement
         return tuple(action['crane_movement'])
-    elif action_type == 2:  # Truck Parking
+    elif action_type == 1:  # Truck Parking
         return tuple(action['truck_parking'])
+    elif action_type == 2:  # Terminal Truck
+        return tuple(action['terminal_truck'])
     return None
-def evaluate_need_for_premarshalling(env):
-    """Determine if pre-marshalling is needed based on yard state."""
-    # Get all stacks in yard
-    yard = env.storage_yard
-    
-    # Count problematic stacks (higher priority below lower)
-    problem_stacks = 0
-    total_stacks = 0
-    
-    for row in yard.row_names:
-        for bay in range(1, yard.num_bays + 1):
-            position = f"{row}{bay}"
-            containers = yard.get_containers_at_position(position)
-            
-            if len(containers) > 1:
-                total_stacks += 1
-                # Check if priorities are ordered correctly (higher on top)
-                priorities = [containers[tier].priority for tier in sorted(containers.keys())]
-                
-                # Check if priorities are in descending order
-                if not all(priorities[i] >= priorities[i+1] for i in range(len(priorities)-1)):
-                    problem_stacks += 1
-    
-    # Only allow pre-marshalling if enough problematic stacks exist
-    return problem_stacks > 0 and problem_stacks / max(1, total_stacks) > 0.2
-
-def calculate_yard_state_score(env):
-    """Calculate a score for the current yard state (higher is better)."""
-    yard = env.storage_yard
-    score = 0
-    
-    # Component 1: Priority-based stacking score
-    for row in yard.row_names:
-        for bay in range(1, yard.num_bays + 1):
-            position = f"{row}{bay}"
-            containers = yard.get_containers_at_position(position)
-            
-            if len(containers) > 1:
-                # Check if priorities are ordered correctly (higher on top)
-                tiers = sorted(containers.keys())
-                priorities = [containers[tier].priority for tier in tiers]
-                
-                # Score each container's position
-                for i in range(len(priorities) - 1):
-                    if priorities[i] <= priorities[i+1]:  # Lower priority below higher
-                        score += 1
-                    else:
-                        score -= 2  # Penalty for incorrect order
-    
-    # Component 2: Distribution score - avoid having all containers in a few stacks
-    occupied_positions = 0
-    total_containers = 0
-    
-    for row in yard.row_names:
-        for bay in range(1, yard.num_bays + 1):
-            position = f"{row}{bay}"
-            containers = yard.get_containers_at_position(position)
-            if containers:
-                occupied_positions += 1
-                total_containers += len(containers)
-    
-    # Higher score for better distribution
-    if occupied_positions > 0:
-        avg_height = total_containers / occupied_positions
-        if avg_height <= 2:  # Ideal height
-            score += 50
-        else:
-            score -= (avg_height - 2) * 10  # Penalty for tall stacks
-    
-    return score
-
-def calculate_premarshalling_reward(env, source_position, dest_position, container):
-    """Calculate specialized reward for pre-marshalling actions."""
-    # Get the yard state score before the move
-    before_score = calculate_yard_state_score(env)
-    
-    # Temporarily make the move
-    source_containers = env.storage_yard.get_containers_at_position(source_position)
-    source_tier = max(source_containers.keys())
-    container = source_containers[source_tier]
-    
-    # Remove from source
-    env.storage_yard.remove_container(source_position, source_tier)
-    
-    # Add to destination
-    dest_containers = env.storage_yard.get_containers_at_position(dest_position)
-    dest_tier = max(dest_containers.keys()) + 1 if dest_containers else 1
-    env.storage_yard.add_container(dest_position, container, dest_tier)
-    
-    # Calculate score after move
-    after_score = calculate_yard_state_score(env)
-    
-    # Undo the move
-    env.storage_yard.remove_container(dest_position, dest_tier)
-    env.storage_yard.add_container(source_position, container, source_tier)
-    
-    # Calculate reward based on yard state improvement
-    improvement = after_score - before_score
-    
-    if improvement > 0:
-        # Positive reward for yard improvement
-        reward = 2.0 + improvement * 0.5
-    else:
-        # Penalty for non-improving moves
-        reward = -4.0 + improvement * 0.5
-    
-    return reward
 
 class CurriculumTrainer:
     """
@@ -145,7 +249,10 @@ class CurriculumTrainer:
                  base_config_path=None, 
                  checkpoints_dir='checkpoints',
                  results_dir='results',
-                 device='cuda' if torch.cuda.is_available() else 'cpu'):
+                 log_dir='logs',
+                 experiment_name=None,
+                 device='cuda' if torch.cuda.is_available() else 'cpu',
+                 quiet_console=True):
         """
         Initialize the curriculum trainer.
         
@@ -153,6 +260,8 @@ class CurriculumTrainer:
             base_config_path: Path to base configuration file
             checkpoints_dir: Directory to save model checkpoints
             results_dir: Directory to save training results
+            log_dir: Directory to save training logs
+            experiment_name: Name for this experiment
             device: Computation device (CPU/GPU)
         """
         self.base_config_path = base_config_path
@@ -164,60 +273,50 @@ class CurriculumTrainer:
         os.makedirs(checkpoints_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         
-        # Initialize metrics tracking
-        self.training_metrics = {
-            'episode_rewards': [],
-            'episode_lengths': [],
-            'losses': [],
-            'curriculum_stages': []
-        }
+        # Initialize logger
+        self.logger = TrainingLogger(log_dir, experiment_name, quiet_console=quiet_console)
         
-        # Curriculum stages configuration - simpler with longer episodes
+        # Curriculum stages configuration
         self.curriculum_stages = [
-            # Stage 1: Minimal terminal (tiny playground)
+            # Stage 1: Basic terminal operations (small terminal)
             {
+                'name': 'Basic Operations',
                 'num_railtracks': 2,
-                'num_railslots_per_track': 10,  # Just 2 slots
-                'num_storage_rows': 5,
-                'max_trucks_per_day': 50,       # Only one truck
-                'max_trains_per_day': 10,
-                'initial_containers': 100,       # Start with few containers
-                'target_reward': 100,
+                'num_railslots_per_track': 10,
+                'num_storage_rows': 3,
+                'num_terminal_trucks': 1,
+                'max_trucks_per_day': 5,
+                'max_trains_per_day': 2,
+                'target_reward': 50,
                 'max_episodes': 100,
-                'max_simulation_time': 86400 * 365  #seconds in a day * number of days
+                'max_simulation_time': 86400 * 365  # days
             }
-            # # Stage 2: Simple terminal (slightly larger)
+            # },
+            # # Stage 2: Intermediate terminal (medium size)
             # {
-            #     'num_railtracks': 1,
-            #     'num_railslots_per_track': 10,
-            #     'num_storage_rows': 2,
-            #     'max_trucks_per_day': 3,
-            #     'max_trains_per_day': 1,
-            #     'target_reward': -20,  
-            #     'max_episodes': 200,
+            #     'name': 'Intermediate Terminal',
+            #     'num_railtracks': 3,
+            #     'num_railslots_per_track': 15,
+            #     'num_storage_rows': 4,
+            #     'num_terminal_trucks': 2,
+            #     'max_trucks_per_day': 10,
+            #     'max_trains_per_day': 3,
+            #     'target_reward': 100,
+            #     'max_episodes': 150,
             #     'max_simulation_time': 86400 * 5  # 5 days
             # },
-            # # Stage 3: Medium terminal 
+            # # Stage 3: Advanced terminal (full size)
             # {
-            #     'num_railtracks': 2,
-            #     'num_railslots_per_track': 15,
-            #     'num_storage_rows': 3,
-            #     'max_trucks_per_day': 5,
-            #     'max_trains_per_day': 2,
-            #     'target_reward': -10,
-            #     'max_episodes': 200,
-            #     'max_simulation_time': 86400 * 10  # 10 days
-            # },
-            # # Stage 4: Full terminal
-            # {
+            #     'name': 'Advanced Terminal',
             #     'num_railtracks': 6,
             #     'num_railslots_per_track': 29,
             #     'num_storage_rows': 5,
-            #     'max_trucks_per_day': 10,
-            #     'max_trains_per_day': 4,
-            #     'target_reward': -5,
-            #     'max_episodes': 300,
-            #     'max_simulation_time': 86400 * 30  # 30 days
+            #     'num_terminal_trucks': 3,
+            #     'max_trucks_per_day': 20,
+            #     'max_trains_per_day': 5,
+            #     'target_reward': 200,
+            #     'max_episodes': 200,
+            #     'max_simulation_time': 86400 * 10  # 10 days
             # }
         ]
         
@@ -225,24 +324,16 @@ class CurriculumTrainer:
         self.current_stage = 0
     
     def create_environment(self, stage_config):
-        """
-        Create environment with configuration for current curriculum stage.
-        
-        Args:
-            stage_config: Configuration for the current stage
-            
-        Returns:
-            Configured TerminalEnvironment
-        """
+        """Create environment with configuration for current curriculum stage."""
         # Load base configuration
         terminal_config = TerminalConfig(self.base_config_path)
         
         # Create environment with current stage parameters
-        # The TerminalEnvironment creates its own ContainerTerminal, so we need to monkey patch
-        # its _create_terminal method to use our desired parameters
         env = TerminalEnvironment(
             terminal_config=terminal_config,
-            max_simulation_time=stage_config['max_simulation_time']
+            max_simulation_time=stage_config['max_simulation_time'],
+            num_cranes=2,  # Fixed for consistency
+            num_terminal_trucks=stage_config['num_terminal_trucks']
         )
         
         # Modify the terminal layout with our curriculum parameters
@@ -252,7 +343,7 @@ class CurriculumTrainer:
             stage_config['num_storage_rows']
         )
         
-        # We need to re-initialize components that depend on terminal layout
+        # Re-initialize components that depend on terminal layout
         env._setup_position_mappings()
         env.storage_yard = self._create_custom_storage_yard(env)
         
@@ -261,6 +352,9 @@ class CurriculumTrainer:
             max_trucks=stage_config['max_trucks_per_day'],
             max_trains=stage_config['max_trains_per_day']
         )
+        
+        # Enable simplified rendering for faster training
+        env.set_simplified_rendering(True)
         
         return env, terminal_config
         
@@ -288,13 +382,15 @@ class CurriculumTrainer:
         )
         
     def _create_custom_storage_yard(self, env):
-        """Create a storage yard matching the terminal layout."""
+        """Create a storage yard matching the terminal layout with special areas."""
         from simulation.terminal_components.Storage_Yard import StorageYard
         
         # Define special areas for different container types
         special_areas = {
             'reefer': [],
-            'dangerous': []
+            'dangerous': [],
+            'trailer': [],  # Specialized area for trailers
+            'swap_body': []  # Specialized area for swap bodies
         }
         
         # Add reefer areas in first and last column of each row
@@ -308,6 +404,16 @@ class CurriculumTrainer:
         for row in env.terminal.storage_row_names:
             special_areas['dangerous'].append((row, middle_bay-1, middle_bay+1))
         
+        # Add trailer and swap body areas in the first row (closest to driving lane)
+        first_row = env.terminal.storage_row_names[0]
+        trailer_start = int(env.terminal.num_storage_slots_per_row * 0.2)
+        trailer_end = int(env.terminal.num_storage_slots_per_row * 0.35)
+        swap_body_start = int(env.terminal.num_storage_slots_per_row * 0.6)
+        swap_body_end = int(env.terminal.num_storage_slots_per_row * 0.75)
+        
+        special_areas['trailer'].append((first_row, trailer_start, trailer_end))
+        special_areas['swap_body'].append((first_row, swap_body_start, swap_body_end))
+        
         return StorageYard(
             num_rows=env.terminal.num_storage_rows,
             num_bays=env.terminal.num_storage_slots_per_row,
@@ -317,15 +423,7 @@ class CurriculumTrainer:
         )
     
     def create_agent(self, env):
-        """
-        Create agent system for the current environment.
-        
-        Args:
-            env: Current environment
-            
-        Returns:
-            Configured TerminalAgentSystem
-        """
+        """Create agent for the current environment."""
         # Get the state dimension
         sample_obs, _ = env.reset()
         flat_state = self._flatten_state(sample_obs)
@@ -334,23 +432,26 @@ class CurriculumTrainer:
         # Get action dimensions
         action_dims = {
             'crane_movement': env.action_space['crane_movement'].nvec,
-            'truck_parking': env.action_space['truck_parking'].nvec
+            'truck_parking': env.action_space['truck_parking'].nvec,
+            'terminal_truck': env.action_space['terminal_truck'].nvec
         }
         
-        # Create agent system
+        # Create agent
         agent = OptimizedTerminalAgent(
             state_dim, 
             action_dims,
             hidden_dims=[256, 256],
-            head_dims=[128]
+            head_dims=[128],
+            device=self.device
         )
         return agent
     
     def _flatten_state(self, state):
-        """Flatten state dictionary to vector."""
+        """Flatten state dictionary to vector for the agent."""
         # Extract relevant features and flatten
         crane_positions = state['crane_positions'].flatten()
         crane_available_times = state['crane_available_times'].flatten()
+        terminal_truck_available_times = state['terminal_truck_available_times'].flatten()
         current_time = state['current_time'].flatten()
         yard_state = state['yard_state'].flatten()
         parking_status = state['parking_status'].flatten()
@@ -360,7 +461,8 @@ class CurriculumTrainer:
         # Concatenate all features
         flat_state = np.concatenate([
             crane_positions, 
-            crane_available_times, 
+            crane_available_times,
+            terminal_truck_available_times,
             current_time, 
             yard_state, 
             parking_status, 
@@ -370,39 +472,39 @@ class CurriculumTrainer:
         
         return flat_state
     
-    def train(self, total_episodes=None):
+    def train(self, total_episodes=None, resume_checkpoint=None):
         """
         Train agents through curriculum stages.
         
         Args:
             total_episodes: Total episodes to train (overrides per-stage limits)
+            resume_checkpoint: Path to checkpoint for resuming training
             
         Returns:
             Trained agent and training metrics
         """
         # Initialize tracking variables
         episode_count = 0
-        self.training_metrics = {
-            'episode_rewards': [],
-            'episode_lengths': [],
-            'losses': [],
-            'curriculum_stages': []
-        }
         
         # Initialize agent with first stage environment
-        #print(f"Creating environment for stage 1...")
+        self.logger.logger.info(f"Creating environment for stage 1 ({self.curriculum_stages[0]['name']})...")
         env, _ = self.create_environment(self.curriculum_stages[self.current_stage])
         agent = self.create_agent(env)
         
-        #print(f"Starting curriculum training with {len(self.curriculum_stages)} stages")
+        # Load checkpoint if resuming
+        if resume_checkpoint:
+            self.logger.logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
+            agent.load(resume_checkpoint)
+        
+        self.logger.logger.info(f"Starting curriculum training with {len(self.curriculum_stages)} stages")
         stage_rewards = []
         
         try:
             # Train through curriculum stages
             while self.current_stage < len(self.curriculum_stages):
                 stage_config = self.curriculum_stages[self.current_stage]
-                #print(f"\nStarting Stage {self.current_stage + 1}")
-                #print(f"Configuration: {stage_config}")
+                stage_name = stage_config['name']
+                self.logger.logger.info(f"\nStarting Stage {self.current_stage + 1}: {stage_name}")
                 
                 # Create environment for current stage
                 env, _ = self.create_environment(stage_config)
@@ -416,89 +518,100 @@ class CurriculumTrainer:
                 if total_episodes is not None:
                     max_stage_episodes = min(max_stage_episodes, total_episodes - episode_count)
                 
+                # Training progress bar
+                stage_pbar = tqdm(total=max_stage_episodes, desc=f"Stage {self.current_stage + 1}/{len(self.curriculum_stages)}")
+                
                 # Train for this stage
                 for episode in range(max_stage_episodes):
                     # Track episode
                     episode_count += 1
                     stage_episodes += 1
                     
-                    #print(f"\n--- Episode {episode_count} (Stage {self.current_stage + 1}, Episode {stage_episodes}) ---")
                     # Run episode
                     try:
-                        episode_reward, episode_steps, mean_loss = self.train_episode(env, agent)
+                        episode_reward, episode_steps, mean_loss, action_counts = self.train_episode(env, agent)
                         
                         # Track metrics
                         stage_rewards.append(episode_reward)
-                        self.training_metrics['episode_rewards'].append(episode_reward)
-                        self.training_metrics['episode_lengths'].append(episode_steps)
-                        self.training_metrics['losses'].append(mean_loss if mean_loss else 0)
-                        self.training_metrics['curriculum_stages'].append(self.current_stage)
                         
-                        # Display progress
+                        # Log episode
+                        self.logger.log_episode(
+                            episode_count, 
+                            episode_reward,
+                            episode_steps,
+                            mean_loss,
+                            self.current_stage + 1,
+                            action_counts
+                        )
+                        
+                        # Update progress bar
                         avg_reward = np.mean(stage_rewards[-10:]) if len(stage_rewards) >= 10 else np.mean(stage_rewards)
-                        #print(f"Episode {episode_count} Summary:")
-                        #print(f"  Total Reward: {episode_reward:.2f}")
-                        #print(f"  Avg Reward (last 10): {avg_reward:.2f}")
-                        #print(f"  Steps: {episode_steps}")
-                        #print(f"  Loss: {mean_loss:.4f}" if mean_loss is not None else "  Loss: N/A")
+                        stage_pbar.set_postfix({
+                            'reward': f"{episode_reward:.2f}",
+                            'avg10': f"{avg_reward:.2f}",
+                            'steps': episode_steps
+                        })
+                        stage_pbar.update(1)
                         
-                        # Save checkpoint less frequently
+                        # Save checkpoint periodically
                         if episode_count % 20 == 0:
                             self.save_checkpoint(agent, episode_count)
                         
                         # Check if we reached the target reward
                         if avg_reward >= stage_config['target_reward'] and stage_episodes >= 10:
-                            #print(f"Target reward of {stage_config['target_reward']} reached!")
+                            self.logger.logger.info(f"Target reward of {stage_config['target_reward']} reached!")
+                            self.logger.log_stage_complete(self.current_stage + 1, stage_episodes, avg_reward)
+                            
                             # Save checkpoint before advancing
                             self.save_checkpoint(agent, episode_count, f"stage_{self.current_stage + 1}_complete")
                             break
                     
                     except Exception as e:
-                        #print(f"Error during episode: {e}")
+                        self.logger.logger.error(f"Error during episode: {e}")
                         import traceback
                         traceback.print_exc()
                         # Continue with next episode
                 
+                # Close progress bar
+                stage_pbar.close()
+                
                 # Advance to next stage
                 self.current_stage += 1
                 if self.current_stage >= len(self.curriculum_stages):
-                    #print("Curriculum training complete!")
+                    self.logger.logger.info("Curriculum training complete!")
                     break
                     
                 # Clear replay buffer before starting the next stage to avoid dimension mismatches
-                #print("Clearing replay buffer for new stage...")
+                self.logger.logger.info("Clearing replay buffer for new stage...")
                 agent.replay_buffer.clear()
             
             # Save final metrics and model
-            self.save_results()
+            training_time = time.time() - self.logger.start_time
+            self.logger.log_training_complete(episode_count, training_time)
+            self.logger.save_metrics(self.results_dir)
             self.save_checkpoint(agent, episode_count, "final")
             
         except KeyboardInterrupt:
-            #print("\nTraining interrupted by user!")
+            self.logger.logger.info("\nTraining interrupted by user!")
             # Save checkpoint and results so far
-            self.save_results()
+            training_time = time.time() - self.logger.start_time
+            self.logger.log_training_complete(episode_count, training_time)
+            self.logger.save_metrics(self.results_dir)
             self.save_checkpoint(agent, episode_count, "interrupted")
         except Exception as e:
-            #print(f"Unexpected error during training: {e}")
+            self.logger.logger.error(f"Unexpected error during training: {e}")
             import traceback
             traceback.print_exc()
             # Save checkpoint and results so far
-            self.save_results()
+            training_time = time.time() - self.logger.start_time
+            self.logger.log_training_complete(episode_count, training_time)
+            self.logger.save_metrics(self.results_dir)
             self.save_checkpoint(agent, episode_count, "error")
         
-        return agent, self.training_metrics
+        return agent, self.logger.metrics
     
-    def train_episode(self, env, agent: OptimizedTerminalAgent):
-        """
-        Train for a single episode.
-        
-        Args:
-            env: Terminal environment
-            agent: Agent system
-            
-        Returns:
-            Tuple of (episode_reward, episode_steps, mean_loss)
-        """
+    def train_episode(self, env: TerminalEnvironment, agent: OptimizedTerminalAgent):
+        """Train for a single episode with focus on pre-marshalling during downtime."""
         # Reset environment
         state, _ = env.reset()
         episode_reward = 0
@@ -506,157 +619,104 @@ class CurriculumTrainer:
         losses = []
         done = False
         
-        # Create progress bar for this episode
-        sim_days = env.max_simulation_time / 86400  # Convert to days
-        pbar = tqdm(total=int(sim_days), desc=f"Day Progress", unit="days", leave=False)
-        last_day = 0
+        # Calculate maximum simulation time as 90% of env's maximum
+        max_simulation_time = env.max_simulation_time * 0.9
         
-        # Tracking time when no actions are available
-        waiting_time = 0
+        # Action tracking
+        action_counts = {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0}
         
-        # Add timeouts and stuck detection
-        max_steps = 5000  # Maximum steps per episode - increased for longer episodes
-        no_progress_counter = 0
-        consecutive_wait_count = 0  # Count consecutive waits
-        last_progress_time = env.current_simulation_time
+        # Time advancement tracking
+        consecutive_wait_count = 0
+        last_stack_check_time = env.current_simulation_time
         
-        while not done and episode_steps < max_steps:
-            # Periodically output progress
-            if episode_steps % 100 == 0:
-                print(f"Step {episode_steps}: Day {env.current_simulation_time/86400:.2f}, Total reward: {episode_reward:.2f}")
-                
-            # Select action based on current state with exploration
+        # Main training loop 
+        while not done and env.current_simulation_time < max_simulation_time:
+            # Check for pre-marshalling needs
+            needs_premarshalling = hasattr(env, 'evaluate_need_for_premarshalling') and env.evaluate_need_for_premarshalling()
+            
+            # Select action based on current state
             action_masks = state['action_mask']
             
-            # Debug: Check if any actions are valid
-            if 'crane_movement' in action_masks:
-                crane_valid = action_masks['crane_movement'].sum() > 0
+            # If pre-marshalling is needed, force agent to prioritize yard operations
+            if needs_premarshalling:
+                # Try to get a pre-marshalling action if the method exists
+                if hasattr(agent, 'select_premarshalling_action'):
+                    action, action_type, flat_state = agent.select_premarshalling_action(state, action_masks, env)
+                else:
+                    # Fallback to regular action selection
+                    action, action_type, flat_state = agent.select_action(state, action_masks, env)
             else:
-                crane_valid = False
-                
-            if 'truck_parking' in action_masks:
-                truck_valid = action_masks['truck_parking'].sum() > 0
-            else:
-                truck_valid = False
-                
-            #print(f"Valid actions available: Crane={crane_valid}, Truck={truck_valid}")
-            
-            action, action_type, flat_state = agent.select_action(state, action_masks, env)
+                # Normal action selection
+                action, action_type, flat_state = agent.select_action(state, action_masks, env)
             
             # Handle case where no actions are available
             if action is None:
-                #print("No valid actions - waiting")
                 consecutive_wait_count += 1
                 
-                # Use longer time increments for waiting when stuck for a while
-                if consecutive_wait_count > 10:
-                    advance_time = 3600  # 1 hour
+                # Check stacks every 15 minutes of simulation time
+                stack_check_interval = 15 * 60  # 15 minutes
+                time_since_last_check = env.current_simulation_time - last_stack_check_time
+                
+                # First, use small time increments to check frequently for new optimization opportunities
+                if time_since_last_check >= stack_check_interval:
+                    # Update last check time
+                    last_stack_check_time = env.current_simulation_time
+                    
+                    # Check if pre-marshalling is needed now
+                    needs_premarshalling = hasattr(env, 'evaluate_need_for_premarshalling') and env.evaluate_need_for_premarshalling()
+                    
+                    # If no pre-marshalling needed and no vehicles, advance time more aggressively
+                    if not needs_premarshalling and env.truck_queue.size() == 0 and env.train_queue.size() == 0:
+                        # More aggressive time jump - but still max 1 hour as requested
+                        advance_time = min(60 * 60, 5 * 60 * consecutive_wait_count)  # Increase time jumps but cap at 1 hour
+                    else:
+                        # Reset consecutive wait counter if we found something to do
+                        consecutive_wait_count = 0
+                        advance_time = 5 * 60  # 5 minutes
                 else:
-                    advance_time = 300  # 5 minutes
+                    # Small time jumps between stack checks
+                    advance_time = 5 * 60  # 5 minutes
                 
-                # For extreme cases, make huge jumps
-                if consecutive_wait_count > 50:
-                    advance_time = 6 * 3600  # 6 hours
-                
-                # Create a wait action - this is just a placeholder action that will be ignored
+                # Execute a wait action and force time advancement
                 wait_action = {'action_type': 0, 'crane_movement': np.array([0, 0, 0]), 'truck_parking': np.array([0, 0])}
                 next_state, reward, done, truncated, info = env.step(wait_action)
                 
-                # Force the environment time to advance
+                # Force time advancement
                 env.current_simulation_time += advance_time
                 env.current_simulation_datetime += timedelta(seconds=advance_time)
                 
-                # Manually trigger vehicle arrivals
-                if hasattr(env, '_process_vehicle_arrivals'):
-                    env._process_vehicle_arrivals(advance_time)
-                if hasattr(env, '_process_vehicle_departures'):
-                    env._process_vehicle_departures()
+                # Process vehicles
+                env._process_vehicle_arrivals(advance_time)
+                env._process_vehicle_departures()
                 
-                # Force truck/train arrivals if stuck for too long
-                if consecutive_wait_count > 20:
-                    #print("Forcing vehicle arrivals due to inactivity...")
-                    try:
-                        # Try to add a truck
-                        from simulation.terminal_components.Truck import Truck
-                        from simulation.terminal_components.Container import ContainerFactory
-                        
-                        # Find an empty parking spot
-                        empty_spots = [spot for spot in env.parking_spots 
-                                    if spot not in env.trucks_in_terminal]
-                        
-                        if empty_spots:
-                            spot = empty_spots[0]
-                            truck = Truck()
-                            # Add a container to the truck
-                            truck.add_container(ContainerFactory.create_random())
-                            env.trucks_in_terminal[spot] = truck
-                            #print(f"Added truck with container to spot {spot}")
-                        
-                        # Try to add a train
-                        from simulation.terminal_components.Train import Train
-                        
-                        empty_tracks = [track for track in env.terminal.track_names 
-                                    if track not in env.trains_in_terminal]
-                        
-                        if empty_tracks:
-                            track = empty_tracks[0]
-                            train = Train(num_wagons=3)
-                            # Add containers to train
-                            for _ in range(2):
-                                train.add_container(ContainerFactory.create_random())
-                            env.trains_in_terminal[track] = train
-                            #print(f"Added train with containers to track {track}")
-                    except Exception as e:
-                        print(f"Error forcing vehicles: {e}")
-
+                # # Force vehicle arrivals if we've been waiting too long
+                # if consecutive_wait_count > 20:
+                #     self._force_vehicle_arrivals(env)
                 
-                waiting_time += advance_time
                 episode_steps += 1
                 
-                # Update current state - need to regenerate after manually changing environment
+                # Update state
                 next_state = env._get_observation()
                 state = next_state
-                
-                # Update progress bar for waiting time
-                current_day = int(env.current_simulation_time / 86400)
-                if current_day > last_day:
-                    pbar.update(current_day - last_day)
-                    last_day = current_day
-                
-                # Check for progress
-                if env.current_simulation_time > last_progress_time + 3600:  # 1 hour of progress
-                    last_progress_time = env.current_simulation_time
-                    no_progress_counter = 0
-                else:
-                    no_progress_counter += 1
-                
-                # Break if stuck (but with a higher threshold)
-                if no_progress_counter >= 500:
-                    #print(f"Breaking episode due to lack of progress after {no_progress_counter} steps")
-                    break
-                
                 continue
-            else:
-                consecutive_wait_count = 0  # Reset consecutive wait counter when taking an action
+                
+            # Valid action found - reset consecutive wait counter
+            consecutive_wait_count = 0
             
-            # Take action in environment
+            # Track action type
+            if action_type == 0:
+                action_counts['crane'] += 1
+            elif action_type == 1:
+                action_counts['truck_parking'] += 1
+            elif action_type == 2:
+                action_counts['terminal_truck'] += 1
+            
+            # Execute action in environment
             next_state, reward, done, truncated, info = env.step(action)
             episode_reward += reward
             episode_steps += 1
             
-            # Track progress for stuck detection
-            if reward > -3:  # Consider non-terrible rewards as progress
-                no_progress_counter = 0
-                last_progress_time = env.current_simulation_time
-            else:
-                no_progress_counter += 1
-            
-            # Break if stuck in negative reward loop
-            if no_progress_counter >= 200:
-                #print(f"Breaking episode due to lack of progress after {no_progress_counter} steps with negative rewards")
-                break
-            
-            # Store experience in buffer
+            # Store experience and update networks
             next_flat_state = self._flatten_state(next_state) if next_state is not None else None
             agent.store_experience(
                 flat_state, 
@@ -676,104 +736,22 @@ class CurriculumTrainer:
             
             # Update state
             state = next_state
-            
-            # Update progress bar
-            current_day = int(env.current_simulation_time / 86400)
-            if current_day > last_day:
-                pbar.update(current_day - last_day)
-                last_day = current_day
-        
-        # Close progress bar
-        pbar.close()
         
         # Calculate mean loss
         mean_loss = np.mean(losses) if losses else None
         
-        #print(f"Episode complete - Total time waiting: {waiting_time/3600:.2f} hours")
-        #print(f"Final simulation time: {env.current_simulation_time/86400:.2f} days")
-        #print(f"Total steps: {episode_steps}, Total reward: {episode_reward:.2f}")
-        
-        # We may not have completed all days but record what we did accomplish
-        current_day = int(env.current_simulation_time / 86400)
-        #print(f"Completed {current_day} of {int(sim_days)} days ({current_day/max(1, int(sim_days))*100:.1f}%)")
-        
-        return episode_reward, episode_steps, mean_loss
+        return episode_reward, episode_steps, mean_loss, action_counts
     
     def save_checkpoint(self, agent, episode, suffix=None):
         """Save agent checkpoint."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"agent_checkpoint_ep{episode}"
+        filename = f"{self.logger.experiment_name}_ep{episode}"
         if suffix:
             filename += f"_{suffix}"
         filename += f"_{timestamp}.pt"
         filepath = os.path.join(self.checkpoints_dir, filename)
         agent.save(filepath)
-        #print(f"Checkpoint saved to {filepath}")
-    
-    def save_results(self):
-        """Save training metrics."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        results_file = os.path.join(self.results_dir, f"training_results_{timestamp}.csv")
-        
-        # Convert metrics to DataFrame
-        results_df = pd.DataFrame({
-            'episode': range(1, len(self.training_metrics['episode_rewards']) + 1),
-            'reward': self.training_metrics['episode_rewards'],
-            'length': self.training_metrics['episode_lengths'],
-            'loss': self.training_metrics['losses'],
-            'stage': self.training_metrics['curriculum_stages']
-        })
-        
-        # Save to CSV
-        results_df.to_csv(results_file, index=False)
-        #print(f"Training results saved to {results_file}")
-        
-        # Create and save plots
-        self.plot_training_results(timestamp)
-    
-    def plot_training_results(self, timestamp):
-        """Create and save plots of training metrics."""
-        # Create figure with subplots
-        fig, axs = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Plot rewards
-        axs[0, 0].plot(self.training_metrics['episode_rewards'])
-        axs[0, 0].set_title('Episode Rewards')
-        axs[0, 0].set_xlabel('Episode')
-        axs[0, 0].set_ylabel('Reward')
-        axs[0, 0].grid(True)
-        
-        # Plot smoothed rewards
-        if len(self.training_metrics['episode_rewards']) > 10:
-            smoothed_rewards = pd.Series(self.training_metrics['episode_rewards']).rolling(10).mean()
-            axs[0, 1].plot(smoothed_rewards)
-            axs[0, 1].set_title('Smoothed Episode Rewards (10-ep window)')
-            axs[0, 1].set_xlabel('Episode')
-            axs[0, 1].set_ylabel('Reward')
-            axs[0, 1].grid(True)
-        
-        # Plot episode lengths
-        axs[1, 0].plot(self.training_metrics['episode_lengths'])
-        axs[1, 0].set_title('Episode Lengths')
-        axs[1, 0].set_xlabel('Episode')
-        axs[1, 0].set_ylabel('Steps')
-        axs[1, 0].grid(True)
-        
-        # Plot losses
-        if any(self.training_metrics['losses']):
-            axs[1, 1].plot(self.training_metrics['losses'])
-            axs[1, 1].set_title('Training Loss')
-            axs[1, 1].set_xlabel('Episode')
-            axs[1, 1].set_ylabel('Loss')
-            axs[1, 1].grid(True)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_file = os.path.join(self.results_dir, f"training_plots_{timestamp}.png")
-        plt.savefig(plot_file)
-        plt.close()
-        #print(f"Training plots saved to {plot_file}")
+        self.logger.logger.info(f"Checkpoint saved to {filepath}")
     
     def evaluate(self, agent, num_episodes=5, render=False):
         """
@@ -791,33 +769,51 @@ class CurriculumTrainer:
         full_config = self.curriculum_stages[-1]
         env, _ = self.create_environment(full_config)
         
+        # Disable simplified rendering for evaluation
+        env.set_simplified_rendering(not render)
+        
         # Run evaluation episodes
         eval_rewards = []
         eval_steps = []
         eval_times = []
+        action_counts = {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0}
         
-        #print(f"\nEvaluating agent for {num_episodes} episodes...")
+        self.logger.logger.info(f"\nEvaluating agent for {num_episodes} episodes...")
+        eval_pbar = tqdm(total=num_episodes, desc="Evaluating")
+        
         for episode in range(num_episodes):
             state, _ = env.reset()
             episode_reward = 0
             episode_steps = 0
             done = False
             
-            while not done:
+            while not done and episode_steps < 2000:  # Limit eval episodes
                 # Select action with no exploration
                 action_masks = state['action_mask']
-                action, _, _ = agent.select_action(state, action_masks, env, epsilon=0)
+                action, action_type, _ = agent.select_action(state, action_masks, env, epsilon=0)
                 
                 # Handle case where no actions are available
                 if action is None:
                     # Wait until next available time
-                    wait_action = {'action_type': 0, 'crane_movement': np.array([0, 0, 0]), 'truck_parking': np.array([0, 0])}
-                    next_state, reward, done, truncated, _ = env.step(wait_action)
+                    advance_time = 300  # 5 minutes
+                    env.current_simulation_time += advance_time
+                    env.current_simulation_datetime += timedelta(seconds=advance_time)
+                    env._process_vehicle_arrivals(advance_time)
+                    env._process_vehicle_departures()
+                    next_state = env._get_observation()
                 else:
                     # Take action in environment
                     next_state, reward, done, truncated, _ = env.step(action)
+                    episode_reward += reward
+                    
+                    # Update action count
+                    if action_type == 0:
+                        action_counts['crane'] += 1
+                    elif action_type == 1:
+                        action_counts['truck_parking'] += 1
+                    elif action_type == 2:
+                        action_counts['terminal_truck'] += 1
                 
-                episode_reward += reward
                 episode_steps += 1
                 
                 # Render if requested
@@ -834,69 +830,84 @@ class CurriculumTrainer:
             eval_steps.append(episode_steps)
             eval_times.append(env.current_simulation_time / 86400)  # Convert to days
             
-            #print(f"Evaluation Episode {episode + 1}/{num_episodes}")
-            #print(f"  Reward: {episode_reward:.2f}, Steps: {episode_steps}")
-            #print(f"  Simulation time: {eval_times[-1]:.2f} days")
+            # Update progress bar
+            eval_pbar.update(1)
+        
+        eval_pbar.close()
         
         # Calculate evaluation metrics
         evaluation_metrics = {
             'mean_reward': np.mean(eval_rewards),
             'std_reward': np.std(eval_rewards),
             'mean_steps': np.mean(eval_steps),
-            'mean_days': np.mean(eval_times)
+            'mean_days': np.mean(eval_times),
+            'action_counts': action_counts
         }
         
-        #print("\nEvaluation Results:")
-        #print(f"  Mean Reward: {evaluation_metrics['mean_reward']:.2f} ± {evaluation_metrics['std_reward']:.2f}")
-        #print(f"  Mean Steps: {evaluation_metrics['mean_steps']:.2f}")
-        #print(f"  Mean Simulation Days: {evaluation_metrics['mean_days']:.2f}")
+        # Log evaluation results
+        self.logger.logger.info("\nEvaluation Results:")
+        self.logger.logger.info(f"  Mean Reward: {evaluation_metrics['mean_reward']:.2f} ± {evaluation_metrics['std_reward']:.2f}")
+        self.logger.logger.info(f"  Mean Steps: {evaluation_metrics['mean_steps']:.2f}")
+        self.logger.logger.info(f"  Mean Simulation Days: {evaluation_metrics['mean_days']:.2f}")
+        
+        # Log action distribution
+        action_str = " | ".join([f"{key}: {count}" for key, count in action_counts.items()])
+        self.logger.logger.info(f"  Action counts: {action_str}")
         
         return evaluation_metrics
 
-def main():
-    """Main function for training terminal agents."""
+def parse_args():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Train terminal agents with curriculum learning')
     parser.add_argument('--config', type=str, default=None, help='Path to configuration file')
     parser.add_argument('--episodes', type=int, default=None, help='Total number of episodes')
     parser.add_argument('--checkpoints', type=str, default='checkpoints', help='Checkpoints directory')
     parser.add_argument('--results', type=str, default='results', help='Results directory')
+    parser.add_argument('--logs', type=str, default='logs', help='Logs directory')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                       help='Computation device (cuda/cpu)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--evaluate', action='store_true', help='Evaluate after training')
     parser.add_argument('--render', action='store_true', help='Render during evaluation')
+    parser.add_argument('--resume', type=str, default=None, help='Resume training from checkpoint')
+    parser.add_argument('--name', type=str, default=None, help='Experiment name')
     
-    args = parser.parse_args()
+    return parser.parse_args()
+
+def main():
+    """Main function for training terminal agents."""
+    args = parse_args()
     
     # Set random seeds
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if args.device == 'cuda':
+    if args.device == 'cuda' and torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
+    
+    # Generate experiment name if not provided
+    if args.name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.name = f"terminal_training_{timestamp}"
     
     # Create curriculum trainer
     trainer = CurriculumTrainer(
         base_config_path=args.config,
         checkpoints_dir=args.checkpoints,
         results_dir=args.results,
+        log_dir=args.logs,
+        experiment_name=args.name,
         device=args.device
     )
     
     # Train agents
-    #print(f"Starting training with device: {args.device}")
-    start_time = time.time()
-    
-    agent, metrics = trainer.train(total_episodes=args.episodes)
-    
-    training_time = time.time() - start_time
-    #print(f"Training completed in {training_time:.2f} seconds")
+    agent, _ = trainer.train(
+        total_episodes=args.episodes,
+        resume_checkpoint=args.resume
+    )
     
     # Evaluate if requested
     if args.evaluate:
-        #print("\nStarting evaluation...")
         trainer.evaluate(agent, num_episodes=5, render=args.render)
-    
-    #print("Done!")
 
 if __name__ == "__main__":
     main()
