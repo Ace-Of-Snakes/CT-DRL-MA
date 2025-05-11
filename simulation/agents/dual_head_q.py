@@ -206,10 +206,10 @@ class OptimizedTerminalAgent(nn.Module):
         need_premarshalling = self._evaluate_need_for_premarshalling(env)
         if need_premarshalling:
             yard_mask = self._extract_yard_mask(action_masks)
-            print("Pre-marshalling enabled - yard state indicates optimization needed")
+            # print("Pre-marshalling enabled - yard state indicates optimization needed")
         else:
             yard_mask = None
-            print("Pre-marshalling disabled - yard state is optimal or near-optimal")
+            # print("Pre-marshalling disabled - yard state is optimal or near-optimal")
         
         # Determine which action types are available
         available_types = []
@@ -222,7 +222,7 @@ class OptimizedTerminalAgent(nn.Module):
         
         # If no actions available, return None to signal waiting
         if not available_types:
-            print("No valid actions available - signaling to wait")
+            # print("No valid actions available - signaling to wait")
             return None, None, None
         
         # With probability epsilon, choose a random action
@@ -365,8 +365,8 @@ class OptimizedTerminalAgent(nn.Module):
         }
         
         # Print debugging info
-        print(f"Selected action type: {'Transfer' if action_type == 0 else 'Yard optimization'}")
-        print(f"Action: {action}")
+        # print(f"Selected action type: {'Transfer' if action_type == 0 else 'Yard optimization'}")
+        # print(f"Action: {action}")
         
         # Return action and flattened state
         flat_state = self._flatten_state(state)
@@ -631,8 +631,8 @@ class OptimizedTerminalAgent(nn.Module):
         # Only allow pre-marshalling if enough problematic stacks exist
         needs_premarshalling = problem_stacks > 0 and problem_stacks / max(1, total_stacks) > 0.2
         
-        print(f"Yard state: {problem_stacks}/{total_stacks} problematic stacks - " +
-              f"{'Needs' if needs_premarshalling else 'Does not need'} pre-marshalling")
+        # print(f"Yard state: {problem_stacks}/{total_stacks} problematic stacks - " +
+            #   f"{'Needs' if needs_premarshalling else 'Does not need'} pre-marshalling")
         
         return needs_premarshalling
     
@@ -851,6 +851,143 @@ class OptimizedTerminalAgent(nn.Module):
         
         print(f"Model loaded from {filepath}")
 
+    def select_premarshalling_action(self, state, action_masks, env):
+        """
+        Select an action specifically for pre-marshalling, prioritizing storage-to-storage moves.
+        
+        Args:
+            state: Current state
+            action_masks: Action masks
+            env: Environment
+            
+        Returns:
+            Tuple of (selected_action, action_type, flat_state)
+        """
+        # Always calculate flat_state at the beginning to avoid UnboundLocalError
+        flat_state = self._flatten_state(state)
+        
+        # Extract yard optimization mask (specifically storage-to-storage moves)
+        yard_mask = self._extract_yard_mask(action_masks)
+        
+        # If no valid yard optimization moves, try regular transfer actions
+        if yard_mask is None or yard_mask.sum() == 0:
+            transfer_mask = self._extract_transfer_mask(action_masks)
+            if transfer_mask is not None and transfer_mask.sum() > 0:
+                # Create action based on transfer mask
+                valid_indices = np.argwhere(transfer_mask == 1)
+                if len(valid_indices) > 0:
+                    # Select an action with lower exploration rate
+                    if random.random() < 0.1:  # Lower epsilon for pre-marshalling
+                        action_idx = random.randint(0, len(valid_indices) - 1)
+                        action = tuple(valid_indices[action_idx])
+                    else:
+                        # Use model to select best action
+                        try:
+                            # Convert state to tensor for network
+                            state_tensor = torch.FloatTensor(flat_state).unsqueeze(0).to(self.device)
+                            
+                            # Get features from backbone
+                            features = self.backbone(state_tensor)
+                            
+                            # Find best action using transfer head
+                            best_action = None
+                            best_value = float('-inf')
+                            
+                            for idx in valid_indices:
+                                # For each valid action, evaluate its value
+                                with torch.no_grad():
+                                    # Use transfer head
+                                    q_value = self.transfer_head(features).item()
+                                
+                                # Update if better
+                                if q_value > best_value:
+                                    best_value = q_value
+                                    best_action = tuple(idx)
+                            
+                            if best_action is not None:
+                                action = best_action
+                            else:
+                                # Fallback to random if model fails
+                                action_idx = random.randint(0, len(valid_indices) - 1)
+                                action = tuple(valid_indices[action_idx])
+                        except Exception:
+                            # Fallback to random on error
+                            action_idx = random.randint(0, len(valid_indices) - 1)
+                            action = tuple(valid_indices[action_idx])
+                    
+                    # Map to environment action format
+                    env_action = {
+                        'action_type': 0,  # Crane movement
+                        'crane_movement': np.array(action, dtype=np.int64),
+                        'truck_parking': np.zeros(2, dtype=np.int64)  # Placeholder
+                    }
+                    
+                    return env_action, 0, flat_state
+        
+        # If we have valid yard optimization moves
+        elif yard_mask is not None and yard_mask.sum() > 0:
+            valid_indices = np.argwhere(yard_mask == 1)
+            
+            # Select an action with lower exploration rate
+            if random.random() < 0.1:  # Lower epsilon for pre-marshalling 
+                action_idx = random.randint(0, len(valid_indices) - 1)
+                action = tuple(valid_indices[action_idx])
+            else:
+                # Use model to select best action
+                try:
+                    # Convert state to tensor for network
+                    state_tensor = torch.FloatTensor(flat_state).unsqueeze(0).to(self.device)
+                    
+                    # Get features from backbone
+                    features = self.backbone(state_tensor)
+                    
+                    # Find best action using yard head
+                    best_action = None
+                    best_value = float('-inf')
+                    
+                    for idx in valid_indices:
+                        # For each valid action, evaluate its value
+                        with torch.no_grad():
+                            # Use yard head
+                            q_value = self.yard_head(features).item()
+                            
+                            # Evaluate if this specific pre-marshalling action improves yard
+                            source_pos = self._idx_to_position(idx[1], env)
+                            dest_pos = self._idx_to_position(idx[2], env)
+                            
+                            # Get yard improvement estimate
+                            improvement = self._estimate_move_improvement(env, source_pos, dest_pos)
+                            
+                            # Boost or penalize based on estimated improvement
+                            q_value = q_value * (1.0 + improvement * 0.5)
+                        
+                        # Update if better
+                        if q_value > best_value:
+                            best_value = q_value
+                            best_action = tuple(idx)
+                    
+                    if best_action is not None:
+                        action = best_action
+                    else:
+                        # Fallback to random if model fails
+                        action_idx = random.randint(0, len(valid_indices) - 1)
+                        action = tuple(valid_indices[action_idx])
+                except Exception:
+                    # Fallback to random on error
+                    action_idx = random.randint(0, len(valid_indices) - 1)
+                    action = tuple(valid_indices[action_idx])
+            
+            # Map to environment action format
+            env_action = {
+                'action_type': 0,  # Crane movement
+                'crane_movement': np.array(action, dtype=np.int64),
+                'truck_parking': np.zeros(2, dtype=np.int64)  # Placeholder
+            }
+            
+            return env_action, 1, flat_state
+        
+        # No valid actions
+        return None, None, flat_state
 
 def handle_truck_parking(env):
     """
