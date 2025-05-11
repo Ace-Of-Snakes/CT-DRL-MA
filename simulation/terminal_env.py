@@ -11,13 +11,13 @@ from datetime import datetime, timedelta
 import random
 
 # Import our custom components
-from terminal_layout.CTSimulator import ContainerTerminal
-from terminal_components.Container import Container, ContainerFactory
-from terminal_components.Train import Train
-from terminal_components.Truck import Truck
-from terminal_components.Storage_Yard import StorageYard
-from terminal_components.RMGCrane import RMGCrane
-from terminal_components.Vehicle_Queue import VehicleQueue
+from simulation.terminal_layout.CTSimulator import ContainerTerminal
+from simulation.terminal_components.Container import Container, ContainerFactory
+from simulation.terminal_components.Train import Train
+from simulation.terminal_components.Truck import Truck
+from simulation.terminal_components.Storage_Yard import StorageYard
+from simulation.terminal_components.RMGCrane import RMGCrane
+from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 
 class TerminalEnvironment(gym.Env):
@@ -692,7 +692,7 @@ class TerminalEnvironment(gym.Env):
     
     def _calculate_reward(self, container, source_position, destination_position, time_taken):
         """Calculate the reward for moving a container."""
-        reward = 0.0  # Base reward
+        reward = 2.0  # Base reward
         
         # Get source and destination information
         source_type = self._get_position_type(source_position)
@@ -709,7 +709,7 @@ class TerminalEnvironment(gym.Env):
         
         # Empty crane movement penalty
         if container is None:
-            empty_move_penalty = -5.0
+            empty_move_penalty = -1.0
             distance_time_penalty = -0.05 * distance - time_taken / 60.0
             
             print(f"Empty move: base={empty_move_penalty}, distance={distance:.2f}m, time={time_taken:.2f}s")
@@ -720,15 +720,15 @@ class TerminalEnvironment(gym.Env):
         # Determine the reward based on move type
         if source_type == 'train' and dest_type == 'truck':
             # GOLDEN MOVE: DIRECT TRAIN TO TRUCK
-            move_type_reward = 10.0
+            move_type_reward = 30.0
             print(f"Golden move (train→truck): +{move_type_reward:.2f}")
         elif source_type == 'truck' and dest_type == 'train':
             # GOLDEN MOVE: DIRECT TRUCK TO TRAIN
-            move_type_reward = 10.0
+            move_type_reward = 30.0
             print(f"Golden move (truck→train): +{move_type_reward:.2f}")
         elif source_type == 'storage' and (dest_type == 'truck' or dest_type == 'train'):
             # GOOD MOVE: STORAGE TO TRUCK OR TRAIN
-            move_type_reward = 3.0
+            move_type_reward = 15.0
             print(f"Good move (storage→{dest_type}): +{move_type_reward:.2f}")
             
             # DEADLINE BONUS: Container moved before deadline
@@ -742,15 +742,15 @@ class TerminalEnvironment(gym.Env):
                     print(f"Deadline bonus: +{deadline_bonus:.2f} (due in {time_until_deadline/3600:.1f}h)")
         elif (source_type == 'train' or source_type == 'truck') and dest_type == 'storage':
             # STANDARD MOVES: TRAIN/TRUCK TO STORAGE
-            move_type_reward = 2.0
+            move_type_reward = 5.0
             print(f"Standard move ({source_type}→storage): +{move_type_reward:.2f}")
         elif source_type == 'storage' and dest_type == 'storage':
             # RESHUFFLING: STORAGE TO STORAGE
-            move_type_reward = -4.0
+            move_type_reward = -0.5
             print(f"Reshuffling penalty: {move_type_reward:.2f}")
         elif source_type == 'truck' and dest_type == 'parking':
             # TRUCK PARKING: ASSIGN TRUCK TO SPOT
-            move_type_reward = 2.0
+            move_type_reward = 6.0
             print(f"Truck parking assignment: +{move_type_reward:.2f}")
         
         # Add the move type reward

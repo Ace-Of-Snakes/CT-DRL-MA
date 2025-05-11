@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import random
 import uuid
 from typing import List, Dict, Optional, Tuple, Set
-from terminal_components.Container import Container
+from simulation.terminal_components.Container import Container
 
 class Truck:
     """
