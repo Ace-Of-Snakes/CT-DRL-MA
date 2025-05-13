@@ -414,7 +414,33 @@ class EnhancedTerminalEnvironment(gym.Env):
             else:
                 result[key] = value
         return result
-    
+    def create_wait_action(self):
+        """
+        Create a properly formatted wait action with valid indices for this environment instance.
+        This ensures the wait action uses indices that are valid in this specific environment.
+        
+        Returns:
+            Dict: A properly formatted wait action
+        """
+        # Create a wait action with valid indices for this environment
+        # Use the first available indices to ensure they're valid
+        first_crane_idx = 0
+        first_position_idx = 0  # First valid position index
+        
+        # Ensure we have valid position indices
+        if len(self.idx_to_position) > 0:
+            first_position_idx = min(self.idx_to_position.keys())
+        
+        # Create the wait action with proper, valid indices
+        wait_action = {
+            'action_type': 0,  # Crane movement (arbitrary, but must be valid)
+            'crane_movement': np.array([first_crane_idx, first_position_idx, first_position_idx], dtype=np.int32),
+            'truck_parking': np.array([0, 0], dtype=np.int32),
+            'terminal_truck': np.array([0, first_position_idx, first_position_idx], dtype=np.int32)
+        }
+        
+        return wait_action
+
     def step(self, action):
         """Take a step in the environment by executing the specified action."""
         # Get current observation with action mask
@@ -430,11 +456,37 @@ class EnhancedTerminalEnvironment(gym.Env):
         
         start_time = time.time()
         
+        # Detect if this is a wait action (no movement)
+        is_wait_action = False
+        if action_type == 0:  # Crane movement
+            if isinstance(action['crane_movement'], np.ndarray) and np.array_equal(action['crane_movement'], np.array([0, 0, 0])):
+                is_wait_action = True
+            elif isinstance(action['crane_movement'], torch.Tensor) and torch.all(action['crane_movement'] == 0):
+                is_wait_action = True
+        
+        # Handle wait action specially - advance time without actual movement
+        if is_wait_action:
+            # Small time advancement (1 minute)
+            time_advance = 60
+            self.current_simulation_time += time_advance
+            self.current_simulation_datetime += timedelta(seconds=time_advance)
+            
+            # Process vehicle arrivals and departures
+            self._process_vehicle_arrivals(time_advance)
+            self._process_vehicle_departures()
+            
+            # Return updated observation with no reward
+            observation = self._get_observation_tensor()
+            reward = 0
+            terminated = self.current_simulation_time >= self.max_simulation_time
+            truncated = False
+            info = {"action": "wait", "time_advanced": time_advance}
+            return observation, reward, terminated, truncated, info
+        
         # Convert numpy action to tensor format if needed
         if isinstance(action['crane_movement'], np.ndarray):
             crane_movement = torch.tensor(action['crane_movement'], device=self.device)
             truck_parking = torch.tensor(action['truck_parking'], device=self.device)
-            # In EnhancedTerminalEnvironment.py, step method
             terminal_truck = torch.tensor(action.get('terminal_truck', [0, 0, 0]), device=self.device)
         else:
             crane_movement = action['crane_movement']

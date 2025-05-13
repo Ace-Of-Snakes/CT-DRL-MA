@@ -20,9 +20,8 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import our modules
-from simulation.agents.dual_head_q import OptimizedTerminalAgent
-# from simulation.terminal_env import TerminalEnvironment
-from simulation.EnhancedTerminalEnvironment import EnhancedTerminalEnvironment as TerminalEnvironment
+from simulation.deprecated_components.dual_head_q import OptimizedTerminalAgent
+from simulation.deprecated_components.terminal_env import TerminalEnvironment
 from simulation.config import TerminalConfig
 
 class TrainingLogger:
@@ -330,18 +329,11 @@ class CurriculumTrainer:
         terminal_config = TerminalConfig(self.base_config_path)
         
         # Create environment with current stage parameters
-        # env = TerminalEnvironment(
-        #     terminal_config=terminal_config,
-        #     max_simulation_time=stage_config['max_simulation_time'],
-        #     num_cranes=2,  # Fixed for consistency
-        #     num_terminal_trucks=stage_config['num_terminal_trucks']
-        # )
         env = TerminalEnvironment(
             terminal_config=terminal_config,
             max_simulation_time=stage_config['max_simulation_time'],
             num_cranes=2,  # Fixed for consistency
-            num_terminal_trucks=stage_config['num_terminal_trucks'],
-            device=self.device,
+            num_terminal_trucks=stage_config['num_terminal_trucks']
         )
         
         # Modify the terminal layout with our curriculum parameters
@@ -391,7 +383,7 @@ class CurriculumTrainer:
         
     def _create_custom_storage_yard(self, env):
         """Create a storage yard matching the terminal layout with special areas."""
-        from simulation.terminal_components.Storage_Yard import StorageYard
+        from simulation.deprecated_components.Storage_Yard import StorageYard
         
         # Define special areas for different container types
         special_areas = {
@@ -455,33 +447,16 @@ class CurriculumTrainer:
         return agent
     
     def _flatten_state(self, state):
-        """Flatten state dictionary to vector for the agent, handling both tensor and numpy inputs."""
-        # Check if input is None (used in terminal states)
-        if state is None:
-            return None
-            
-        # Helper function to process state components
-        def process_component(component):
-            # Handle tensor inputs - convert to numpy
-            if isinstance(component, torch.Tensor):
-                return component.detach().cpu().numpy().flatten()
-            # Handle numpy arrays
-            elif isinstance(component, np.ndarray):
-                return component.flatten()
-            # Handle other types if needed
-            else:
-                # Convert to numpy array if it's a list or other sequence
-                return np.array(component).flatten()
-        
-        # Process all state components
-        crane_positions = process_component(state['crane_positions'])
-        crane_available_times = process_component(state['crane_available_times'])
-        terminal_truck_available_times = process_component(state['terminal_truck_available_times'])
-        current_time = process_component(state['current_time'])
-        yard_state = process_component(state['yard_state'])
-        parking_status = process_component(state['parking_status'])
-        rail_status = process_component(state['rail_status'])
-        queue_sizes = process_component(state['queue_sizes'])
+        """Flatten state dictionary to vector for the agent."""
+        # Extract relevant features and flatten
+        crane_positions = state['crane_positions'].flatten()
+        crane_available_times = state['crane_available_times'].flatten()
+        terminal_truck_available_times = state['terminal_truck_available_times'].flatten()
+        current_time = state['current_time'].flatten()
+        yard_state = state['yard_state'].flatten()
+        parking_status = state['parking_status'].flatten()
+        rail_status = state['rail_status'].flatten()
+        queue_sizes = state['queue_sizes'].flatten()
         
         # Concatenate all features
         flat_state = np.concatenate([
@@ -703,12 +678,7 @@ class CurriculumTrainer:
                     advance_time = 5 * 60  # 5 minutes
                 
                 # Execute a wait action and force time advancement
-                wait_action = {
-                    'action_type': 0, 
-                    'crane_movement': np.array([0, 0, 0]), 
-                    'truck_parking': np.array([0, 0]),
-                    'terminal_truck': np.array([0, 0, 0])  # Add this line
-                }
+                wait_action = {'action_type': 0, 'crane_movement': np.array([0, 0, 0]), 'truck_parking': np.array([0, 0])}
                 next_state, reward, done, truncated, info = env.step(wait_action)
                 
                 # Force time advancement

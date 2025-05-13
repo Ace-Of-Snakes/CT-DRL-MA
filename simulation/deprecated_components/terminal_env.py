@@ -17,8 +17,8 @@ from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
 from simulation.terminal_components.TerminalTruck import TerminalTruck  # New class
-from simulation.terminal_components.Storage_Yard import StorageYard
-from simulation.terminal_components.RMGCrane import RMGCrane
+from simulation.deprecated_components.Storage_Yard import StorageYard
+from simulation.deprecated_components.RMGCrane import RMGCrane
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 
