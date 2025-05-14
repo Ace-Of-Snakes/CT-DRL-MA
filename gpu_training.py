@@ -1,5 +1,3 @@
-# enhanced_training.py
-
 import os
 import numpy as np
 import torch
@@ -10,39 +8,26 @@ import argparse
 from tqdm import tqdm
 import pandas as pd
 import sys
-from pathlib import Path
 import logging
 import json
+from pathlib import Path
 
-# Add project root to path to ensure imports work correctly
-project_root = str(Path(__file__).parent.parent)
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
-# Import our modules
-from simulation.agents.dual_head_q_tensored import OptimizedTerminalAgent
-# Import the enhanced tensor-based environment
-from simulation.EnhancedTerminalEnvironment import EnhancedTerminalEnvironment as TerminalEnvironment
+# Import previously implemented classes
+from simulation.agents.OptimizedTerminalAgent import OptimizedTerminalAgent
 from simulation.config import TerminalConfig
+from simulation.GPUTerminalEnvironment import GPUTerminalEnvironment
 
-class TrainingLogger:
-    """Logger for training with file output and console display."""
+class GPUTrainingLogger:
+    """GPU-optimized logger for training with file output and console display."""
     
     def __init__(self, log_dir='logs', experiment_name=None, quiet_console=True):
-        """
-        Initialize logger.
-        
-        Args:
-            log_dir: Directory to save logs
-            experiment_name: Name of experiment (auto-generated if None)
-            quiet_console: If True, only show warnings, errors and tqdm on console
-        """
+        """Initialize logger with GPU performance tracking."""
         os.makedirs(log_dir, exist_ok=True)
         
         # Generate experiment name if not provided
         if experiment_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            experiment_name = f"terminal_training_{timestamp}"
+            experiment_name = f"gpu_terminal_training_{timestamp}"
         
         self.experiment_name = experiment_name
         self.log_path = os.path.join(log_dir, f"{experiment_name}.log")
@@ -50,17 +35,17 @@ class TrainingLogger:
         
         # Configure logger
         self.logger = logging.getLogger(experiment_name)
-        self.logger.setLevel(logging.INFO)  # Main logger level stays at INFO
+        self.logger.setLevel(logging.INFO)
         
         # Clear any existing handlers
         if self.logger.handlers:
             self.logger.handlers.clear()
         
-        # Create file handler - ALWAYS logs everything to file
+        # Create file handler
         file_handler = logging.FileHandler(self.log_path)
         file_handler.setLevel(logging.INFO)
         
-        # Create console handler - set to WARNING level if quiet_console is True
+        # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.WARNING if quiet_console else logging.INFO)
         
@@ -80,38 +65,40 @@ class TrainingLogger:
             'losses': [],
             'curriculum_stages': [],
             'action_types': {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0},
-            'times': []
+            'times': [],
+            'env_step_times': [],
+            'gpu_memory_usage': [],  # Track GPU memory usage
+            'training_step_times': [],  # Track training step times
         }
         
         self.start_time = time.time()
         
-        # Log start message (will be in file but may be suppressed on console)
-        self.logger.info(f"Started training experiment: {experiment_name}")
+        # Log start message
+        self.logger.info(f"Started GPU-accelerated training experiment: {experiment_name}")
         self.logger.info(f"Log file: {self.log_path}")
         
-        # Important messages should use warning level to always show on console
-        if quiet_console:
-            self.logger.warning(f"Running in quiet mode - only warnings and errors will show on console")
-            self.logger.warning(f"All logs are still saved to: {self.log_path}")
+        # Log CUDA info if available
+        if torch.cuda.is_available():
+            cuda_device = torch.cuda.current_device()
+            self.logger.info(f"CUDA Device: {torch.cuda.get_device_name(cuda_device)}")
+            self.logger.info(f"CUDA Version: {torch.version.cuda}")
+        else:
+            self.logger.warning("CUDA not available. Training will run on CPU.")
     
-    def log_episode(self, episode, reward, steps, loss, stage, action_counts=None):
-        """
-        Log episode metrics.
-        
-        Args:
-            episode: Episode number
-            reward: Episode total reward
-            steps: Number of steps in episode
-            loss: Mean loss for episode
-            stage: Curriculum stage
-            action_counts: Dictionary of action type counts
-        """
+    def log_episode(self, episode, reward, steps, loss, stage, action_counts=None, env_step_time=None, gpu_memory=None):
+        """Log episode metrics with GPU-specific information."""
         # Record metrics
         self.metrics['episode_rewards'].append(reward)
         self.metrics['episode_lengths'].append(steps)
         self.metrics['losses'].append(loss if loss is not None else 0)
         self.metrics['curriculum_stages'].append(stage)
         self.metrics['times'].append(time.time() - self.start_time)
+        
+        if env_step_time is not None:
+            self.metrics['env_step_times'].append(env_step_time)
+        
+        if gpu_memory is not None:
+            self.metrics['gpu_memory_usage'].append(gpu_memory)
         
         # Update action counts if provided
         if action_counts:
@@ -123,11 +110,17 @@ class TrainingLogger:
         avg_reward = np.mean(self.metrics['episode_rewards'][-10:]) if len(self.metrics['episode_rewards']) >= 10 else np.mean(self.metrics['episode_rewards'])
         avg_steps = np.mean(self.metrics['episode_lengths'][-10:]) if len(self.metrics['episode_lengths']) >= 10 else np.mean(self.metrics['episode_lengths'])
         
-        # Format loss string properly outside the f-string
+        # Format loss string
         loss_str = f"{loss:.4f}" if loss is not None else "N/A"
         
         # Log episode summary
-        self.logger.info(f"Episode {episode} | Stage {stage} | Reward: {reward:.2f} | Avg(10): {avg_reward:.2f} | Steps: {steps} | Loss: {loss_str}")
+        log_str = f"Episode {episode} | Stage {stage} | Reward: {reward:.2f} | Avg(10): {avg_reward:.2f} | Steps: {steps} | Loss: {loss_str}"
+        if env_step_time is not None:
+            log_str += f" | Env Step: {env_step_time:.2f}ms"
+        if gpu_memory is not None:
+            log_str += f" | GPU Mem: {gpu_memory:.1f}MB"
+        
+        self.logger.info(log_str)
         
         # Log action type distribution every 10 episodes
         if episode % 10 == 0 and action_counts:
@@ -140,7 +133,7 @@ class TrainingLogger:
         self.logger.info(f"Average reward for last 10 episodes: {avg_reward:.2f}")
     
     def log_training_complete(self, total_episodes, total_time):
-        """Log completion of training."""
+        """Log completion of training with GPU performance stats."""
         hours, remainder = divmod(total_time, 3600)
         minutes, seconds = divmod(remainder, 60)
         
@@ -154,14 +147,21 @@ class TrainingLogger:
             action_pcts = {key: count/total_actions*100 for key, count in action_counts.items()}
             action_str = " | ".join([f"{key}: {count} ({pct:.1f}%)" for key, (count, pct) in zip(action_counts.keys(), action_pcts.items())])
             self.logger.info(f"Action type distribution: {action_str}")
+        
+        # Log GPU performance statistics
+        if self.metrics['env_step_times']:
+            avg_step_time = np.mean(self.metrics['env_step_times'])
+            min_step_time = np.min(self.metrics['env_step_times'])
+            max_step_time = np.max(self.metrics['env_step_times'])
+            self.logger.info(f"Environment performance: Avg step time: {avg_step_time:.2f}ms, Min: {min_step_time:.2f}ms, Max: {max_step_time:.2f}ms")
+        
+        if self.metrics['gpu_memory_usage']:
+            avg_memory = np.mean(self.metrics['gpu_memory_usage'])
+            max_memory = np.max(self.metrics['gpu_memory_usage'])
+            self.logger.info(f"GPU memory usage: Avg: {avg_memory:.1f}MB, Max: {max_memory:.1f}MB")
     
     def save_metrics(self, results_dir='results'):
-        """
-        Save training metrics to files.
-        
-        Args:
-            results_dir: Directory to save results
-        """
+        """Save training metrics to files."""
         os.makedirs(results_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -175,6 +175,17 @@ class TrainingLogger:
             'stage': self.metrics['curriculum_stages'],
             'time': self.metrics['times']
         })
+        
+        # Add step times if available
+        if self.metrics['env_step_times']:
+            padded_step_times = self.metrics['env_step_times'] + [None] * (len(self.metrics['episode_rewards']) - len(self.metrics['env_step_times']))
+            results_df['env_step_time'] = padded_step_times[:len(results_df)]
+        
+        # Add GPU memory usage if available
+        if self.metrics['gpu_memory_usage']:
+            padded_memory = self.metrics['gpu_memory_usage'] + [None] * (len(self.metrics['episode_rewards']) - len(self.metrics['gpu_memory_usage']))
+            results_df['gpu_memory'] = padded_memory[:len(results_df)]
+            
         results_df.to_csv(results_file, index=False)
         self.logger.info(f"Training metrics saved to {results_file}")
         
@@ -187,9 +198,13 @@ class TrainingLogger:
         self._save_training_plots(results_dir, timestamp)
     
     def _save_training_plots(self, results_dir, timestamp):
-        """Create and save plots of training metrics."""
+        """Create and save plots of training metrics with GPU stats."""
+        # Determine number of plots
+        n_plots = 3 if self.metrics['env_step_times'] else 2
+        n_plots += 1 if self.metrics['gpu_memory_usage'] else 0
+        
         # Create figure with subplots
-        fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+        fig, axs = plt.subplots(2, n_plots, figsize=(15, 10))
         
         # Plot rewards
         axs[0, 0].plot(self.metrics['episode_rewards'])
@@ -222,6 +237,24 @@ class TrainingLogger:
             axs[1, 1].set_ylabel('Loss')
             axs[1, 1].grid(True)
         
+        # Plot env step times if available
+        plot_idx = 2
+        if self.metrics['env_step_times']:
+            axs[0, plot_idx].plot(self.metrics['env_step_times'])
+            axs[0, plot_idx].set_title('Environment Step Times')
+            axs[0, plot_idx].set_xlabel('Episode')
+            axs[0, plot_idx].set_ylabel('Time (ms)')
+            axs[0, plot_idx].grid(True)
+            plot_idx += 1
+        
+        # Plot GPU memory usage if available
+        if self.metrics['gpu_memory_usage']:
+            axs[1, plot_idx-1].plot(self.metrics['gpu_memory_usage'])
+            axs[1, plot_idx-1].set_title('GPU Memory Usage')
+            axs[1, plot_idx-1].set_xlabel('Episode')
+            axs[1, plot_idx-1].set_ylabel('Memory (MB)')
+            axs[1, plot_idx-1].grid(True)
+        
         plt.tight_layout()
         
         # Save plot
@@ -253,9 +286,9 @@ def action_to_tuple(action, action_type):
             return tuple(action['terminal_truck'])
     return (0, 0, 0)  # Fallback default tuple
 
-class CurriculumTrainer:
+class GPUCurriculumTrainer:
     """
-    Curriculum learning trainer for container terminal agents.
+    GPU-accelerated curriculum learning trainer for container terminal agents.
     Progressively increases environment complexity as agents improve.
     """
     
@@ -265,10 +298,11 @@ class CurriculumTrainer:
                  results_dir='results',
                  log_dir='logs',
                  experiment_name=None,
-                 device='cuda' if torch.cuda.is_available() else 'cpu',
-                 quiet_console=True):
+                 device='cuda',
+                 quiet_console=True,
+                 memory_tracking=True):
         """
-        Initialize the curriculum trainer.
+        Initialize the GPU-accelerated curriculum trainer.
         
         Args:
             base_config_path: Path to base configuration file
@@ -277,20 +311,33 @@ class CurriculumTrainer:
             log_dir: Directory to save training logs
             experiment_name: Name for this experiment
             device: Computation device (CPU/GPU)
+            quiet_console: Whether to suppress console output
+            memory_tracking: Whether to track GPU memory usage
         """
         self.base_config_path = base_config_path
         self.checkpoints_dir = checkpoints_dir
         self.results_dir = results_dir
         self.device = device
+        self.memory_tracking = memory_tracking
         
         # Create directories if they don't exist
         os.makedirs(checkpoints_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         
-        # Initialize logger
-        self.logger = TrainingLogger(log_dir, experiment_name, quiet_console=quiet_console)
+        # Initialize GPU-optimized logger
+        self.logger = GPUTrainingLogger(log_dir, experiment_name, quiet_console=quiet_console)
         
-        # Curriculum stages configuration
+        # Log GPU device information
+        if device == 'cuda' and torch.cuda.is_available():
+            cuda_device = torch.cuda.current_device()
+            self.logger.logger.info(f"Using GPU: {torch.cuda.get_device_name(cuda_device)}")
+            
+            # Log initial memory usage
+            if self.memory_tracking:
+                init_memory = torch.cuda.memory_allocated() / 1e6  # MB
+                self.logger.logger.info(f"Initial GPU memory usage: {init_memory:.1f} MB")
+        
+        # Curriculum stages configuration (same as original)
         self.curriculum_stages = [
             # Stage 1: Basic terminal operations (small terminal)
             {
@@ -303,65 +350,68 @@ class CurriculumTrainer:
                 'max_trains_per_day': 2,  # Reduced for initial testing
                 'target_reward': 20,
                 'max_episodes': 100,
-                'max_simulation_time': 86400 * 100  # 1 day
+                'max_simulation_time': 86400 * 1  # 1 day
+            },
+            # Stage 2: Small terminal operations
+            {
+                'name': 'Small Terminal',
+                'num_railtracks': 2,
+                'num_railslots_per_track': 10, 
+                'num_storage_rows': 3,
+                'num_terminal_trucks': 1,
+                'max_trucks_per_day': 5,
+                'max_trains_per_day': 2,
+                'target_reward': 50,
+                'max_episodes': 100,
+                'max_simulation_time': 86400 * 2  # 2 days
+            },
+            # Stage 3: Intermediate terminal (medium size)
+            {
+                'name': 'Intermediate Terminal',
+                'num_railtracks': 3,
+                'num_railslots_per_track': 15,
+                'num_storage_rows': 4,
+                'num_terminal_trucks': 2,
+                'max_trucks_per_day': 10,
+                'max_trains_per_day': 3,
+                'target_reward': 100,
+                'max_episodes': 150,
+                'max_simulation_time': 86400 * 5  # 5 days
+            },
+            # Stage 4: Advanced terminal (full size)
+            {
+                'name': 'Advanced Terminal',
+                'num_railtracks': 6,
+                'num_railslots_per_track': 29,
+                'num_storage_rows': 5,
+                'num_terminal_trucks': 3,
+                'max_trucks_per_day': 20,
+                'max_trains_per_day': 5,
+                'target_reward': 200,
+                'max_episodes': 200,
+                'max_simulation_time': 86400 * 10  # 10 days
             }
-            # # Stage 2: Small terminal operations
-            # {
-            #     'name': 'Small Terminal',
-            #     'num_railtracks': 2,
-            #     'num_railslots_per_track': 10, 
-            #     'num_storage_rows': 3,
-            #     'num_terminal_trucks': 1,
-            #     'max_trucks_per_day': 5,
-            #     'max_trains_per_day': 2,
-            #     'target_reward': 50,
-            #     'max_episodes': 100,
-            #     'max_simulation_time': 86400 * 2  # 2 days
-            # },
-            # # Stage 3: Intermediate terminal (medium size)
-            # {
-            #     'name': 'Intermediate Terminal',
-            #     'num_railtracks': 3,
-            #     'num_railslots_per_track': 15,
-            #     'num_storage_rows': 4,
-            #     'num_terminal_trucks': 2,
-            #     'max_trucks_per_day': 10,
-            #     'max_trains_per_day': 3,
-            #     'target_reward': 100,
-            #     'max_episodes': 150,
-            #     'max_simulation_time': 86400 * 5  # 5 days
-            # },
-            # # Stage 4: Advanced terminal (full size)
-            # {
-            #     'name': 'Advanced Terminal',
-            #     'num_railtracks': 6,
-            #     'num_railslots_per_track': 29,
-            #     'num_storage_rows': 5,
-            #     'num_terminal_trucks': 3,
-            #     'max_trucks_per_day': 20,
-            #     'max_trains_per_day': 5,
-            #     'target_reward': 200,
-            #     'max_episodes': 200,
-            #     'max_simulation_time': 86400 * 10  # 10 days
-            # }
         ]
         
         # Initialize current stage
         self.current_stage = 0
     
     def create_environment(self, stage_config):
-        """Create environment with configuration for current curriculum stage."""
+        """Create GPU-accelerated environment with configuration for current curriculum stage."""
         # Load base configuration
         terminal_config = TerminalConfig(self.base_config_path)
         
-        # Create environment with current stage parameters and device
-        env = TerminalEnvironment(
+        # Create GPU-accelerated environment
+        env = GPUTerminalEnvironment(
             terminal_config=terminal_config,
             max_simulation_time=stage_config['max_simulation_time'],
             num_cranes=2,  # Fixed for consistency
             num_terminal_trucks=stage_config['num_terminal_trucks'],
-            device=self.device,  # Pass device parameter to use tensors
+            device=self.device
         )
+            
+        # Enable performance logging
+        env.log_performance = True
         
         # Modify the terminal layout with our curriculum parameters
         env.terminal = self._create_custom_terminal(
@@ -372,7 +422,9 @@ class CurriculumTrainer:
         
         # Re-initialize components that depend on terminal layout
         env._setup_position_mappings()
-        env.storage_yard = self._create_custom_storage_yard(env)
+        
+        # Create appropriate storage yard
+        env.storage_yard = self._create_gpu_storage_yard(env)
         
         # Set vehicle limits
         env.set_vehicle_limits(
@@ -407,52 +459,55 @@ class CurriculumTrainer:
             driving_lane_width=4.0,
             storage_slot_width=2.5
         )
-        
-    def _create_custom_storage_yard(self, env):
-        """Create a tensor-based storage yard with special areas."""
-        from simulation.terminal_components.TensorStorageYard import TensorStorageYard
-        
+    
+    def _create_gpu_storage_yard(self, env):
+        """Create a GPU-accelerated storage yard with special areas."""
         # Define special areas for different container types
+        num_bays = env.terminal.num_storage_slots_per_row
+        
+        # Calculate proportional positions for special areas
         special_areas = {
             'reefer': [],
             'dangerous': [],
-            'trailer': [],  # Specialized area for trailers
-            'swap_body': []  # Specialized area for swap bodies
+            'trailer': [],
+            'swap_body': []
         }
         
         # Add reefer areas in first and last column of each row
         for row in env.terminal.storage_row_names:
             special_areas['reefer'].append((row, 1, 1))
-            last_bay = env.terminal.num_storage_slots_per_row
-            special_areas['reefer'].append((row, last_bay, last_bay))
-            
-        # Add dangerous goods area in middle columns
-        middle_bay = env.terminal.num_storage_slots_per_row // 2
+            special_areas['reefer'].append((row, num_bays, num_bays))
+        
+        # Add dangerous goods area in middle columns (using proportional values)
+        dangerous_start = max(1, int(num_bays * 0.7))
+        dangerous_end = min(num_bays, dangerous_start + 2)
         for row in env.terminal.storage_row_names:
-            special_areas['dangerous'].append((row, middle_bay-1, middle_bay+1))
+            special_areas['dangerous'].append((row, dangerous_start, dangerous_end))
         
-        # Add trailer and swap body areas in the first row (closest to driving lane)
+        # Add trailer and swap body areas with proportional values
         first_row = env.terminal.storage_row_names[0]
-        trailer_start = int(env.terminal.num_storage_slots_per_row * 0.2)
-        trailer_end = int(env.terminal.num_storage_slots_per_row * 0.35)
-        swap_body_start = int(env.terminal.num_storage_slots_per_row * 0.6)
-        swap_body_end = int(env.terminal.num_storage_slots_per_row * 0.75)
-        
+        trailer_start = max(1, int(num_bays * 0.2))
+        trailer_end = max(trailer_start + 1, int(num_bays * 0.4))
         special_areas['trailer'].append((first_row, trailer_start, trailer_end))
-        special_areas['swap_body'].append((first_row, swap_body_start, swap_body_end))
         
-        # Use TensorStorageYard for better performance with tensor operations
-        return TensorStorageYard(
+        swap_start = max(trailer_end + 1, int(num_bays * 0.5))
+        swap_end = max(swap_start + 1, int(num_bays * 0.7))
+        special_areas['swap_body'].append((first_row, swap_start, swap_end))
+        
+        # Import directly instead of using a method that might not exist
+        from simulation.terminal_components.GPUStorageYard import GPUStorageYard
+        
+        return GPUStorageYard(
             num_rows=env.terminal.num_storage_rows,
             num_bays=env.terminal.num_storage_slots_per_row,
-            max_tier_height=4,
+            max_tier_height=5,
             row_names=env.terminal.storage_row_names,
             special_areas=special_areas,
-            device=self.device  # Pass the device parameter
+            device=self.device
         )
     
     def create_agent(self, env):
-        """Create agent for the current environment."""
+        """Create GPU-accelerated agent for the current environment."""
         # Get the state dimension
         sample_obs, _ = env.reset()
         flat_state = self._flatten_state(sample_obs)
@@ -465,20 +520,19 @@ class CurriculumTrainer:
             'terminal_truck': env.action_space['terminal_truck'].nvec
         }
         
-        # Create agent with the same device as environment
+        # Create agent with the specified device
         agent = OptimizedTerminalAgent(
             state_dim, 
             action_dims,
             hidden_dims=[256, 256],
             head_dims=[128],
-
             device=self.device
         )
         return agent
     
     def _flatten_state(self, state):
         """Flatten state dictionary to vector for the agent, handling both tensor and numpy inputs."""
-        # Check if input is None (used in terminal states)
+        # Check if input is None
         if state is None:
             return None
             
@@ -528,9 +582,15 @@ class CurriculumTrainer:
             # Return a default state vector of zeros as fallback
             return np.zeros(500)  # Adjust size as needed
     
+    def get_gpu_memory_usage(self):
+        """Get current GPU memory usage in MB."""
+        if self.device == 'cuda' and torch.cuda.is_available() and self.memory_tracking:
+            return torch.cuda.memory_allocated() / 1e6  # MB
+        return 0
+    
     def train(self, total_episodes=None, resume_checkpoint=None):
         """
-        Train agents through curriculum stages.
+        Train agents through curriculum stages with GPU acceleration.
         
         Args:
             total_episodes: Total episodes to train (overrides per-stage limits)
@@ -543,7 +603,7 @@ class CurriculumTrainer:
         episode_count = 0
         
         # Initialize agent with first stage environment
-        self.logger.logger.info(f"Creating environment for stage 1 ({self.curriculum_stages[0]['name']})...")
+        self.logger.logger.info(f"Creating GPU environment for stage 1 ({self.curriculum_stages[0]['name']})...")
         env, _ = self.create_environment(self.curriculum_stages[self.current_stage])
         agent = self.create_agent(env)
         
@@ -552,7 +612,7 @@ class CurriculumTrainer:
             self.logger.logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
             agent.load(resume_checkpoint)
         
-        self.logger.logger.info(f"Starting curriculum training with {len(self.curriculum_stages)} stages on device: {self.device}")
+        self.logger.logger.info(f"Starting GPU-accelerated curriculum training with {len(self.curriculum_stages)} stages on device: {self.device}")
         stage_rewards = []
         
         try:
@@ -585,10 +645,13 @@ class CurriculumTrainer:
                     
                     # Run episode
                     try:
-                        episode_reward, episode_steps, mean_loss, action_counts = self.train_episode(env, agent)
+                        episode_reward, episode_steps, mean_loss, action_counts, avg_step_time = self.train_episode(env, agent)
                         
                         # Track metrics
                         stage_rewards.append(episode_reward)
+                        
+                        # Get GPU memory usage
+                        gpu_memory = self.get_gpu_memory_usage()
                         
                         # Log episode
                         self.logger.log_episode(
@@ -597,16 +660,23 @@ class CurriculumTrainer:
                             episode_steps,
                             mean_loss,
                             self.current_stage + 1,
-                            action_counts
+                            action_counts,
+                            avg_step_time,
+                            gpu_memory
                         )
                         
                         # Update progress bar
                         avg_reward = np.mean(stage_rewards[-10:]) if len(stage_rewards) >= 10 else np.mean(stage_rewards)
-                        stage_pbar.set_postfix({
+                        progress_dict = {
                             'reward': f"{episode_reward:.2f}",
                             'avg10': f"{avg_reward:.2f}",
                             'steps': episode_steps
-                        })
+                        }
+                        if avg_step_time is not None:
+                            progress_dict['step_ms'] = f"{avg_step_time:.1f}"
+                        if gpu_memory > 0:
+                            progress_dict['GPU_MB'] = f"{gpu_memory:.1f}"
+                        stage_pbar.set_postfix(progress_dict)
                         stage_pbar.update(1)
                         
                         # Save checkpoint periodically
@@ -640,12 +710,22 @@ class CurriculumTrainer:
                 # Clear replay buffer before starting the next stage to avoid dimension mismatches
                 self.logger.logger.info("Clearing replay buffer for new stage...")
                 agent.replay_buffer.clear()
+                
+                # Clean up GPU memory between stages
+                if self.device == 'cuda' and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    self.logger.logger.info(f"GPU memory cleared. Current usage: {self.get_gpu_memory_usage():.1f} MB")
             
             # Save final metrics and model
             training_time = time.time() - self.logger.start_time
             self.logger.log_training_complete(episode_count, training_time)
             self.logger.save_metrics(self.results_dir)
             self.save_checkpoint(agent, episode_count, "final")
+            
+            # Print performance stats from GPU environment
+            if hasattr(env, 'print_performance_stats'):
+                self.logger.logger.info("\nGPU Environment Performance Statistics:")
+                env.print_performance_stats()
             
         except KeyboardInterrupt:
             self.logger.logger.info("\nTraining interrupted by user!")
@@ -664,10 +744,15 @@ class CurriculumTrainer:
             self.logger.save_metrics(self.results_dir)
             self.save_checkpoint(agent, episode_count, "error")
         
+        finally:
+            # Clean up GPU memory
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
         return agent, self.logger.metrics
     
-    def train_episode(self, env: TerminalEnvironment, agent: OptimizedTerminalAgent):
-        """Train for a single episode with focus on pre-marshalling during downtime."""
+    def train_episode(self, env, agent):
+        """Train for a single episode with GPU optimization."""
         # Reset environment
         state, _ = env.reset()
         episode_reward = 0
@@ -682,14 +767,15 @@ class CurriculumTrainer:
         # Action tracking
         action_counts = {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0}
         
-        # Time advancement tracking
+        # Time tracking
+        step_times = []
         consecutive_wait_count = 0
         last_stack_check_time = env.current_simulation_time
         
         # Main training loop 
         while not done and not truncated and env.current_simulation_time < max_simulation_time:
             # Check for pre-marshalling needs
-            needs_premarshalling = hasattr(env, 'evaluate_need_for_premarshalling') and env.evaluate_need_for_premarshalling()
+            needs_premarshalling = agent._evaluate_need_for_premarshalling(env)
             
             # Select action based on current state
             action_masks = state['action_mask']
@@ -711,11 +797,11 @@ class CurriculumTrainer:
                     last_stack_check_time = env.current_simulation_time
                     
                     # Check if pre-marshalling is needed now
-                    needs_premarshalling = hasattr(env, 'evaluate_need_for_premarshalling') and env.evaluate_need_for_premarshalling()
+                    needs_premarshalling = agent._evaluate_need_for_premarshalling(env)
                     
                     # If no pre-marshalling needed and no vehicles, advance time more aggressively
                     if not needs_premarshalling and env.truck_queue.size() == 0 and env.train_queue.size() == 0:
-                        # More aggressive time jump - but still max 1 hour as requested
+                        # More aggressive time jump - but still max 1 hour
                         advance_time = min(60 * 60, 5 * 60 * consecutive_wait_count)  # Increase time jumps but cap at 1 hour
                     else:
                         # Reset consecutive wait counter if we found something to do
@@ -727,6 +813,8 @@ class CurriculumTrainer:
                 
                 # Execute a wait action and force time advancement
                 try:
+                    start_time = time.time()
+                    
                     # Use environment's create_wait_action to ensure valid indices
                     if hasattr(env, 'create_wait_action'):
                         wait_action = env.create_wait_action()
@@ -740,6 +828,8 @@ class CurriculumTrainer:
                         }
                     
                     next_state, reward, done, truncated, info = env.step(wait_action)
+                    step_time = (time.time() - start_time) * 1000  # Convert to ms
+                    step_times.append(step_time)
                 except Exception as e:
                     self.logger.logger.warning(f"Error executing wait action: {e}")
                     # If the wait action fails, just advance time manually
@@ -747,14 +837,16 @@ class CurriculumTrainer:
                     env.current_simulation_datetime += timedelta(seconds=advance_time)
                     env._process_vehicle_arrivals(advance_time)
                     env._process_vehicle_departures()
-                    next_state = env._get_observation_tensor()
+                    
+                    # Get observation
+                    next_state = env._get_observation()
                     done = env.current_simulation_time >= env.max_simulation_time
                     truncated = False
+                    reward = 0
                 
                 episode_steps += 1
                 
-                # Update state - use tensor-based observation method
-                next_state = env._get_observation_tensor()
+                # Update state
                 state = next_state
                 continue
                 
@@ -770,33 +862,20 @@ class CurriculumTrainer:
                 action_counts['terminal_truck'] += 1
             
             # Process tensor action by converting to appropriate format
-            if action_type == 0:  # Crane Movement
-                # Convert tensors to numpy arrays to ensure compatibility
-                if isinstance(action['crane_movement'], torch.Tensor):
-                    crane_idx, source_idx, dest_idx = action['crane_movement'].detach().cpu().numpy()
-                else:
-                    crane_idx, source_idx, dest_idx = action['crane_movement']
-                
-                # Ensure indices are within valid range
-                n_cranes = len(env.cranes)
-                n_positions = len(env.position_to_idx)
-                
-                if crane_idx >= n_cranes or source_idx >= n_positions or dest_idx >= n_positions:
-                    # Invalid indices, create a wait action instead
-                    action = {
-                        'action_type': 0, 
-                        'crane_movement': np.array([0, 0, 0]),
-                        'truck_parking': np.array([0, 0]),
-                        'terminal_truck': np.array([0, 0, 0])
-                    }
+            if isinstance(action['crane_movement'], torch.Tensor):
+                action['crane_movement'] = action['crane_movement'].cpu().numpy()
             
             # Validate action indices before executing
             try:
-                # Execute action in environment
+                # Execute action in environment and track time
+                start_time = time.time()
                 next_state, reward, done, truncated, info = env.step(action)
+                step_time = (time.time() - start_time) * 1000  # Convert to ms
+                step_times.append(step_time)
+                
                 episode_reward += reward
                 episode_steps += 1
-            except (KeyError, ValueError, IndexError) as e:
+            except Exception as e:
                 # Handle the error - try to select a new valid action instead
                 self.logger.logger.warning(f"Invalid action: {e}. Using wait action instead.")
                 
@@ -813,7 +892,12 @@ class CurriculumTrainer:
                     }
                 
                 try:
+                    # Track execution time
+                    start_time = time.time()
                     next_state, reward, done, truncated, info = env.step(wait_action)
+                    step_time = (time.time() - start_time) * 1000  # Convert to ms
+                    step_times.append(step_time)
+                    
                     episode_reward += reward  # Usually 0 for wait actions
                     episode_steps += 1
                 except Exception as e2:
@@ -823,9 +907,12 @@ class CurriculumTrainer:
                     env.current_simulation_datetime += timedelta(seconds=60)
                     env._process_vehicle_arrivals(60)
                     env._process_vehicle_departures()
-                    next_state = env._get_observation_tensor()
+                    
+                    # Get observation
+                    next_state = env._get_observation()
                     done = env.current_simulation_time >= env.max_simulation_time
                     truncated = False
+                    reward = 0
             
             # Store experience and update networks
             next_flat_state = self._flatten_state(next_state) if next_state is not None else None
@@ -851,7 +938,16 @@ class CurriculumTrainer:
         # Calculate mean loss
         mean_loss = np.mean(losses) if losses else None
         
-        return episode_reward, episode_steps, mean_loss, action_counts
+        # Calculate average step time
+        avg_step_time = np.mean(step_times) if step_times else None
+        
+        # If using env step times, also check its performance stats
+        if hasattr(env, 'step_times') and env.step_times:
+            env_avg_step_time = np.mean(env.step_times) * 1000  # Convert to ms
+            if avg_step_time is None or len(env.step_times) > len(step_times):
+                avg_step_time = env_avg_step_time
+        
+        return episode_reward, episode_steps, mean_loss, action_counts, avg_step_time
     
     def save_checkpoint(self, agent, episode, suffix=None):
         """Save agent checkpoint."""
@@ -863,10 +959,15 @@ class CurriculumTrainer:
         filepath = os.path.join(self.checkpoints_dir, filename)
         agent.save(filepath)
         self.logger.logger.info(f"Checkpoint saved to {filepath}")
+        
+        # Log memory usage after saving
+        if self.device == 'cuda' and torch.cuda.is_available() and self.memory_tracking:
+            memory_usage = torch.cuda.memory_allocated() / 1e6  # MB
+            self.logger.logger.info(f"GPU memory after saving: {memory_usage:.1f} MB")
     
     def evaluate(self, agent, num_episodes=5, render=False):
         """
-        Evaluate trained agent on the full environment.
+        Evaluate trained agent on the full environment with GPU acceleration.
         
         Args:
             agent: Trained agent
@@ -889,7 +990,7 @@ class CurriculumTrainer:
         eval_times = []
         action_counts = {'crane': 0, 'truck_parking': 0, 'terminal_truck': 0}
         
-        self.logger.logger.info(f"\nEvaluating agent for {num_episodes} episodes...")
+        self.logger.logger.info(f"\nEvaluating agent for {num_episodes} episodes on {self.device}...")
         eval_pbar = tqdm(total=num_episodes, desc="Evaluating")
         
         for episode in range(num_episodes):
@@ -912,8 +1013,15 @@ class CurriculumTrainer:
                     env.current_simulation_datetime += timedelta(seconds=advance_time)
                     env._process_vehicle_arrivals(advance_time)
                     env._process_vehicle_departures()
-                    next_state = env._get_observation_tensor()  # Use tensor method
+                    
+                    # Get observation
+                    next_state = env._get_observation()
+                    reward = 0
                 else:
+                    # Process tensor action by converting to appropriate format
+                    if isinstance(action['crane_movement'], torch.Tensor):
+                        action['crane_movement'] = action['crane_movement'].cpu().numpy()
+                    
                     # Take action in environment
                     next_state, reward, done, truncated, _ = env.step(action)
                     episode_reward += reward
@@ -965,60 +1073,9 @@ class CurriculumTrainer:
         action_str = " | ".join([f"{key}: {count}" for key, count in action_counts.items()])
         self.logger.logger.info(f"  Action counts: {action_str}")
         
+        # Print environment performance stats if available
+        if hasattr(env, 'print_performance_stats'):
+            env.print_performance_stats()
+        
         return evaluation_metrics
-
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train terminal agents with tensor-based curriculum learning')
-    parser.add_argument('--config', type=str, default=None, help='Path to configuration file')
-    parser.add_argument('--episodes', type=int, default=None, help='Total number of episodes')
-    parser.add_argument('--checkpoints', type=str, default='checkpoints', help='Checkpoints directory')
-    parser.add_argument('--results', type=str, default='results', help='Results directory')
-    parser.add_argument('--logs', type=str, default='logs', help='Logs directory')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
-                      help='Computation device (cuda/cpu)')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--evaluate', action='store_true', help='Evaluate after training')
-    parser.add_argument('--render', action='store_true', help='Render during evaluation')
-    parser.add_argument('--resume', type=str, default=None, help='Resume training from checkpoint')
-    parser.add_argument('--name', type=str, default=None, help='Experiment name')
     
-    return parser.parse_args()
-
-def main():
-    """Main function for training terminal agents."""
-    args = parse_args()
-    
-    # Set random seeds
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.device == 'cuda' and torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-    
-    # Generate experiment name if not provided
-    if args.name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.name = f"tensor_terminal_training_{timestamp}"
-    
-    # Create curriculum trainer
-    trainer = CurriculumTrainer(
-        base_config_path=args.config,
-        checkpoints_dir=args.checkpoints,
-        results_dir=args.results,
-        log_dir=args.logs,
-        experiment_name=args.name,
-        device=args.device
-    )
-    
-    # Train agents
-    agent, _ = trainer.train(
-        total_episodes=args.episodes,
-        resume_checkpoint=args.resume
-    )
-    
-    # Evaluate if requested
-    if args.evaluate:
-        trainer.evaluate(agent, num_episodes=5, render=args.render)
-
-if __name__ == "__main__":
-    main()

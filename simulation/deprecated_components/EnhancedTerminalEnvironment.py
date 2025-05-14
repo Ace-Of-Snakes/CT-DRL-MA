@@ -17,9 +17,9 @@ from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
 from simulation.terminal_components.TerminalTruck import TerminalTruck
-from simulation.terminal_components.TensorStorageYard import TensorStorageYard
-from simulation.terminal_components.TensorRMGCrane import TensorRMGCrane
-from simulation.terminal_components.TensorActionMaskGenerator import TensorActionMaskGenerator
+from simulation.deprecated_components.TensorStorageYard import TensorStorageYard
+from simulation.deprecated_components.TensorRMGCrane import TensorRMGCrane
+from simulation.deprecated_components.TensorActionMaskGenerator import TensorActionMaskGenerator
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 
@@ -122,7 +122,7 @@ class EnhancedTerminalEnvironment(gym.Env):
 
     def _load_config(self, config_path):
         """Load terminal configuration."""
-        from config import TerminalConfig
+        from simulation.config import TerminalConfig
         return TerminalConfig(config_path)
     
     def _create_terminal(self):
