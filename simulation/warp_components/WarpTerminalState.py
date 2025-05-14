@@ -70,7 +70,7 @@ class WarpTerminalState:
         self._create_position_mapping()
         
         # Register warp kernels
-        self._register_kernels()
+        # self._register_kernels()
 
     def _initialize_layout_arrays(self):
         """Initialize arrays for terminal layout positions."""
@@ -149,7 +149,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.container_positions.fill(-1)  # Initialize to "not placed"
+        self.container_positions.fill_(-1)  # Initialize to "not placed"
         
         # Which vehicle the container is on (if any)
         # -1 means not on any vehicle
@@ -158,7 +158,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.container_vehicles.fill(-1)  # Initialize to "not on vehicle"
+        self.container_vehicles.fill_(-1)  # Initialize to "not on vehicle"
         
         # Container properties - packed efficiently for GPU
         # Properties:
@@ -191,7 +191,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.yard_container_indices.fill(-1)  # Initialize to empty
+        self.yard_container_indices.fill_(-1)  # Initialize to empty
         
         # Current stack heights - for efficient lookup
         # Format: [row, bay]
@@ -213,7 +213,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.vehicle_positions.fill(-1)  # Initialize to "not placed"
+        self.vehicle_positions.fill_(-1)  # Initialize to "not placed"
         
         # Vehicle properties
         # [0]: Type (0=Truck, 1=Train, 2=Terminal Truck)
@@ -237,7 +237,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.vehicle_containers.fill(-1)  # Initialize to empty
+        self.vehicle_containers.fill_(-1)  # Initialize to empty
         
         # Vehicle container counts
         self.vehicle_container_counts = wp.zeros(
@@ -254,7 +254,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.parking_vehicles.fill(-1)  # Initialize to empty
+        self.parking_vehicles.fill_(-1)  # Initialize to empty
         
         # Rail track mapping
         # Format: [track]
@@ -264,7 +264,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.rail_track_vehicles.fill(-1)  # Initialize to empty
+        self.rail_track_vehicles.fill_(-1)  # Initialize to empty
         
         # Vehicle queues (implemented as circular buffers for GPU)
         # Format: [queue_type, queue_position]
@@ -274,7 +274,7 @@ class WarpTerminalState:
             dtype=wp.int32,
             device=self.device
         )
-        self.vehicle_queues.fill(-1)  # Initialize to empty
+        self.vehicle_queues.fill_(-1)  # Initialize to empty
         
         # Queue size counters
         self.queue_sizes = wp.zeros(
@@ -390,11 +390,11 @@ class WarpTerminalState:
                 self.idx_to_position[idx] = position
                 idx += 1
 
-    def _register_kernels(self):
-        """Register warp kernels for simulation operations."""
-        # We'll implement and register various kernels for operations
-        # These will be defined in separate files and imported here
-        pass
+    # def _register_kernels(self):
+    #     """Register warp kernels for simulation operations."""
+    #     # We'll implement and register various kernels for operations
+    #     # These will be defined in separate files and imported here
+    #     pass
 
     def get_container_properties(self, container_idx):
         """Get container properties as a dictionary."""
@@ -426,6 +426,46 @@ class WarpTerminalState:
                 "height": dims[2]
             }
         }
+
+    def _initialize_crane_arrays(self):
+        """Initialize arrays for managing RMG cranes."""
+        # Crane positions [crane_idx, 2] - (x, y) coordinates
+        self.crane_positions = wp.zeros(
+            shape=(self.num_cranes, 2),
+            dtype=wp.float32,
+            device=self.device
+        )
+        
+        # Crane target positions [crane_idx, 2] - (x, y) coordinates
+        self.crane_target_positions = wp.zeros(
+            shape=(self.num_cranes, 2),
+            dtype=wp.float32,
+            device=self.device
+        )
+        
+        # Crane operational areas [crane_idx, 4] - (min_x, min_y, max_x, max_y)
+        self.crane_operational_areas = wp.zeros(
+            shape=(self.num_cranes, 4),
+            dtype=wp.float32,
+            device=self.device
+        )
+        
+        # Create a CPU-side array with default values first
+        crane_props = np.zeros((self.num_cranes, 4), dtype=np.float32)
+        
+        # Set default values on the CPU array
+        for i in range(self.num_cranes):
+            # [0]: Status (0=Idle, 1=Moving, 2=Lifting)
+            crane_props[i, 0] = 0.0  # Idle status
+            # [1]: Current load (container index, -1 if none)
+            crane_props[i, 1] = -1.0  # No container loaded
+            # [2]: Available time (seconds from simulation start)
+            crane_props[i, 2] = 0.0  # Available immediately
+            # [3]: Speed (meters per second)
+            crane_props[i, 3] = 2.0  # 2 m/s default speed
+        
+        # Create Warp array from the prepared numpy array
+        self.crane_properties = wp.array(crane_props, dtype=wp.float32, device=self.device)
 
     def add_container(self, container_id, properties, dimensions):
         """Add a container to the registry."""
