@@ -1,11 +1,156 @@
+
 import numpy as np
-import warp as wp
+# Import warp later in the code
+# import warp as wp
 from datetime import datetime, timedelta
 import time
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
 from typing import Dict, Tuple, List, Optional, Any, Union
+
+# Define kernel function implementations without decorators yet
+def _impl_kernel_generate_crane_mask(crane_positions, crane_properties, yard_container_indices, stack_heights,
+                                rail_track_vehicles, parking_vehicles, container_positions,
+                                current_time, num_cranes, num_positions, crane_mask):
+    """Kernel to generate action mask for crane movements."""
+    # Get thread indices
+    crane_idx = wp.tid(0)
+    src_idx = wp.tid(1)
+    dst_idx = wp.tid(2)
+    
+    # Check bounds
+    if (crane_idx >= num_cranes or 
+        src_idx >= num_positions or 
+        dst_idx >= num_positions):
+        return
+    
+    # Default: invalid action
+    crane_mask[crane_idx, src_idx, dst_idx] = 0
+    
+    # Check if crane is available
+    crane_available_time = crane_properties[crane_idx, 2]
+    if crane_available_time > current_time:
+        return
+        
+    # Check if source position has a container
+    source_has_container = False
+    for container_idx in range(container_positions.shape[0]):
+        if container_positions[container_idx] == src_idx:
+            source_has_container = True
+            break
+            
+    if not source_has_container:
+        return
+        
+    # More validity checks would go here
+    # For now, we'll just mark the action as valid
+    crane_mask[crane_idx, src_idx, dst_idx] = 1
+
+def _impl_kernel_generate_truck_parking_mask(parking_vehicles, vehicle_properties, num_vehicles,
+                                         num_parking_spots, truck_parking_mask):
+    """Kernel to generate action mask for truck parking."""
+    # Get thread indices
+    truck_idx = wp.tid(0)
+    spot_idx = wp.tid(1)
+    
+    # Check bounds
+    if truck_idx >= num_vehicles or spot_idx >= num_parking_spots:
+        return
+    
+    # Default: invalid action
+    truck_parking_mask[truck_idx, spot_idx] = 0
+    
+    # Check if truck is active
+    if vehicle_properties[truck_idx, 6] <= 0:
+        return
+    
+    # Check if truck is ready to park (status = WAITING)
+    if vehicle_properties[truck_idx, 1] != 1:  # WAITING status
+        return
+    
+    # Check if parking spot is available
+    if parking_vehicles[spot_idx] >= 0:
+        return
+    
+    # Mark as valid action
+    truck_parking_mask[truck_idx, spot_idx] = 1
+
+def _impl_kernel_generate_terminal_truck_mask(terminal_truck_positions, container_positions, num_terminal_trucks,
+                                          num_positions, terminal_truck_mask):
+    """Kernel to generate action mask for terminal truck movements."""
+    # Get thread indices
+    truck_idx = wp.tid(0)
+    src_idx = wp.tid(1)
+    dst_idx = wp.tid(2)
+    
+    # Check bounds
+    if (truck_idx >= num_terminal_trucks or
+        src_idx >= num_positions or
+        dst_idx >= num_positions):
+        return
+    
+    # Default: invalid action
+    terminal_truck_mask[truck_idx, src_idx, dst_idx] = 0
+    
+    # For now, just allow all terminal truck movements (simplified)
+    terminal_truck_mask[truck_idx, src_idx, dst_idx] = 1
+
+# Function to register kernels when needed
+def register_kernels():
+    # Only import warp when needed
+    import warp as wp
+    global kernel_generate_crane_mask, kernel_generate_truck_parking_mask, kernel_generate_terminal_truck_mask
+    
+    # Register kernels with proper type annotations
+    kernel_generate_crane_mask = wp.kernel(
+        func=_impl_kernel_generate_crane_mask,
+        dim=3,
+        inputs=[
+            wp.array(dtype=wp.float32, ndim=2),  # crane_positions
+            wp.array(dtype=wp.float32, ndim=2),  # crane_properties
+            wp.array(dtype=wp.int32, ndim=3),    # yard_container_indices
+            wp.array(dtype=wp.int32, ndim=2),    # stack_heights
+            wp.array(dtype=wp.int32, ndim=1),    # rail_track_vehicles
+            wp.array(dtype=wp.int32, ndim=1),    # parking_vehicles
+            wp.array(dtype=wp.int32, ndim=1),    # container_positions
+            wp.float32,                          # current_time
+            wp.int32,                            # num_cranes
+            wp.int32,                            # num_positions
+            wp.array(dtype=wp.int32, ndim=3)     # crane_mask
+        ]
+    )
+    
+    kernel_generate_truck_parking_mask = wp.kernel(
+        func=_impl_kernel_generate_truck_parking_mask,
+        dim=2,
+        inputs=[
+            wp.array(dtype=wp.int32, ndim=1),    # parking_vehicles
+            wp.array(dtype=wp.float32, ndim=2),  # vehicle_properties
+            wp.int32,                            # num_vehicles
+            wp.int32,                            # num_parking_spots
+            wp.array(dtype=wp.int32, ndim=2)     # truck_parking_mask
+        ]
+    )
+    
+    kernel_generate_terminal_truck_mask = wp.kernel(
+        func=_impl_kernel_generate_terminal_truck_mask,
+        dim=3,
+        inputs=[
+            wp.array(dtype=wp.int32, ndim=1),    # terminal_truck_positions
+            wp.array(dtype=wp.int32, ndim=1),    # container_positions
+            wp.int32,                            # num_terminal_trucks
+            wp.int32,                            # num_positions
+            wp.array(dtype=wp.int32, ndim=3)     # terminal_truck_mask
+        ]
+    )
+    
+    return kernel_generate_crane_mask, kernel_generate_truck_parking_mask, kernel_generate_terminal_truck_mask
+
+# Initialize kernel variables
+kernel_generate_crane_mask = None
+kernel_generate_truck_parking_mask = None
+kernel_generate_terminal_truck_mask = None
 
 class WarpTerminalEnvironment(gym.Env):
     """
@@ -29,6 +174,14 @@ class WarpTerminalEnvironment(gym.Env):
                  device=None,
                  log_performance=False):
         """Initialize the Warp-accelerated terminal environment."""
+        global wp
+        import warp as wp
+        
+        # Register kernels if not already registered
+        global kernel_generate_crane_mask, kernel_generate_truck_parking_mask, kernel_generate_terminal_truck_mask
+        if kernel_generate_crane_mask is None:
+            kernel_generate_crane_mask, kernel_generate_truck_parking_mask, kernel_generate_terminal_truck_mask = register_kernels()
+        
         super(WarpTerminalEnvironment, self).__init__()
         
         # Set device
@@ -59,7 +212,7 @@ class WarpTerminalEnvironment(gym.Env):
         self.reset_times = []
         
         # Initialize Warp terminal state
-        from WarpTerminalState import WarpTerminalState
+        from simulation.warp_components.WarpTerminalState import WarpTerminalState
         self.terminal_state = WarpTerminalState(
             num_rail_tracks=self.num_rail_tracks,
             num_rail_slots_per_track=self.num_rail_slots_per_track,
@@ -74,27 +227,27 @@ class WarpTerminalEnvironment(gym.Env):
         )
         
         # Initialize Warp components
-        from WarpContainerRegistry import WarpContainerRegistry
+        from simulation.warp_components.WarpContainerRegistry import WarpContainerRegistry
         self.container_registry = WarpContainerRegistry(
             terminal_state=self.terminal_state,
             max_containers=self.max_containers,
             device=self.device
         )
         
-        from WarpMovementCalculator import WarpMovementCalculator
+        from simulation.warp_components.WarpMovementCalculator import WarpMovementCalculator
         self.movement_calculator = WarpMovementCalculator(
             terminal_state=self.terminal_state,
             device=self.device
         )
         
-        from WarpStackingKernels import WarpStackingKernels
+        from simulation.warp_components.WarpStackingKernels import WarpStackingKernels
         self.stacking_kernels = WarpStackingKernels(
             terminal_state=self.terminal_state,
             container_registry=self.container_registry,
             device=self.device
         )
         
-        from WarpStorageYard import WarpStorageYard
+        from simulation.warp_components.WarpStorageYard import WarpStorageYard
         self.storage_yard = WarpStorageYard(
             terminal_state=self.terminal_state,
             container_registry=self.container_registry,
@@ -126,7 +279,7 @@ class WarpTerminalEnvironment(gym.Env):
         self._setup_position_mappings()
         
         # Register kernels for environment operations
-        self._register_kernels()
+        # self._register_kernels()
         
         # Initialize vehicles and containers
         self._initialize_simulation()
@@ -210,12 +363,12 @@ class WarpTerminalEnvironment(gym.Env):
         self.position_to_idx = self.terminal_state.position_to_idx.copy()
         self.idx_to_position = self.terminal_state.idx_to_position.copy()
     
-    def _register_kernels(self):
-        """Register Warp kernels for environment operations."""
-        # Register kernels for generating action masks
-        wp.register_kernel(self._kernel_generate_crane_mask)
-        wp.register_kernel(self._kernel_generate_truck_parking_mask)
-        wp.register_kernel(self._kernel_generate_terminal_truck_mask)
+    # def _register_kernels(self):
+    #     """Register Warp kernels for environment operations."""
+    #     # Register kernels for generating action masks
+    #     wp.register_kernel(self._kernel_generate_crane_mask)
+    #     wp.register_kernel(self._kernel_generate_truck_parking_mask)
+    #     wp.register_kernel(self._kernel_generate_terminal_truck_mask)
     
     @staticmethod
     @wp.kernel
@@ -825,6 +978,8 @@ class WarpTerminalEnvironment(gym.Env):
         
         return observation
     
+    # Update the _generate_action_masks method in WarpTerminalEnvironment class
+
     def _generate_action_masks(self):
         """Generate action masks for the current state."""
         # Calculate total number of positions
@@ -842,7 +997,7 @@ class WarpTerminalEnvironment(gym.Env):
         
         # Launch kernels to generate masks
         wp.launch(
-            kernel=self._kernel_generate_crane_mask,
+            kernel=kernel_generate_crane_mask,
             dim=[self.num_cranes, total_positions, total_positions],
             inputs=[
                 self.terminal_state.crane_positions,
@@ -860,7 +1015,7 @@ class WarpTerminalEnvironment(gym.Env):
         )
         
         wp.launch(
-            kernel=self._kernel_generate_truck_parking_mask,
+            kernel=kernel_generate_truck_parking_mask,
             dim=[self.max_vehicles, self.num_parking_spots],
             inputs=[
                 self.terminal_state.parking_vehicles,
@@ -872,7 +1027,7 @@ class WarpTerminalEnvironment(gym.Env):
         )
         
         wp.launch(
-            kernel=self._kernel_generate_terminal_truck_mask,
+            kernel=kernel_generate_terminal_truck_mask,
             dim=[self.num_terminal_trucks, total_positions, total_positions],
             inputs=[
                 self.terminal_state.vehicle_positions,  # As terminal truck positions
@@ -1263,6 +1418,39 @@ class WarpTerminalEnvironment(gym.Env):
         if hasattr(self.stacking_kernels, 'print_performance_stats'):
             self.stacking_kernels.print_performance_stats()
 
+
+class QueueWrapper:
+    """Wrapper for queue operations to simplify interface."""
+    
+    def __init__(self, max_size=100):
+        """Initialize empty queue with max size."""
+        self.items = []
+        self.max_size = max_size
+    
+    def add(self, item):
+        """Add item to queue."""
+        if len(self.items) < self.max_size:
+            self.items.append(item)
+            return True
+        return False
+    
+    def get(self):
+        """Get and remove first item from queue."""
+        if self.items:
+            return self.items.pop(0)
+        return None
+    
+    def size(self):
+        """Return current queue size."""
+        return len(self.items)
+    
+    def is_empty(self):
+        """Check if queue is empty."""
+        return len(self.items) == 0
+    
+    def clear(self):
+        """Clear the queue."""
+        self.items = []
 
 class QueueWrapper:
     """Wrapper for queue operations to simplify interface."""

@@ -74,14 +74,14 @@ class WarpContainerRegistry:
         }
         
         # Register warp kernels
-        self._register_kernels()
+        # self._register_kernels()
         
         print(f"WarpContainerRegistry initialized on device: {self.device}")
     
     def _register_kernels(self):
         """Register Warp kernels for container operations."""
         # Register the validation kernel
-        wp.register_kernel(self._kernel_validate_stacking)
+        # wp.register_kernel(self._kernel_validate_stacking)
     
 
 

@@ -30,19 +30,19 @@ class WarpStackingKernels:
         self.optimization_times = []
         
         # Register Warp kernels
-        self._register_kernels()
+        # self._register_kernels()
         
         print(f"WarpStackingKernels initialized on device: {self.device}")
     
-    def _register_kernels(self):
-        """Register Warp kernels for stacking operations."""
-        # Register validation kernel
-        wp.register_kernel(self._kernel_validate_stack)
+    # def _register_kernels(self):
+    #     """Register Warp kernels for stacking operations."""
+    #     # Register validation kernel
+    #     wp.register_kernel(self._kernel_validate_stack)
         
-        # Register optimization kernels
-        wp.register_kernel(self._kernel_calculate_stack_quality)
-        wp.register_kernel(self._kernel_find_optimal_locations)
-        wp.register_kernel(self._kernel_identify_suboptimal_stacks)
+    #     # Register optimization kernels
+    #     wp.register_kernel(self._kernel_calculate_stack_quality)
+    #     wp.register_kernel(self._kernel_find_optimal_locations)
+    #     wp.register_kernel(self._kernel_identify_suboptimal_stacks)
 
     # def _kernel_validate_stack(container_properties: wp.array(dtype=wp.float32),
     #                          container_dimensions: wp.array(dtype=wp.float32),

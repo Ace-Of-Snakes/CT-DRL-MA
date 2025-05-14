@@ -40,19 +40,19 @@ class WarpStorageYard:
         self.query_times = []
         
         # Register Warp kernels
-        self._register_kernels()
+        # self._register_kernels()
         
         print(f"WarpStorageYard initialized on device: {self.device} with dimensions {self.num_rows}x{self.num_bays}")
     
-    def _register_kernels(self):
-        """Register Warp kernels for storage yard operations."""
-        # Register query kernels
-        wp.register_kernel(self._kernel_get_yard_occupancy)
-        wp.register_kernel(self._kernel_get_container_distribution)
-        wp.register_kernel(self._kernel_find_containers_of_type)
+    # def _register_kernels(self):
+    #     """Register Warp kernels for storage yard operations."""
+    #     # Register query kernels
+    #     wp.register_kernel(self._kernel_get_yard_occupancy)
+    #     wp.register_kernel(self._kernel_get_container_distribution)
+    #     wp.register_kernel(self._kernel_find_containers_of_type)
         
-        # Register analysis kernels
-        wp.register_kernel(self._kernel_analyze_yard_utilization)
+    #     # Register analysis kernels
+    #     wp.register_kernel(self._kernel_analyze_yard_utilization)
     
     # def _kernel_get_yard_occupancy(yard_container_indices: wp.array(dtype=wp.int32),
     #                              stack_heights: wp.array(dtype=wp.int32),
