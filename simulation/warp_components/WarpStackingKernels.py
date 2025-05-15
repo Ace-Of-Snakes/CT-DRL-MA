@@ -439,15 +439,15 @@ class WarpStackingKernels:
 
 
     @wp.kernel
-    def _kernel_find_optimal_locations(container_properties: wp.array,
-                                    container_dimensions: wp.array,
-                                    yard_container_indices: wp.array,
-                                    stack_heights: wp.array,
+    def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32),
+                                    container_dimensions: wp.array(dtype=wp.float32),
+                                    yard_container_indices: wp.array(dtype=wp.float32),
+                                    stack_heights: wp.array(dtype=wp.int32),
                                     special_area_masks: Dict[str, wp.array],
-                                    container_idx: int,
-                                    suitability_scores: wp.array,
-                                    num_rows: int,
-                                    num_bays: int):
+                                    container_idx: wp.int32,
+                                    suitability_scores: wp.array(dtype=wp.float32),
+                                    num_rows: wp.int32,
+                                    num_bays: wp.int32):
         """
         Kernel to find optimal locations for a container based on stacking rules.
         
@@ -575,11 +575,11 @@ class WarpStackingKernels:
     #                                     num_bays: int):
 
     @wp.kernel
-    def _kernel_identify_suboptimal_stacks(container_properties: wp.array,
-                                        yard_container_indices: wp.array,
-                                        stack_heights: wp.array,
+    def _kernel_identify_suboptimal_stacks(container_properties: wp.array(dtype=wp.float32),
+                                        yard_container_indices: wp.array(dtype=wp.int32),
+                                        stack_heights: wp.array(dtype=wp.int32),
                                         current_time: float,
-                                        problem_scores: wp.array,
+                                        problem_scores: wp.array(dtype=wp.float32),
                                         num_rows: int,
                                         num_bays: int):
         """
