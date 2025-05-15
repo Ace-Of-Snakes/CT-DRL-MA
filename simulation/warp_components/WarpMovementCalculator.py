@@ -481,8 +481,13 @@ class WarpMovementCalculator:
         src_coords = self._get_position_coordinates(src_position_str)
         dst_coords = self._get_position_coordinates(dst_position_str)
         
-        # Get current crane position
-        crane_pos = np.array(self.terminal_state.crane_positions[crane_idx].numpy())
+        # Get current crane position - FIXED by using numpy first
+        crane_positions_np = self.terminal_state.crane_positions.numpy()
+        if crane_idx >= len(crane_positions_np):
+            print(f"Warning: Invalid crane index: {crane_idx}")
+            return 0.0
+            
+        crane_pos = crane_positions_np[crane_idx]
         
         # Create arrays on device
         src_pos = wp.array(src_coords, dtype=wp.float32, device=self.device)
@@ -515,13 +520,21 @@ class WarpMovementCalculator:
             ]
         )
         
-        result = float(time_result[0])
+        result = float(time_result.numpy()[0])  # FIXED: Convert to numpy before indexing
         
         # Track performance
         self.calculation_times.append(time.time() - start_time)
         
         return result
     
+    @wp.kernel
+    def _kernel_set_float_value_at_index(array: wp.array(dtype=wp.float32, ndim=2), 
+                                    i: wp.int32, 
+                                    j: wp.int32, 
+                                    value: wp.float32):
+        """Set a float value at a specific 2D index."""
+        array[i, j] = value
+
     def batch_calculate_movement_times(self,
                                     src_position_strs: List[str],
                                     dst_position_strs: List[str],

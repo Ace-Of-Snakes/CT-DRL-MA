@@ -411,7 +411,7 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, container_result]
         )
-        container_idx = int(container_result[0])
+        container_idx = int(container_result.numpy()[0])
         
         # Check if we got a valid container
         if container_idx < 0:
@@ -471,7 +471,7 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.stack_heights, row, bay, height_result]
         )
-        height = int(height_result[0])
+        height = int(height_result.numpy()[0])
         
         # Check if stack is empty
         if height <= 0:
@@ -484,7 +484,7 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, container_result]
         )
-        container_idx = int(container_result[0])
+        container_idx = int(container_result.numpy()[0])
         
         # Check if we got a valid container
         if container_idx < 0:
@@ -525,7 +525,7 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.stack_heights, row, bay, height_result]
         )
-        height = int(height_result[0])
+        height = int(height_result.numpy()[0])
         
         # Check if stack is empty
         if height <= 0:
@@ -539,7 +539,7 @@ class WarpStorageYard:
                 dim=1,
                 inputs=[self.terminal_state.yard_container_indices, row, bay, tier, container_result]
             )
-            container_idx = int(container_result[0])
+            container_idx = int(container_result.numpy()[0])
             
             if container_idx >= 0:
                 result[tier] = container_idx
@@ -615,7 +615,7 @@ class WarpStorageYard:
                             dim=1,
                             inputs=[self.terminal_state.yard_container_indices, row, bay, tier, container_result]
                         )
-                        container_idx = int(container_result[0])
+                        container_idx = int(container_result.numpy()[0])
                         
                         if container_idx >= 0:
                             # Get container properties using numpy for this read operation
@@ -643,7 +643,7 @@ class WarpStorageYard:
                             # Check departure time for top container
                             if tier == height - 1:
                                 if departure_time > 0:
-                                    current_time = self.terminal_state.simulation_time[0].numpy()
+                                    current_time = self.terminal_state.simulation_time.numpy()[0]
                                     time_until_departure = departure_time - current_time
                                     if time_until_departure > 0:
                                         # Normalize: 1.0 = departure within 1 hour, 0.5 = 1 day, 0.0 = >1 week
