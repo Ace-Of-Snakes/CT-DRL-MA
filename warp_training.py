@@ -10,7 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
 
-from simulation.warp_components.WarpTerminalEnvironment import WarpTerminalEnvironment
+from WarpTerminalEnvFixed import WarpTerminalEnvironment
 
 class WarpTrainingLogger:
     """Logger for training with file output and console display."""

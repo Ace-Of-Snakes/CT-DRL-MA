@@ -1045,7 +1045,7 @@ class OptimizedTerminalEnvironment(gym.Env):
             return
         
         # Load or create terminal configuration
-        from simulation.config import TerminalConfig
+        from simulation.TerminalConfig import TerminalConfig
         self.config = terminal_config or TerminalConfig(terminal_config_path)
         
         # Create terminal

@@ -5,7 +5,7 @@ import time
 
 # Define standalone kernels outside the class to avoid the 'self' parameter issue
 @wp.kernel
-def kernel_calculate_distances(positions: wp.array(dtype=wp.float32, ndim=2),
+def kernel_calculate_terminal_distances(positions: wp.array(dtype=wp.float32, ndim=2),
                              distance_matrix: wp.array(dtype=wp.float32, ndim=2),
                              num_positions: int):
     """
@@ -366,14 +366,9 @@ class WarpMovementCalculator:
         self.max_height = max_height
         self.ground_vehicle_height = ground_vehicle_height
         
-        # Container heights for different types
-        self.container_heights = wp.zeros(6, dtype=wp.float32, device=self.device)
-        self.container_heights[0] = 2.59  # TWEU
-        self.container_heights[1] = 2.59  # THEU
-        self.container_heights[2] = 2.59  # FEU
-        self.container_heights[3] = 2.59  # FFEU
-        self.container_heights[4] = 4.0   # Trailer
-        self.container_heights[5] = 3.0   # Swap Body
+        # Container heights for different types - create with values in one step
+        container_heights_np = np.array([2.59, 2.59, 2.59, 2.59, 4.0, 3.0], dtype=np.float32)
+        self.container_heights = wp.array(container_heights_np, dtype=wp.float32, device=self.device)
         
         # Performance tracking
         self.calculation_times = []
@@ -449,7 +444,7 @@ class WarpMovementCalculator:
         
         # Calculate distances
         wp.launch(
-            kernel=kernel_calculate_distances,
+            kernel=kernel_calculate_terminal_distances,
             dim=[num_positions, num_positions],
             inputs=[
                 positions,

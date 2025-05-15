@@ -122,7 +122,7 @@ class EnhancedTerminalEnvironment(gym.Env):
 
     def _load_config(self, config_path):
         """Load terminal configuration."""
-        from simulation.config import TerminalConfig
+        from simulation.TerminalConfig import TerminalConfig
         return TerminalConfig(config_path)
     
     def _create_terminal(self):

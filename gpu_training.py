@@ -14,7 +14,7 @@ from pathlib import Path
 
 # Import previously implemented classes
 from simulation.agents.OptimizedTerminalAgent import OptimizedTerminalAgent
-from simulation.config import TerminalConfig
+from simulation.TerminalConfig import TerminalConfig
 from simulation.GPUTerminalEnvironment import GPUTerminalEnvironment
 
 class GPUTrainingLogger:

@@ -24,7 +24,7 @@ from simulation.deprecated_components.dual_head_q_tensored import OptimizedTermi
 
 # Import the new optimized environment (adjust path as needed)
 from simulation.deprecated_components.optimized_environment import OptimizedTerminalEnvironment, TerminalTrainingWrapper
-from simulation.config import TerminalConfig
+from simulation.TerminalConfig import TerminalConfig
 
 class TrainingLogger:
     """Logger for training with file output and console display."""

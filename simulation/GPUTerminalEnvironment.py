@@ -69,7 +69,7 @@ class GPUTerminalEnvironment(gym.Env):
         
         # Load or create terminal configuration
         if terminal_config is None:
-            from simulation.config import TerminalConfig
+            from simulation.TerminalConfig import TerminalConfig
             self.config = TerminalConfig(terminal_config_path)
         else:
             self.config = terminal_config
