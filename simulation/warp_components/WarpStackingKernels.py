@@ -349,13 +349,13 @@ class WarpStackingKernels:
                 return
     
     @wp.kernel
-    def _kernel_calculate_stack_quality(container_properties: wp.array,
-                                     yard_container_indices: wp.array,
-                                     stack_heights: wp.array,
-                                     current_time: float,
-                                     row: int,
-                                     bay: int,
-                                     quality_score: wp.array):
+    def _kernel_calculate_stack_quality(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                    yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                    stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                    current_time: wp.float32,
+                                    row: wp.int32,
+                                    bay: wp.int32,
+                                    quality_score: wp.array(dtype=wp.float32, ndim=1)):
         """
         Kernel to calculate the quality of a stack based on priority order and departure times.
         Higher score means better organization.
@@ -392,7 +392,7 @@ class WarpStackingKernels:
             
             # Skip if either container is invalid
             if lower_idx < 0 or upper_idx < 0:
-                quality_score[0] -= 20.0
+                quality_score[0] = float(quality_score[0] - 20.0)
                 continue
             
             # Get container priorities and departure times
@@ -406,22 +406,22 @@ class WarpStackingKernels:
             # Lower priority number means higher actual priority
             if lower_priority < upper_priority:
                 priority_violations += 1
-                quality_score[0] -= 10.0
+                quality_score[0] = float(quality_score[0] - 10.0)
             
             # Check departure time order (containers leaving sooner should be on top)
             if lower_departure > 0 and upper_departure > 0:
                 if lower_departure < upper_departure:
-                    quality_score[0] -= 15.0
+                    quality_score[0] = float(quality_score[0] - 15.0)
                     
                     # Extra penalty if lower container is departing soon
                     time_until_departure = lower_departure - current_time
                     if time_until_departure > 0 and time_until_departure < 86400:  # Less than 1 day
-                        quality_score[0] -= 25.0
+                        quality_score[0] = float(quality_score[0] - 25.0)
         
         # Overall stack quality factors
         if height > 3:
             # Tall stacks are slightly penalized
-            quality_score[0] -= (height - 3) * 5.0
+            quality_score[0] = float(quality_score[0] - (height - 3) * 5.0)
         
         # Ensure score stays in reasonable bounds
         if quality_score[0] < 0:
@@ -439,13 +439,16 @@ class WarpStackingKernels:
 
 
     @wp.kernel
-    def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32),
-                                    container_dimensions: wp.array(dtype=wp.float32),
-                                    yard_container_indices: wp.array(dtype=wp.float32),
-                                    stack_heights: wp.array(dtype=wp.int32),
-                                    special_area_masks: Dict[str, wp.array],
+    def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                    container_dimensions: wp.array(dtype=wp.float32, ndim=2),
+                                    yard_container_indices: wp.array(dtype=wp.int32, ndim=3),  # Fixed dtype, was float32
+                                    stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                    reefer_mask: wp.array(dtype=wp.bool, ndim=2),
+                                    dangerous_mask: wp.array(dtype=wp.bool, ndim=2),
+                                    trailer_mask: wp.array(dtype=wp.bool, ndim=2),
+                                    swap_body_mask: wp.array(dtype=wp.bool, ndim=2),
                                     container_idx: wp.int32,
-                                    suitability_scores: wp.array(dtype=wp.float32),
+                                    suitability_scores: wp.array(dtype=wp.float32, ndim=2),
                                     num_rows: wp.int32,
                                     num_bays: wp.int32):
         """
@@ -456,15 +459,17 @@ class WarpStackingKernels:
             container_dimensions: Container dimensions array
             yard_container_indices: Container indices in the yard
             stack_heights: Current stack heights array
-            special_area_masks: Dictionary of special area masks
+            reefer_mask: Mask for reefer container positions
+            dangerous_mask: Mask for dangerous goods positions
+            trailer_mask: Mask for trailer positions
+            swap_body_mask: Mask for swap body positions
             container_idx: Index of the container to place
             suitability_scores: Output array with suitability scores [row, bay]
             num_rows: Number of rows in the yard
             num_bays: Number of bays per row
         """
         # Get thread indices
-        row = wp.tid(0)
-        bay = wp.tid(1)
+        row, bay = wp.tid()
         
         # Check bounds
         if row >= num_rows or bay >= num_bays:
@@ -488,18 +493,18 @@ class WarpStackingKernels:
         is_stackable = bool(container_properties[container_idx, 4])
         stack_compatibility = int(container_properties[container_idx, 5])
         
-        # Special area constraints
+        # Special area constraints - using individual mask arrays instead of dictionary
         if container_goods == 1:  # Reefer
-            if not special_area_masks["reefer"][row, bay]:
+            if not reefer_mask[row, bay]:
                 return
         elif container_goods == 2:  # Dangerous
-            if not special_area_masks["dangerous"][row, bay]:
+            if not dangerous_mask[row, bay]:
                 return
         elif container_type == 4:  # Trailer
-            if not special_area_masks["trailer"][row, bay]:
+            if not trailer_mask[row, bay]:
                 return
         elif container_type == 5:  # Swap Body
-            if not special_area_masks["swap_body"][row, bay]:
+            if not swap_body_mask[row, bay]:
                 return
         
         # If container is not stackable, only allow on empty positions
@@ -555,7 +560,7 @@ class WarpStackingKernels:
                 suitability += 10.0
             
             # Prefer lower stacks
-            suitability -= height * 5.0
+            suitability -= float(height * 5)
             
             # Prefer positions closer to the departure point
             # (proximity calculation would go here)
@@ -595,8 +600,7 @@ class WarpStackingKernels:
             num_bays: Number of bays per row
         """
         # Get thread indices
-        row = wp.tid(0)
-        bay = wp.tid(1)
+        row, bay = wp.tid()
         
         # Check bounds
         if row >= num_rows or bay >= num_bays:
@@ -740,7 +744,7 @@ class WarpStackingKernels:
             device=self.device
         )
         
-        # Run the optimal location kernel
+        # Run the optimal location kernel with unpacked special area masks
         wp.launch(
             kernel=self._kernel_find_optimal_locations,
             dim=[self.terminal_state.num_storage_rows, self.terminal_state.num_storage_bays],
@@ -749,7 +753,10 @@ class WarpStackingKernels:
                 self.terminal_state.container_dimensions,
                 self.terminal_state.yard_container_indices,
                 self.terminal_state.stack_heights,
-                self.terminal_state.special_area_masks,
+                self.terminal_state.special_area_masks['reefer'],
+                self.terminal_state.special_area_masks['dangerous'],
+                self.terminal_state.special_area_masks['trailer'],
+                self.terminal_state.special_area_masks['swap_body'],
                 container_idx,
                 suitability_scores,
                 self.terminal_state.num_storage_rows,

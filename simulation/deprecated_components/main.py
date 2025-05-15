@@ -4,7 +4,7 @@ import torch
 import os
 from datetime import datetime
 
-from gpu_training import GPUCurriculumTrainer
+from simulation.deprecated_components.gpu_training import GPUCurriculumTrainer
 
 def parse_args():
     """Parse command line arguments for GPU-accelerated training."""

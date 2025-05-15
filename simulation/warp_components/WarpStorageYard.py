@@ -40,33 +40,70 @@ class WarpStorageYard:
         self.query_times = []
         
         # Register Warp kernels
-        # self._register_kernels()
+        self._register_kernels()
         
         print(f"WarpStorageYard initialized on device: {self.device} with dimensions {self.num_rows}x{self.num_bays}")
     
-    # def _register_kernels(self):
-    #     """Register Warp kernels for storage yard operations."""
-    #     # Register query kernels
-    #     wp.register_kernel(self._kernel_get_yard_occupancy)
-    #     wp.register_kernel(self._kernel_get_container_distribution)
-    #     wp.register_kernel(self._kernel_find_containers_of_type)
+    def _register_kernels(self):
+        """
+        Initialize any kernel-related setup. 
         
-    #     # Register analysis kernels
-    #     wp.register_kernel(self._kernel_analyze_yard_utilization)
-    
-    # def _kernel_get_yard_occupancy(yard_container_indices: wp.array(dtype=wp.int32),
-    #                              stack_heights: wp.array(dtype=wp.int32),
-    #                              occupancy: wp.array(dtype=wp.float32),
-    #                              num_rows: int,
-    #                              num_bays: int):
+        Note: In Warp, @wp.kernel decorator is sufficient to define kernels,
+        no explicit registration is needed.
+        """
+        # Kernels are already defined with @wp.kernel decorators,
+        # no additional registration is needed
+        pass
 
-
+    # Utility kernels for array access
     @wp.kernel
-    def _kernel_get_yard_occupancy(yard_container_indices: wp.array,
-                                 stack_heights: wp.array,
-                                 occupancy: wp.array,
-                                 num_rows: int,
-                                 num_bays: int):
+    def _kernel_get_stack_height(stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                              row: wp.int32,
+                              bay: wp.int32,
+                              result: wp.array(dtype=wp.int32, ndim=1)):
+        """Kernel to retrieve stack height at a specific position."""
+        result[0] = stack_heights[row, bay]
+    
+    @wp.kernel
+    def _kernel_get_container_at_position(yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                       row: wp.int32,
+                                       bay: wp.int32,
+                                       tier: wp.int32,
+                                       result: wp.array(dtype=wp.int32, ndim=1)):
+        """Kernel to retrieve a container index at a specific position and tier."""
+        result[0] = yard_container_indices[row, bay, tier]
+    
+    @wp.kernel
+    def _kernel_set_container_at_position(yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                       row: wp.int32,
+                                       bay: wp.int32,
+                                       tier: wp.int32,
+                                       container_idx: wp.int32):
+        """Kernel to set a container index at a specific position and tier."""
+        yard_container_indices[row, bay, tier] = container_idx
+    
+    @wp.kernel
+    def _kernel_update_stack_height(stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                 row: wp.int32,
+                                 bay: wp.int32,
+                                 height: wp.int32):
+        """Kernel to update stack height at a specific position."""
+        stack_heights[row, bay] = height
+    
+    @wp.kernel
+    def _kernel_update_container_position(container_positions: wp.array(dtype=wp.int32, ndim=1),
+                                       container_idx: wp.int32,
+                                       position_idx: wp.int32):
+        """Kernel to update a container's position index."""
+        container_positions[container_idx] = position_idx
+
+    # Main analysis kernels
+    @wp.kernel
+    def _kernel_get_yard_occupancy(yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                 stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                 occupancy: wp.array(dtype=wp.float32, ndim=1),
+                                 num_rows: wp.int32,
+                                 num_bays: wp.int32):
         """
         Kernel to calculate yard occupancy.
         
@@ -78,12 +115,12 @@ class WarpStorageYard:
             num_bays: Number of bays per row
         """
         # Initialize results
-        occupancy[0] = 0  # Spots used
+        occupancy[0] = 0.0  # Spots used
         occupancy[1] = float(num_rows * num_bays)  # Total spots
-        occupancy[2] = 0  # Utilization %
+        occupancy[2] = 0.0  # Utilization %
         
         # Count spots with at least one container
-        spots_used = 0
+        spots_used = int(0)
         
         for row in range(num_rows):
             for bay in range(num_bays):
@@ -98,24 +135,14 @@ class WarpStorageYard:
             if occupancy[1] > 0:
                 occupancy[2] = occupancy[0] / occupancy[1] * 100.0
 
-
-    # def _kernel_get_container_distribution(yard_container_indices: wp.array(dtype=wp.int32),
-    #                                     container_properties: wp.array(dtype=wp.float32),
-    #                                     stack_heights: wp.array(dtype=wp.int32),
-    #                                     type_counts: wp.array(dtype=wp.int32),
-    #                                     num_rows: int,
-    #                                     num_bays: int,
-    #                                     max_height: int):
-
-
     @wp.kernel
-    def _kernel_get_container_distribution(yard_container_indices: wp.array,
-                                        container_properties: wp.array,
-                                        stack_heights: wp.array,
-                                        type_counts: wp.array,
-                                        num_rows: int,
-                                        num_bays: int,
-                                        max_height: int):
+    def _kernel_get_container_distribution(yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                        container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                        stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                        type_counts: wp.array(dtype=wp.int32, ndim=1),
+                                        num_rows: wp.int32,
+                                        num_bays: wp.int32,
+                                        max_height: wp.int32):
         """
         Kernel to count containers by type in the yard.
         
@@ -129,8 +156,7 @@ class WarpStorageYard:
             max_height: Maximum stack height
         """
         # Get thread indices - one thread per position
-        row = wp.tid(0)
-        bay = wp.tid(1)
+        row, bay = wp.tid()
         
         if row >= num_rows or bay >= num_bays:
             return
@@ -148,27 +174,16 @@ class WarpStorageYard:
                 # Increment count for this type (using atomic add to avoid race conditions)
                 wp.atomic_add(type_counts, container_type, 1)
 
-
-    # def _kernel_find_containers_of_type(yard_container_indices: wp.array(dtype=wp.int32),
-    #                                  container_properties: wp.array(dtype=wp.float32), 
-    #                                  stack_heights: wp.array(dtype=wp.int32),
-    #                                  target_type: int,
-    #                                  target_goods: int,
-    #                                  location_mask: wp.array(dtype=wp.int32),
-    #                                  count: wp.array(dtype=wp.int32),
-    #                                  num_rows: int,
-    #                                  num_bays: int):
-
     @wp.kernel
-    def _kernel_find_containers_of_type(yard_container_indices: wp.array,
-                                     container_properties: wp.array, 
-                                     stack_heights: wp.array,
-                                     target_type: int,
-                                     target_goods: int,
-                                     location_mask: wp.array,
-                                     count: wp.array,
-                                     num_rows: int,
-                                     num_bays: int):
+    def _kernel_find_containers_of_type(yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                     container_properties: wp.array(dtype=wp.float32, ndim=2), 
+                                     stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                     target_type: wp.int32,
+                                     target_goods: wp.int32,
+                                     location_mask: wp.array(dtype=wp.int32, ndim=2),
+                                     count: wp.array(dtype=wp.int32, ndim=1),
+                                     num_rows: wp.int32,
+                                     num_bays: wp.int32):
         """
         Kernel to find locations of containers of a specific type.
         
@@ -184,8 +199,7 @@ class WarpStorageYard:
             num_bays: Number of bays per row
         """
         # Get thread indices - one thread per position
-        row = wp.tid(0)
-        bay = wp.tid(1)
+        row, bay = wp.tid()
         
         if row >= num_rows or bay >= num_bays:
             return
@@ -213,11 +227,11 @@ class WarpStorageYard:
                         break  # No need to check other containers in this stack
     
     @wp.kernel
-    def _kernel_analyze_yard_utilization(stack_heights: wp.array, # dtype=wp.int32),
-                                      max_height: int,
-                                      utilization: wp.array, # dtype=wp.float32),
-                                      num_rows: int,
-                                      num_bays: int):
+    def _kernel_analyze_yard_utilization(stack_heights: wp.array(dtype=wp.int32, ndim=2), 
+                                      max_height: wp.int32,
+                                      utilization: wp.array(dtype=wp.float32, ndim=1), 
+                                      num_rows: wp.int32,
+                                      num_bays: wp.int32):
         """
         Kernel to analyze yard utilization and stacking efficiency.
         
@@ -239,9 +253,6 @@ class WarpStorageYard:
             utilization[2] = 0.0  # Average stack height
             utilization[3] = 0.0  # Number of full-height stacks
         
-        # Synchronize threads
-        wp.sync()
-        
         # Calculate metrics
         positions_used = 0
         containers_count = 0
@@ -249,8 +260,7 @@ class WarpStorageYard:
         full_stacks = 0
         
         # Each thread computes for one position
-        row = wp.tid(0)
-        bay = wp.tid(1)
+        row, bay = wp.tid()
         
         if row < num_rows and bay < num_bays:
             height = stack_heights[row, bay]
@@ -318,21 +328,42 @@ class WarpStorageYard:
         if not self.stacking_kernels.can_place_at(container_idx, position_str):
             return False
         
-        # Get current stack height
-        height = int(self.terminal_state.stack_heights[row, bay])
+        # Get current stack height using kernel
+        height_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height_result]
+        )
+        height_result_np = height_result.numpy()  # Convert to NumPy array
+        height = int(height_result_np[0])         # Now safely index
         
         # Check if stack is full
         if height >= self.max_height:
             return False
         
-        # Place container in yard
-        self.terminal_state.yard_container_indices[row, bay, height] = container_idx
-        self.terminal_state.stack_heights[row, bay] = height + 1
+        # Place container in yard using kernel
+        wp.launch(
+            kernel=self._kernel_set_container_at_position,
+            dim=1,
+            inputs=[self.terminal_state.yard_container_indices, row, bay, height, container_idx]
+        )
+        
+        # Update stack height using kernel
+        wp.launch(
+            kernel=self._kernel_update_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height + 1]
+        )
         
         # Update container position
         position_idx = self.terminal_state.position_to_idx.get(position_str, -1)
         if position_idx >= 0:
-            self.terminal_state.container_positions[container_idx] = position_idx
+            wp.launch(
+                kernel=self._kernel_update_container_position,
+                dim=1,
+                inputs=[self.terminal_state.container_positions, container_idx, position_idx]
+            )
         
         # Track performance
         self.add_container_times.append(time.time() - start_time)
@@ -360,26 +391,52 @@ class WarpStorageYard:
         if row is None or bay is None:
             return -1
         
-        # Get current stack height
-        height = int(self.terminal_state.stack_heights[row, bay])
+        # Get current stack height using kernel
+        height_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height_result]
+        )
+        height = int(height_result[0])
         
         # Check if stack is empty
         if height <= 0:
             return -1
         
-        # Get container at the top of the stack
-        container_idx = self.terminal_state.yard_container_indices[row, bay, height-1]
+        # Get container at the top of the stack using kernel
+        container_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_container_at_position,
+            dim=1,
+            inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, container_result]
+        )
+        container_idx = int(container_result[0])
         
         # Check if we got a valid container
         if container_idx < 0:
             return -1
         
-        # Remove container from yard
-        self.terminal_state.yard_container_indices[row, bay, height-1] = -1
-        self.terminal_state.stack_heights[row, bay] = height - 1
+        # Remove container from yard (set position to -1)
+        wp.launch(
+            kernel=self._kernel_set_container_at_position,
+            dim=1,
+            inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, -1]
+        )
+        
+        # Update stack height
+        wp.launch(
+            kernel=self._kernel_update_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height - 1]
+        )
         
         # Update container position
-        self.terminal_state.container_positions[container_idx] = -1
+        wp.launch(
+            kernel=self._kernel_update_container_position,
+            dim=1,
+            inputs=[self.terminal_state.container_positions, container_idx, -1]
+        )
         
         # Track performance
         self.remove_container_times.append(time.time() - start_time)
@@ -407,15 +464,27 @@ class WarpStorageYard:
         if row is None or bay is None:
             return None, None
         
-        # Get current stack height
-        height = int(self.terminal_state.stack_heights[row, bay])
+        # Get current stack height using kernel
+        height_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height_result]
+        )
+        height = int(height_result[0])
         
         # Check if stack is empty
         if height <= 0:
             return None, None
         
-        # Get container at the top of the stack
-        container_idx = self.terminal_state.yard_container_indices[row, bay, height-1]
+        # Get container at the top of the stack using kernel
+        container_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_container_at_position,
+            dim=1,
+            inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, container_result]
+        )
+        container_idx = int(container_result[0])
         
         # Check if we got a valid container
         if container_idx < 0:
@@ -449,16 +518,29 @@ class WarpStorageYard:
         if row is None or bay is None:
             return result
         
-        # Get current stack height
-        height = int(self.terminal_state.stack_heights[row, bay])
+        # Get current stack height using kernel
+        height_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_stack_height,
+            dim=1,
+            inputs=[self.terminal_state.stack_heights, row, bay, height_result]
+        )
+        height = int(height_result[0])
         
         # Check if stack is empty
         if height <= 0:
             return result
         
-        # Get all containers in the stack
+        # Get containers in the stack, tier by tier
+        container_result = wp.zeros(1, dtype=wp.int32, device=self.device)
         for tier in range(height):
-            container_idx = self.terminal_state.yard_container_indices[row, bay, tier]
+            wp.launch(
+                kernel=self._kernel_get_container_at_position,
+                dim=1,
+                inputs=[self.terminal_state.yard_container_indices, row, bay, tier, container_result]
+            )
+            container_idx = int(container_result[0])
+            
             if container_idx >= 0:
                 result[tier] = container_idx
         
@@ -507,9 +589,12 @@ class WarpStorageYard:
         # Initialize state array
         state = np.zeros((self.num_rows, self.num_bays, 7), dtype=np.float32)
         
-        # Copy stack heights
+        # Get stack heights using numpy conversion (this is safe as it's a read-only operation)
         heights = self.terminal_state.stack_heights.numpy()
         state[:,:,0] = heights / self.max_height  # Normalize by max height
+        
+        # Get container indices and properties using kernel computation
+        container_result = wp.zeros(1, dtype=wp.int32, device=self.device)
         
         # Go through each position
         for row in range(self.num_rows):
@@ -524,9 +609,16 @@ class WarpStorageYard:
                     priority_sum = 0
                     
                     for tier in range(height):
-                        container_idx = self.terminal_state.yard_container_indices[row, bay, tier].numpy()
+                        # Get container at this position and tier
+                        wp.launch(
+                            kernel=self._kernel_get_container_at_position,
+                            dim=1,
+                            inputs=[self.terminal_state.yard_container_indices, row, bay, tier, container_result]
+                        )
+                        container_idx = int(container_result[0])
+                        
                         if container_idx >= 0:
-                            # Get container properties
+                            # Get container properties using numpy for this read operation
                             props = self.terminal_state.container_properties[container_idx].numpy()
                             container_type = int(props[0])
                             goods_type = int(props[1])
