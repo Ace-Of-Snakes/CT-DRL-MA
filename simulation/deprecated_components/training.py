@@ -22,7 +22,7 @@ if project_root not in sys.path:
 # Import our modules
 from simulation.deprecated_components.dual_head_q import OptimizedTerminalAgent
 from simulation.deprecated_components.terminal_env import TerminalEnvironment
-from simulation.config import TerminalConfig
+from simulation.TerminalConfig import TerminalConfig
 
 class TrainingLogger:
     """Logger for training with file output and console display."""

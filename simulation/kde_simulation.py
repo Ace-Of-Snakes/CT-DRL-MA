@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime, timedelta
-from config import TerminalConfig
+from simulation.TerminalConfig import TerminalConfig
 
 def simulate_terminal_day(config=None):
     """
