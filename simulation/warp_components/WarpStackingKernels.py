@@ -347,7 +347,17 @@ class WarpStackingKernels:
             if upper_weight > lower_weight:
                 valid[0] = 0
                 return
-    
+    @wp.kernel
+    def _kernel_get_container_properties(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                    container_idx: wp.int32,
+                                    property_idx: wp.int32,
+                                    result: wp.array(dtype=wp.float32, ndim=1)):
+        """Get a property of a container."""
+        if container_idx >= 0:
+            result[0] = container_properties[container_idx, property_idx]
+        else:
+            result[0] = -1.0
+
     @wp.kernel
     def _kernel_calculate_stack_quality(container_properties: wp.array(dtype=wp.float32, ndim=2),
                                     yard_container_indices: wp.array(dtype=wp.int32, ndim=3),

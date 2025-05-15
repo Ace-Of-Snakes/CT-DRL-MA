@@ -336,46 +336,46 @@ class WarpCurriculumTrainer:
                 'target_reward': 20,
                 'max_episodes': 100,
                 'max_simulation_time': 86400 * 1  # 1 day
-            },
-            # Stage 2: Small terminal operations
-            {
-                'name': 'Small Terminal',
-                'num_railtracks': 2,
-                'num_railslots_per_track': 10, 
-                'num_storage_rows': 3,
-                'num_terminal_trucks': 1,
-                'max_trucks_per_day': 5,
-                'max_trains_per_day': 2,
-                'target_reward': 50,
-                'max_episodes': 100,
-                'max_simulation_time': 86400 * 2  # 2 days
-            },
-            # Stage 3: Intermediate terminal (medium size)
-            {
-                'name': 'Intermediate Terminal',
-                'num_railtracks': 3,
-                'num_railslots_per_track': 15,
-                'num_storage_rows': 4,
-                'num_terminal_trucks': 2,
-                'max_trucks_per_day': 10,
-                'max_trains_per_day': 3,
-                'target_reward': 100,
-                'max_episodes': 150,
-                'max_simulation_time': 86400 * 5  # 5 days
-            },
-            # Stage 4: Advanced terminal (full size)
-            {
-                'name': 'Advanced Terminal',
-                'num_railtracks': 6,
-                'num_railslots_per_track': 29,
-                'num_storage_rows': 5,
-                'num_terminal_trucks': 3,
-                'max_trucks_per_day': 20,
-                'max_trains_per_day': 5,
-                'target_reward': 200,
-                'max_episodes': 200,
-                'max_simulation_time': 86400 * 10  # 10 days
             }
+            # # Stage 2: Small terminal operations
+            # {
+            #     'name': 'Small Terminal',
+            #     'num_railtracks': 2,
+            #     'num_railslots_per_track': 10, 
+            #     'num_storage_rows': 3,
+            #     'num_terminal_trucks': 1,
+            #     'max_trucks_per_day': 5,
+            #     'max_trains_per_day': 2,
+            #     'target_reward': 50,
+            #     'max_episodes': 100,
+            #     'max_simulation_time': 86400 * 2  # 2 days
+            # },
+            # # Stage 3: Intermediate terminal (medium size)
+            # {
+            #     'name': 'Intermediate Terminal',
+            #     'num_railtracks': 3,
+            #     'num_railslots_per_track': 15,
+            #     'num_storage_rows': 4,
+            #     'num_terminal_trucks': 2,
+            #     'max_trucks_per_day': 10,
+            #     'max_trains_per_day': 3,
+            #     'target_reward': 100,
+            #     'max_episodes': 150,
+            #     'max_simulation_time': 86400 * 5  # 5 days
+            # },
+            # # Stage 4: Advanced terminal (full size)
+            # {
+            #     'name': 'Advanced Terminal',
+            #     'num_railtracks': 6,
+            #     'num_railslots_per_track': 29,
+            #     'num_storage_rows': 5,
+            #     'num_terminal_trucks': 3,
+            #     'max_trucks_per_day': 20,
+            #     'max_trains_per_day': 5,
+            #     'target_reward': 200,
+            #     'max_episodes': 200,
+            #     'max_simulation_time': 86400 * 10  # 10 days
+            # }
         ]
         
         # Initialize current stage

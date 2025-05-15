@@ -371,21 +371,88 @@ class WarpTerminalEnvironment(gym.Env):
         
         return True
     
+
+    @wp.kernel
+    def _kernel_get_event_data(event_queue: wp.array(dtype=wp.float32, ndim=2),
+                            event_idx: wp.int32,
+                            field_idx: wp.int32,
+                            result: wp.array(dtype=wp.float32, ndim=1)):
+        """Get event data from the event queue."""
+        result[0] = event_queue[event_idx, field_idx]
+
+    @wp.kernel
+    def _kernel_set_event_data(event_queue: wp.array(dtype=wp.float32, ndim=2),
+                            event_idx: wp.int32,
+                            field_idx: wp.int32,
+                            value: wp.float32):
+        """Set event data in the event queue."""
+        event_queue[event_idx, field_idx] = value
+
+    @wp.kernel
+    def _kernel_shift_event(event_queue: wp.array(dtype=wp.float32, ndim=2),
+                        src_idx: wp.int32, 
+                        dst_idx: wp.int32):
+        """Shift an event from source to destination index."""
+        # Copy all fields (0, 1, 2)
+        event_queue[dst_idx, 0] = event_queue[src_idx, 0]
+        event_queue[dst_idx, 1] = event_queue[src_idx, 1]
+        event_queue[dst_idx, 2] = event_queue[src_idx, 2]
+    
+    
     def _process_vehicle_arrivals(self, time_advance=0):
         """Process vehicle arrivals for the current time."""
         current_time = self.current_simulation_time
         
         # Process events from the queue
-        queue_size = int(self.terminal_state.event_queue_size.numpy()[0])
+        queue_size_np = self.terminal_state.event_queue_size.numpy()
+        queue_size = int(queue_size_np[0])
         events_to_remove = []
         
+        # Create result array for event data
+        event_data = wp.zeros(1, dtype=wp.float32, device=self.device)
+        
+        # First, identify events to process
         for i in range(queue_size):
-            event_time = float(self.terminal_state.event_queue.numpy()[i, 0])
+            # Get event time
+            wp.launch(
+                kernel=self._kernel_get_event_data,
+                dim=1,
+                inputs=[
+                    self.terminal_state.event_queue,
+                    i,
+                    0,  # Time field
+                    event_data
+                ]
+            )
+            event_time = float(event_data.numpy()[0])
             
             # Check if event should trigger now
             if event_time <= current_time:
-                event_type = int(self.terminal_state.event_queue.numpy()[i, 1])
-                event_data = int(self.terminal_state.event_queue.numpy()[i, 2])
+                # Get event type
+                wp.launch(
+                    kernel=self._kernel_get_event_data,
+                    dim=1,
+                    inputs=[
+                        self.terminal_state.event_queue,
+                        i,
+                        1,  # Event type field
+                        event_data
+                    ]
+                )
+                event_type = int(event_data.numpy()[0])
+                
+                # Get event data
+                wp.launch(
+                    kernel=self._kernel_get_event_data,
+                    dim=1,
+                    inputs=[
+                        self.terminal_state.event_queue,
+                        i,
+                        2,  # Event data field
+                        event_data
+                    ]
+                )
+                event_data_value = int(event_data.numpy()[0])
                 
                 # Process the event
                 if event_type == 0:  # Truck arrival
@@ -400,9 +467,16 @@ class WarpTerminalEnvironment(gym.Env):
         for i in sorted(events_to_remove, reverse=True):
             # Shift remaining events forward
             for j in range(i, queue_size - 1):
-                self.terminal_state.event_queue[j, 0] = self.terminal_state.event_queue[j + 1, 0]
-                self.terminal_state.event_queue[j, 1] = self.terminal_state.event_queue[j + 1, 1]
-                self.terminal_state.event_queue[j, 2] = self.terminal_state.event_queue[j + 1, 2]
+                # Move event j+1 to position j
+                wp.launch(
+                    kernel=self._kernel_shift_event,
+                    dim=1,
+                    inputs=[
+                        self.terminal_state.event_queue,
+                        j + 1,
+                        j
+                    ]
+                )
             
             # Decrement queue size
             queue_size -= 1
@@ -430,7 +504,12 @@ class WarpTerminalEnvironment(gym.Env):
                 # Schedule train arrival
                 arrival_time = current_time + np.random.uniform(0, time_advance)
                 self._add_event(arrival_time, 1, 0)
-    
+    @wp.kernel
+    def _kernel_update_container_position(container_positions: wp.array(dtype=wp.int32, ndim=1),
+                                        container_idx: wp.int32,
+                                        position_idx: wp.int32):
+        """Update a container's position index."""
+        container_positions[container_idx] = position_idx
     def _parse_position(self, position_str):
         """Parse position string into row and bay indices."""
         if len(position_str) < 2 or not position_str[0].isalpha():
@@ -459,6 +538,7 @@ class WarpTerminalEnvironment(gym.Env):
         for i in range(props.shape[0]):
             vehicle_properties[vehicle_idx, i] = props[i]
 
+    # 3. Fix the _create_truck_arrival function
     def _create_truck_arrival(self):
         """Create a new truck arrival and add it to the queue."""
         # Find an available vehicle slot
@@ -501,15 +581,73 @@ class WarpTerminalEnvironment(gym.Env):
             # Create a random container
             container_idx = self.container_registry.create_random_container()
             
-            # Assign container to truck
-            self.terminal_state.vehicle_containers[vehicle_idx, 0] = container_idx
-            self.terminal_state.vehicle_container_counts[vehicle_idx] = 1
-            self.terminal_state.container_vehicles[container_idx] = vehicle_idx
+            # Assign container to truck using kernels
+            wp.launch(
+                kernel=self._kernel_set_element_vehicle_container,
+                dim=1,
+                inputs=[
+                    self.terminal_state.vehicle_containers,
+                    vehicle_idx,
+                    0,  # First slot
+                    container_idx
+                ]
+            )
+            
+            wp.launch(
+                kernel=self._kernel_set_int_value,
+                dim=1,
+                inputs=[
+                    self.terminal_state.vehicle_container_counts,
+                    vehicle_idx,
+                    1  # One container
+                ]
+            )
+            
+            wp.launch(
+                kernel=self._kernel_set_element_container_vehicle,
+                dim=1,
+                inputs=[
+                    self.terminal_state.container_vehicles,
+                    container_idx,
+                    vehicle_idx
+                ]
+            )
+        
+        # Get current queue size
+        queue_size_result = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_queue_size,
+            dim=1,
+            inputs=[
+                self.terminal_state.queue_sizes,
+                0,  # Truck queue index
+                queue_size_result
+            ]
+        )
+        queue_size = int(queue_size_result.numpy()[0])
         
         # Add to truck queue
-        queue_size = int(self.terminal_state.queue_sizes[0])
-        self.terminal_state.vehicle_queues[0, queue_size] = vehicle_idx
-        self.terminal_state.queue_sizes[0] = queue_size + 1
+        wp.launch(
+            kernel=self._kernel_set_element_vehicle_queue,
+            dim=1,
+            inputs=[
+                self.terminal_state.vehicle_queues,
+                0,  # Truck queue
+                queue_size,
+                vehicle_idx
+            ]
+        )
+        
+        # Update queue size
+        wp.launch(
+            kernel=self._kernel_set_element_queue_size,
+            dim=1,
+            inputs=[
+                self.terminal_state.queue_sizes,
+                0,  # Truck queue index
+                queue_size + 1
+            ]
+        )
         
         # Update arrived count
         self.trucks_arrived += 1
@@ -752,6 +890,60 @@ class WarpTerminalEnvironment(gym.Env):
                     arrival_time = current_time + np.random.uniform(3600, 7200)  # 1-2 hours
                     self._add_event(arrival_time, 1, 0)
     
+# 1. First, add these essential kernel functions to properly handle array operations
+
+    @wp.kernel
+    def _kernel_set_element_crane_properties(properties: wp.array(dtype=wp.float32, ndim=2),
+                                        crane_idx: wp.int32,
+                                        prop_idx: wp.int32,
+                                        value: wp.float32):
+        """Set a value in crane properties array."""
+        properties[crane_idx, prop_idx] = value
+
+    @wp.kernel
+    def _kernel_set_element_container_vehicle(container_vehicles: wp.array(dtype=wp.int32, ndim=1),
+                                        container_idx: wp.int32,
+                                        vehicle_idx: wp.int32):
+        """Set vehicle index for a container."""
+        container_vehicles[container_idx] = vehicle_idx
+
+    @wp.kernel
+    def _kernel_set_element_vehicle_container(vehicle_containers: wp.array(dtype=wp.int32, ndim=2),
+                                        vehicle_idx: wp.int32,
+                                        slot_idx: wp.int32,
+                                        container_idx: wp.int32):
+        """Set container index for a vehicle slot."""
+        vehicle_containers[vehicle_idx, slot_idx] = container_idx
+
+    @wp.kernel
+    def _kernel_set_element_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
+                                    queue_idx: wp.int32,
+                                    size: wp.int32):
+        """Set queue size for a specific queue."""
+        queue_sizes[queue_idx] = size
+
+    @wp.kernel
+    def _kernel_set_element_vehicle_queue(vehicle_queues: wp.array(dtype=wp.int32, ndim=2),
+                                    queue_idx: wp.int32,
+                                    pos_idx: wp.int32,
+                                    vehicle_idx: wp.int32):
+        """Set vehicle in queue at specified position."""
+        vehicle_queues[queue_idx, pos_idx] = vehicle_idx
+
+    @wp.kernel
+    def _kernel_set_simulation_time(simulation_time: wp.array(dtype=wp.float32, ndim=1),
+                                time_value: wp.float32):
+        """Set the simulation time."""
+        simulation_time[0] = time_value
+
+    @wp.kernel
+    def _kernel_get_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
+                            queue_idx: wp.int32,
+                            result: wp.array(dtype=wp.int32, ndim=1)):
+        """Get queue size and store in result array."""
+        result[0] = queue_sizes[queue_idx]
+
+# 2. Fix the _execute_crane_movement function
     def _execute_crane_movement(self, crane_action):
         """Execute a crane movement action."""
         crane_idx, src_idx, dst_idx = crane_action
@@ -800,7 +992,6 @@ class WarpTerminalEnvironment(gym.Env):
             # Cannot place container at destination
             return 0.0
         
-
         container_props = self.terminal_state.container_properties.numpy()
         # Get container type from properties (index 0 is the type code)
         container_type = int(container_props[container_idx, 0])
@@ -808,7 +999,7 @@ class WarpTerminalEnvironment(gym.Env):
         # Get stack height if needed (only needed for storage destinations)
         stack_height = 0.0
         if dst_pos[0].isalpha() and dst_pos[0].upper() in self.storage_yard.row_names:
-            row, bay = self._parse_position(dst_pos)  # Implement or use existing method
+            row, bay = self._parse_position(dst_pos)
             if row is not None and bay is not None:
                 stack_heights_np = self.terminal_state.stack_heights.numpy()
                 stack_height = float(stack_heights_np[row, bay])
@@ -818,13 +1009,41 @@ class WarpTerminalEnvironment(gym.Env):
             src_pos, dst_pos, crane_idx, container_type=container_type, stack_height=stack_height
         )
         
-        # Update crane position and time
-        self.terminal_state.crane_properties[crane_idx, 2] = self.current_simulation_time + movement_time
+        # Update crane position and time using kernel
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_properties,
+                crane_idx,
+                2,  # Index for available time
+                self.current_simulation_time + movement_time
+            ]
+        )
         
-        # Update crane position (for visualization)
+        # Update crane position for visualization
         dst_coords = self._get_position_coordinates(dst_pos)
-        self.terminal_state.crane_positions[crane_idx, 0] = dst_coords[0]
-        self.terminal_state.crane_positions[crane_idx, 1] = dst_coords[1]
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_positions,
+                crane_idx,
+                0,  # X coordinate
+                dst_coords[0]
+            ]
+        )
+        
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_positions,
+                crane_idx,
+                1,  # Y coordinate
+                dst_coords[1]
+            ]
+        )
         
         # Remove container from source
         if src_pos[0].isalpha() and src_pos[0].upper() in self.storage_yard.row_names:
@@ -838,7 +1057,11 @@ class WarpTerminalEnvironment(gym.Env):
         
         # Update container position
         dst_position_idx = self.position_to_idx.get(dst_pos, -1)
-        self.terminal_state.container_positions[container_idx] = dst_position_idx
+        wp.launch(
+            kernel=self._kernel_update_container_position,
+            dim=1,
+            inputs=[self.terminal_state.container_positions, container_idx, dst_position_idx]
+        )
         
         # Increment containers moved
         self.containers_moved += 1
@@ -1234,6 +1457,7 @@ class WarpTerminalEnvironment(gym.Env):
         
         return observation, {}
     
+    # 4. Fix the step method to correctly update simulation time
     def step(self, action):
         """Take a step in the environment using the provided action."""
         start_time = time.time()
@@ -1256,8 +1480,15 @@ class WarpTerminalEnvironment(gym.Env):
         if reward == 0:
             self._advance_time(300)  # 5 minutes
         
-        # Update simulation time in terminal state
-        self.terminal_state.simulation_time[0] = self.current_simulation_time
+        # Update simulation time in terminal state using kernel
+        wp.launch(
+            kernel=self._kernel_set_simulation_time,
+            dim=1,
+            inputs=[
+                self.terminal_state.simulation_time,
+                self.current_simulation_time
+            ]
+        )
         
         # Process arrivals and departures for the current time
         self._process_vehicle_arrivals()

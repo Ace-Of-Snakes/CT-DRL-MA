@@ -370,6 +370,12 @@ class WarpStorageYard:
         
         return True
     
+    @wp.kernel
+    def _kernel_get_height_result(height_result: wp.array(dtype=wp.int32, ndim=1),
+                            output: wp.array(dtype=wp.int32, ndim=1)):
+        """Get height result and store in output array."""
+        output[0] = height_result[0]
+
     def remove_container(self, position_str: str) -> int:
         """
         Remove a container from a position in the storage yard.
@@ -398,7 +404,15 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.stack_heights, row, bay, height_result]
         )
-        height = int(height_result[0])
+        
+        # Extract height using a helper kernel
+        height_output = wp.zeros(1, dtype=wp.int32, device=self.device) 
+        wp.launch(
+            kernel=self._kernel_get_height_result,
+            dim=1,
+            inputs=[height_result, height_output]
+        )
+        height = int(height_output.numpy()[0])
         
         # Check if stack is empty
         if height <= 0:
@@ -411,7 +425,15 @@ class WarpStorageYard:
             dim=1,
             inputs=[self.terminal_state.yard_container_indices, row, bay, height-1, container_result]
         )
-        container_idx = int(container_result.numpy()[0])
+        
+        # Extract container using same helper kernel
+        container_output = wp.zeros(1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=self._kernel_get_height_result,  # Reuse this kernel (it works for any int array)
+            dim=1,
+            inputs=[container_result, container_output]
+        )
+        container_idx = int(container_output.numpy()[0])
         
         # Check if we got a valid container
         if container_idx < 0:

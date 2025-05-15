@@ -785,42 +785,66 @@ class WarpTerminalAgent(nn.Module):
         if not hasattr(yard, 'row_names'):
             return False
         
+        # Create device arrays for property extraction
+        property_result = wp.zeros(1, dtype=wp.float32, device=self.device)
+        
         for row in yard.row_names:
             for bay in range(1, yard.num_bays + 1):
                 position = f"{row}{bay}"
-                containers = yard.get_containers_at_position(position)
-                
-                if isinstance(containers, dict) and len(containers) > 1:
-                    total_stacks += 1
-                    # Check if priorities are ordered correctly (higher on top)
-                    tiers = sorted(containers.keys())
+                try:
+                    # Get containers as a dictionary
+                    containers = yard.get_containers_at_position(position)
                     
-                    # Try to get priorities, but be defensive
-                    try:
-                        priorities = []
-                        for tier in tiers:
-                            container = containers[tier]
-                            if hasattr(container, 'priority'):
-                                priorities.append(container.priority)
-                            elif isinstance(container, (int, np.integer)):
-                                # If it's just a container index, get info from the registry
-                                container_idx = container
-                                if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
-                                    priority = env.terminal_state.container_properties[container_idx, 2].numpy()
-                                    priorities.append(priority)
+                    if isinstance(containers, dict) and len(containers) > 1:
+                        total_stacks += 1
+                        # Check if priorities are ordered correctly (higher on top)
+                        tiers = sorted(containers.keys())
+                        
+                        # Try to get priorities, but be defensive
+                        try:
+                            priorities = []
+                            for tier in tiers:
+                                container = containers[tier]
+                                if hasattr(container, 'priority'):
+                                    priorities.append(container.priority)
+                                elif isinstance(container, (int, np.integer)):
+                                    # If it's just a container index, get info from the registry
+                                    container_idx = container
+                                    if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
+                                        # Use the kernel to safely extract the priority property
+                                        wp.launch(
+                                            kernel=env.stacking_kernels._kernel_get_container_properties, 
+                                            dim=1,
+                                            inputs=[
+                                                env.terminal_state.container_properties,
+                                                container_idx,
+                                                2,  # Priority is at index 2
+                                                property_result
+                                            ]
+                                        )
+                                        priority = property_result.numpy()[0]
+                                        priorities.append(priority)
+                                    else:
+                                        priorities.append(0)  # Default
                                 else:
                                     priorities.append(0)  # Default
-                            else:
-                                priorities.append(0)  # Default
-                        
-                        # Check if priorities are in descending order
-                        if len(priorities) > 1:
-                            if not all(priorities[i] >= priorities[i+1] for i in range(len(priorities)-1)):
-                                problem_stacks += 1
-                    except Exception as e:
-                        # We hit an error trying to analyze this stack - consider it not problematic
-                        print(f"Error analyzing stack at {position}: {e}")
-                        continue
+                            
+                            # Check if priorities are in descending order
+                            if len(priorities) > 1:
+                                is_ordered = True
+                                for i in range(len(priorities)-1):
+                                    if priorities[i] < priorities[i+1]:  # Higher priority should be on top
+                                        is_ordered = False
+                                        break
+                                
+                                if not is_ordered:
+                                    problem_stacks += 1
+                        except Exception as e:
+                            # We hit an error trying to analyze this stack - ignore this stack
+                            pass
+                except Exception as e:
+                    # Skip stack if can't analyze
+                    pass
         
         # Only allow pre-marshalling if enough problematic stacks exist
         needs_premarshalling = problem_stacks > 0 and problem_stacks / max(1, total_stacks) > 0.2
