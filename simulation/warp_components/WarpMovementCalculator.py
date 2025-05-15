@@ -6,19 +6,13 @@ import time
 # Define standalone kernels outside the class to avoid the 'self' parameter issue
 @wp.kernel
 def kernel_calculate_terminal_distances(positions: wp.array(dtype=wp.float32, ndim=2),
-                             distance_matrix: wp.array(dtype=wp.float32, ndim=2),
-                             num_positions: int):
+                                     distance_matrix: wp.array(dtype=wp.float32, ndim=2),
+                                     num_positions: wp.int32):
     """
     Kernel to calculate distances between all positions.
-    
-    Args:
-        positions: Array of position coordinates [position_idx, 2]
-        distance_matrix: Output distance matrix [position_idx, position_idx]
-        num_positions: Number of positions
     """
     # Get position indices from thread ID
-    i = wp.tid(0)
-    j = wp.tid(1)
+    i, j = wp.tid()  # Use tid.x for the first dimension
     
     # Check bounds
     if i >= num_positions or j >= num_positions:
@@ -33,10 +27,42 @@ def kernel_calculate_terminal_distances(positions: wp.array(dtype=wp.float32, nd
     distance_matrix[i, j] = distance
 
 
+@wp.func
+def calculate_travel_time(distance: wp.float32, max_speed: wp.float32, acceleration: wp.float32) -> float:
+    """
+    Calculate travel time with acceleration and deceleration.
+    
+    Args:
+        distance: Distance to travel in meters
+        max_speed: Maximum speed in meters per second
+        acceleration: Acceleration/deceleration in meters per second squared
+        
+    Returns:
+        Time in seconds needed for the movement
+    """
+    # No movement needed
+    if distance <= 0.0:
+        return 0.0
+    
+    # Calculate the distance needed to reach max speed
+    accel_distance = 0.5 * max_speed * max_speed / acceleration
+    
+    # If we can't reach max speed (distance is too short)
+    if distance <= 2.0 * accel_distance:
+        # Time to accelerate and then immediately decelerate
+        peak_speed = wp.sqrt(acceleration * distance)
+        return 2.0 * peak_speed / acceleration
+    else:
+        # Time to accelerate + time at max speed + time to decelerate
+        accel_time = max_speed / acceleration
+        constant_speed_distance = distance - 2.0 * accel_distance
+        constant_speed_time = constant_speed_distance / max_speed
+        return 2.0 * accel_time + constant_speed_time
+
 @wp.kernel
-def kernel_calculate_travel_time(distance: float,
-                               max_speed: float,
-                               acceleration: float,
+def kernel_calculate_travel_time(distance: wp.float32,
+                               max_speed: wp.float32,
+                               acceleration: wp.float32,
                                time: wp.array(dtype=wp.float32, ndim=1)):
     """
     Kernel to calculate travel time with acceleration and deceleration.
@@ -53,37 +79,64 @@ def kernel_calculate_travel_time(distance: float,
         return
     
     # Calculate the distance needed to reach max speed
-    accel_distance = 0.5 * max_speed**2 / acceleration
+    accel_distance = 0.5 * max_speed**2.0 / acceleration
     
     # If we can't reach max speed (distance is too short)
-    if distance <= 2 * accel_distance:
+    if distance <= 2.0 * accel_distance:
         # Time to accelerate and then immediately decelerate
         peak_speed = wp.sqrt(acceleration * distance)
-        time[0] = 2 * peak_speed / acceleration
+        time[0] = 2.0 * peak_speed / acceleration
     else:
         # Time to accelerate + time at max speed + time to decelerate
         accel_time = max_speed / acceleration
-        constant_speed_distance = distance - 2 * accel_distance
+        constant_speed_distance = distance - 2.0 * accel_distance
         constant_speed_time = constant_speed_distance / max_speed
-        time[0] = 2 * accel_time + constant_speed_time
+        time[0] = 2.0 * accel_time + constant_speed_time
 
+@wp.kernel
+def kernel_calculate_travel_time_inline(distance: wp.float32,
+                                      max_speed: wp.float32,
+                                      acceleration: wp.float32,
+                                      time_result: wp.array(dtype=wp.float32)):
+    """
+    Inlined travel time calculation (to avoid nested kernel calls)
+    """
+    # No movement needed
+    if distance <= 0:
+        time_result[0] = 0.0
+        return
+    
+    # Calculate the distance needed to reach max speed
+    accel_distance = 0.5 * max_speed**2.0 / acceleration
+    
+    # If we can't reach max speed (distance is too short)
+    if distance <= 2.0 * accel_distance:
+        # Time to accelerate and then immediately decelerate
+        peak_speed = wp.sqrt(acceleration * distance)
+        time_result[0] = 2.0 * peak_speed / acceleration
+    else:
+        # Time to accelerate + time at max speed + time to decelerate
+        accel_time = max_speed / acceleration
+        constant_speed_distance = distance - 2.0 * accel_distance
+        constant_speed_time = constant_speed_distance / max_speed
+        time_result[0] = 2.0 * accel_time + constant_speed_time
 
 @wp.kernel
 def kernel_calculate_movement_time(src_position: wp.array(dtype=wp.float32, ndim=1),
                                 dst_position: wp.array(dtype=wp.float32, ndim=1),
                                 crane_position: wp.array(dtype=wp.float32, ndim=1),
-                                src_type: int,
-                                dst_type: int,
-                                container_type: int,
-                                stack_height: float,
-                                trolley_speed: float,
-                                hoisting_speed: float,
-                                gantry_speed: float,
-                                trolley_acceleration: float,
-                                hoisting_acceleration: float,
-                                gantry_acceleration: float,
-                                max_height: float,
-                                ground_vehicle_height: float,
+                                src_type: wp.int32,
+                                dst_type: wp.int32,
+                                container_type: wp.int32,
+                                stack_height: wp.float32,
+                                trolley_speed: wp.float32,
+                                hoisting_speed: wp.float32,
+                                gantry_speed: wp.float32,
+                                trolley_acceleration: wp.float32,
+                                hoisting_acceleration: wp.float32,
+                                gantry_acceleration: wp.float32,
+                                max_height: wp.float32,
+                                ground_vehicle_height: wp.float32,
                                 container_heights: wp.array(dtype=wp.float32, ndim=1),
                                 time_result: wp.array(dtype=wp.float32, ndim=1)):
     """
@@ -115,57 +168,28 @@ def kernel_calculate_movement_time(src_position: wp.array(dtype=wp.float32, ndim
     container_height = container_heights[container_type]
     
     # Calculate distance components
-    
-    # 1. Distance from crane to source
     crane_to_src_x = abs(crane_position[0] - src_position[0])
     crane_to_src_y = abs(crane_position[1] - src_position[1])
-    
-    # 2. Distance from source to destination
     src_to_dst_x = abs(src_position[0] - dst_position[0])
     src_to_dst_y = abs(src_position[1] - dst_position[1])
     
-    # Calculate time components
-    
+    # Calculate time components directly without auxiliary arrays
     # 1. Time to move crane to source
-    # Gantry movement along rails (y-axis)
-    gantry_to_src_time = 0.0
-    if crane_to_src_y > 0.1:  # Threshold to avoid numerical issues
-        gantry_to_src_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(crane_to_src_y, gantry_speed, gantry_acceleration, gantry_to_src_time_result)
-        gantry_to_src_time = gantry_to_src_time_result[0]
-    
-    # Trolley movement across bridge (x-axis)
-    trolley_to_src_time = 0.0
-    if crane_to_src_x > 0.1:  # Threshold to avoid numerical issues
-        trolley_to_src_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(crane_to_src_x, trolley_speed, trolley_acceleration, trolley_to_src_time_result)
-        trolley_to_src_time = trolley_to_src_time_result[0]
+    gantry_to_src_time = calculate_travel_time(crane_to_src_y, gantry_speed, gantry_acceleration)
+    trolley_to_src_time = calculate_travel_time(crane_to_src_x, trolley_speed, trolley_acceleration)
     
     # Total time to source (max of gantry and trolley, as they happen in parallel)
     time_to_src = wp.max(gantry_to_src_time, trolley_to_src_time)
     
     # 2. Time for source to destination movement
-    
-    # Gantry movement (if needed)
-    gantry_time = 0.0
-    if src_to_dst_y > 0.1:  # Threshold to avoid numerical issues
-        gantry_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(src_to_dst_y, gantry_speed, gantry_acceleration, gantry_time_result)
-        gantry_time = gantry_time_result[0]
-    
-    # Trolley movement
-    trolley_time = 0.0
-    if src_to_dst_x > 0.1:  # Threshold to avoid numerical issues
-        trolley_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(src_to_dst_x, trolley_speed, trolley_acceleration, trolley_time_result)
-        trolley_time = trolley_time_result[0]
+    gantry_time = calculate_travel_time(src_to_dst_y, gantry_speed, gantry_acceleration)
+    trolley_time = calculate_travel_time(src_to_dst_x, trolley_speed, trolley_acceleration)
     
     # 3. Calculate vertical movement times
-    
-    # Determine vertical distances based on source and destination types
     vertical_distance_up = 0.0
     vertical_distance_down = 0.0
     
+    # Determine vertical distances based on source and destination types
     if src_type == 0 and dst_type == 2:  # Rail to storage
         vertical_distance_up = max_height - (ground_vehicle_height + container_height)
         vertical_distance_down = max_height - stack_height
@@ -185,20 +209,12 @@ def kernel_calculate_movement_time(src_position: wp.array(dtype=wp.float32, ndim
         vertical_distance_up = max_height - stack_height
         vertical_distance_down = max_height - 0.0  # Assuming destination has no stack
     
-    # Calculate vertical movement times
-    vertical_up_time = 0.0
-    if vertical_distance_up > 0.1:  # Threshold to avoid numerical issues
-        vertical_up_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(vertical_distance_up, hoisting_speed, hoisting_acceleration, vertical_up_time_result)
-        vertical_up_time = vertical_up_time_result[0]
-    
-    vertical_down_time = 0.0
-    if vertical_distance_down > 0.1:  # Threshold to avoid numerical issues
-        vertical_down_time_result = wp.zeros(1, dtype=wp.float32)
-        kernel_calculate_travel_time(vertical_distance_down, hoisting_speed, hoisting_acceleration, vertical_down_time_result)
-        vertical_down_time = vertical_down_time_result[0]
+    # Calculate vertical times directly
+    vertical_up_time = calculate_travel_time(vertical_distance_up, hoisting_speed, hoisting_acceleration)
+    vertical_down_time = calculate_travel_time(vertical_distance_down, hoisting_speed, hoisting_acceleration)
     
     # 4. Calculate total time with proper sequencing of operations
+    movement_time = 0.0
     
     # In most RMG operations, the sequence is:
     # - Move crane to position (if needed)
@@ -276,47 +292,76 @@ def kernel_batch_movement_times(src_positions: wp.array(dtype=wp.float32, ndim=2
     # Get crane index
     crane_idx = crane_indices[idx]
     
-    # Get crane position
-    crane_position = crane_positions[crane_idx]
+    # Extract positions for this movement
+    src_pos = src_positions[idx]
+    dst_pos = dst_positions[idx]
+    crane_pos = crane_positions[crane_idx]
     
-    # Calculate movement time for this batch item
-    single_time_result = wp.zeros(1, dtype=wp.float32)
+    # Create single-element arrays for the temporary time result
+    # Warp doesn't allow creating arrays with wp.zeros in kernels
     
-    # Create temporary 1D arrays for positions
-    src_pos_1d = wp.zeros(2, dtype=wp.float32)
-    dst_pos_1d = wp.zeros(2, dtype=wp.float32)
-    crane_pos_1d = wp.zeros(2, dtype=wp.float32)
+    # Calculate movement time directly by calling movement time kernel
+    # This is also not ideal in Warp as kernels calling kernels can be problematic
     
-    # Copy data to temporary arrays
-    src_pos_1d[0] = src_positions[idx, 0]
-    src_pos_1d[1] = src_positions[idx, 1]
-    dst_pos_1d[0] = dst_positions[idx, 0]
-    dst_pos_1d[1] = dst_positions[idx, 1]
-    crane_pos_1d[0] = crane_position[0]
-    crane_pos_1d[1] = crane_position[1]
+    # Instead, inline the calculation logic directly:
+    # Get container height based on type
+    container_height = container_heights[container_types[idx]]
     
-    kernel_calculate_movement_time(
-        src_pos_1d,
-        dst_pos_1d,
-        crane_pos_1d,
-        src_types[idx],
-        dst_types[idx],
-        container_types[idx],
-        stack_heights[idx],
-        trolley_speed,
-        hoisting_speed,
-        gantry_speed,
-        trolley_acceleration,
-        hoisting_acceleration,
-        gantry_acceleration,
-        max_height,
-        ground_vehicle_height,
-        container_heights,
-        single_time_result
-    )
+    # Calculate distance components
+    crane_to_src_x = abs(crane_pos[0] - src_pos[0])
+    crane_to_src_y = abs(crane_pos[1] - src_pos[1])
+    src_to_dst_x = abs(src_pos[0] - dst_pos[0])
+    src_to_dst_y = abs(src_pos[1] - dst_pos[1])
     
-    # Store result
-    time_results[idx] = single_time_result[0]
+    # Time to source
+    gantry_to_src_time = calculate_travel_time(crane_to_src_y, gantry_speed, gantry_acceleration)
+    trolley_to_src_time = calculate_travel_time(crane_to_src_x, trolley_speed, trolley_acceleration)
+    time_to_src = wp.max(gantry_to_src_time, trolley_to_src_time)
+    
+    # Time for movement
+    gantry_time = calculate_travel_time(src_to_dst_y, gantry_speed, gantry_acceleration)
+    trolley_time = calculate_travel_time(src_to_dst_x, trolley_speed, trolley_acceleration)
+    
+    # Vertical distances
+    vertical_distance_up = 0.0
+    vertical_distance_down = 0.0
+    
+    # Determine vertical distances based on source and destination types
+    if src_types[idx] == 0 and dst_types[idx] == 2:  # Rail to storage
+        vertical_distance_up = max_height - (ground_vehicle_height + container_height)
+        vertical_distance_down = max_height - stack_heights[idx]
+    elif src_types[idx] == 2 and dst_types[idx] == 0:  # Storage to rail
+        vertical_distance_up = max_height - stack_heights[idx]
+        vertical_distance_down = max_height - (ground_vehicle_height + container_height)
+    elif src_types[idx] == 1 and dst_types[idx] == 2:  # Truck to storage
+        vertical_distance_up = max_height - (ground_vehicle_height + container_height)
+        vertical_distance_down = max_height - stack_heights[idx]
+    elif src_types[idx] == 2 and dst_types[idx] == 1:  # Storage to truck
+        vertical_distance_up = max_height - stack_heights[idx]
+        vertical_distance_down = max_height - (ground_vehicle_height + container_height)
+    elif (src_types[idx] == 0 and dst_types[idx] == 1) or (src_types[idx] == 1 and dst_types[idx] == 0):  # Rail/truck
+        vertical_distance_up = max_height - (ground_vehicle_height + container_height)
+        vertical_distance_down = max_height - (ground_vehicle_height + container_height)
+    elif src_types[idx] == 2 and dst_types[idx] == 2:  # Storage to storage
+        vertical_distance_up = max_height - stack_heights[idx]
+        vertical_distance_down = max_height - 0.0  # Assuming destination has no stack
+    
+    vertical_up_time = calculate_travel_time(vertical_distance_up, hoisting_speed, hoisting_acceleration)
+    vertical_down_time = calculate_travel_time(vertical_distance_down, hoisting_speed, hoisting_acceleration)
+    
+    # Calculate total time
+    movement_time = 0.0
+    if gantry_time > 0.1:
+        time_after_gantry = wp.max(vertical_up_time, trolley_time)
+        movement_time = gantry_time + time_after_gantry + vertical_down_time
+    else:
+        movement_time = wp.max(vertical_up_time, trolley_time) + vertical_down_time
+    
+    # Add time for attaching/detaching
+    movement_time += 10.0  # seconds for attaching/detaching
+    
+    # Set result
+    time_results[idx] = time_to_src + movement_time
 
 
 class WarpMovementCalculator:
@@ -390,57 +435,18 @@ class WarpMovementCalculator:
         # Get all positions
         num_positions = len(self.terminal_state.position_to_idx)
         
-        # Create positions array [position_idx, 2]
-        positions = wp.zeros((num_positions, 2), dtype=wp.float32, device=self.device)
+        # Create a CPU-side array first
+        positions_np = np.zeros((num_positions, 2), dtype=np.float32)
         
-        # Fill positions array
+        # Fill positions array on CPU
         for pos_str, pos_idx in self.terminal_state.position_to_idx.items():
-            # Determine position type
-            if pos_str.startswith('t') and '_' in pos_str:
-                # Rail position
-                track_id = pos_str.split('_')[0]
-                slot_num = int(pos_str.split('_')[1])
-                track_num = int(track_id[1:])
-                
-                # Get coordinates
-                if hasattr(self.terminal_state, 'rail_positions'):
-                    coords = self.terminal_state.rail_positions[track_num-1, slot_num-1].numpy()
-                    positions[pos_idx, 0] = coords[0]
-                    positions[pos_idx, 1] = coords[1]
-                else:
-                    # Approximate positions
-                    positions[pos_idx, 0] = (slot_num - 1) * 24.0  # 24m slots
-                    positions[pos_idx, 1] = (track_num - 1) * 5.0  # 5m between tracks
-            
-            elif pos_str.startswith('p_'):
-                # Parking position
-                spot_num = int(pos_str.split('_')[1])
-                
-                # Get coordinates
-                if hasattr(self.terminal_state, 'parking_positions'):
-                    coords = self.terminal_state.parking_positions[spot_num-1].numpy()
-                    positions[pos_idx, 0] = coords[0]
-                    positions[pos_idx, 1] = coords[1]
-                else:
-                    # Approximate positions
-                    positions[pos_idx, 0] = (spot_num - 1) * 24.0  # 24m slots
-                    positions[pos_idx, 1] = self.terminal_state.num_rail_tracks * 5.0 + 5.0  # Below rail area
-            
-            else:
-                # Storage position
-                row_letter = pos_str[0]
-                bay_num = int(pos_str[1:])
-                row_idx = ord(row_letter) - ord('A')
-                
-                # Get coordinates
-                if hasattr(self.terminal_state, 'storage_positions'):
-                    coords = self.terminal_state.storage_positions[row_idx, bay_num-1].numpy()
-                    positions[pos_idx, 0] = coords[0]
-                    positions[pos_idx, 1] = coords[1]
-                else:
-                    # Approximate positions
-                    positions[pos_idx, 0] = (bay_num - 1) * 12.0  # 12m bays
-                    positions[pos_idx, 1] = self.terminal_state.num_rail_tracks * 5.0 + 10.0 + row_idx * 10.0  # Below parking area
+            # Determine position type and get coordinates
+            coords = self._get_position_coordinates(pos_str)
+            positions_np[pos_idx, 0] = coords[0]
+            positions_np[pos_idx, 1] = coords[1]
+        
+        # Create warp array from the filled numpy array
+        positions = wp.array(positions_np, dtype=wp.float32, device=self.device)
         
         # Calculate distances
         wp.launch(
@@ -454,24 +460,12 @@ class WarpMovementCalculator:
         )
     
     def calculate_movement_time(self,
-                             src_position_str: str,
-                             dst_position_str: str,
-                             crane_idx: int = 0,
-                             container_type: int = 2,  # FEU is default
-                             stack_height: float = 0.0) -> float:
-        """
-        Calculate the time needed for a container movement.
-        
-        Args:
-            src_position_str: Source position string
-            dst_position_str: Destination position string
-            crane_idx: Index of the crane to use
-            container_type: Container type code (0=TWEU, 1=THEU, 2=FEU, etc.)
-            stack_height: Height of container stack at destination (or source if from storage)
-            
-        Returns:
-            Time in seconds needed for the movement
-        """
+                            src_position_str: str,
+                            dst_position_str: str,
+                            crane_idx: int = 0,
+                            container_type: int = 2,  # FEU is default
+                            stack_height: float = 0.0) -> float:
+        """Calculate the time needed for a container movement."""
         start_time = time.time()
         
         # Get position indices
@@ -479,9 +473,6 @@ class WarpMovementCalculator:
             print(f"Warning: Invalid position strings: {src_position_str}, {dst_position_str}")
             return 0.0
             
-        src_pos_idx = self.terminal_state.position_to_idx[src_position_str]
-        dst_pos_idx = self.terminal_state.position_to_idx[dst_position_str]
-        
         # Get position types
         src_type = self._get_position_type_code(src_position_str)
         dst_type = self._get_position_type_code(dst_position_str)
@@ -537,19 +528,7 @@ class WarpMovementCalculator:
                                     crane_indices: List[int] = None,
                                     container_types: List[int] = None,
                                     stack_heights: List[float] = None) -> List[float]:
-        """
-        Calculate movement times for a batch of movements.
-        
-        Args:
-            src_position_strs: List of source position strings
-            dst_position_strs: List of destination position strings
-            crane_indices: List of crane indices (defaults to 0 for all)
-            container_types: List of container type codes (defaults to FEU for all)
-            stack_heights: List of stack heights (defaults to 0 for all)
-            
-        Returns:
-            List of movement times in seconds
-        """
+        """Calculate movement times for a batch of movements."""
         start_time = time.time()
         
         # Check input lengths

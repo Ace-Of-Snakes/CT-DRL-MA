@@ -232,11 +232,14 @@ class WarpContainerRegistry:
             print(f"Warning: Container ID {container_id} already exists")
             return self.container_id_to_idx[container_id]
         
+        # Convert active flags to NumPy for checking availability
+        active_flags = self.terminal_state.container_properties.numpy()[:, 6]
+        
         # Find the next available container slot
         container_idx = -1
         for i in range(self.max_containers):
             # Check if slot is inactive
-            if self.terminal_state.container_properties[i, 6] == 0:
+            if active_flags[i] == 0:
                 container_idx = i
                 break
         
@@ -275,30 +278,45 @@ class WarpContainerRegistry:
             stack_compatibility = "self"
             stack_code = self.stack_codes["self"]
         
-        # Set container properties
-        self.terminal_state.container_properties[container_idx, 0] = type_code
-        self.terminal_state.container_properties[container_idx, 1] = goods_code
-        self.terminal_state.container_properties[container_idx, 2] = priority
-        self.terminal_state.container_properties[container_idx, 3] = weight
-        self.terminal_state.container_properties[container_idx, 4] = 1.0 if is_stackable else 0.0
-        self.terminal_state.container_properties[container_idx, 5] = stack_code
-        self.terminal_state.container_properties[container_idx, 6] = 1.0  # Set active flag
-        self.terminal_state.container_properties[container_idx, 7] = departure_time
+        # Create NumPy arrays for the container properties and dimensions
+        property_values = np.array([type_code, goods_code, priority, weight, 
+                                1.0 if is_stackable else 0.0, stack_code, 
+                                1.0, departure_time], dtype=np.float32)
         
-        # Set container dimensions
-        self.terminal_state.container_dimensions[container_idx, 0] = dimensions[0]
-        self.terminal_state.container_dimensions[container_idx, 1] = dimensions[1]
-        self.terminal_state.container_dimensions[container_idx, 2] = dimensions[2]
+        dimension_values = np.array([dimensions[0], dimensions[1], dimensions[2]], 
+                                dtype=np.float32)
         
-        # Set container position to "not placed"
-        self.terminal_state.container_positions[container_idx] = -1
+        # Update Warp arrays using numpy arrays
+        # Get container properties for this index
+        container_props = self.terminal_state.container_properties.numpy()
+        container_dims = self.terminal_state.container_dimensions.numpy()
+        
+        # Update the arrays
+        container_props[container_idx] = property_values
+        container_dims[container_idx] = dimension_values
+        
+        # Create new Warp arrays from the modified NumPy arrays
+        self.terminal_state.container_properties = wp.array(container_props, 
+                                                        dtype=wp.float32, 
+                                                        device=self.device)
+        
+        self.terminal_state.container_dimensions = wp.array(container_dims, 
+                                                        dtype=wp.float32, 
+                                                        device=self.device)
+        
+        # Set container position to "not placed" in a separate step
+        positions = self.terminal_state.container_positions.numpy()
+        positions[container_idx] = -1
+        self.terminal_state.container_positions = wp.array(positions, 
+                                                        dtype=wp.int32, 
+                                                        device=self.device)
         
         # Update mappings
         self.container_id_to_idx[container_id] = container_idx
         self.container_idx_to_id[container_idx] = container_id
         
         return container_idx
-    
+        
     def remove_container(self, container_id_or_idx):
         """
         Remove a container from the registry.
@@ -663,9 +681,41 @@ class WarpContainerRegistry:
         if container_id is None:
             container_id = f"CONT{uuid.uuid4().hex[:8].upper()}"
         
-        # Random container type
+        # Define probability weights for container types
         container_types = list(self.type_codes.keys())
-        container_type_weights = [0.532, 0.256, 0.180, 0.032, 0.014, 0.011]
+        container_type_weights = []
+        
+        # Try to access terminal config if available via terminal_state
+        if hasattr(self.terminal_state, 'terminal_config') and self.terminal_state.terminal_config:
+            # Get probabilities from config
+            config = self.terminal_state.terminal_config
+            probs = config.get_container_type_probabilities()
+            if probs:
+                # Map from config to container types
+                length_probs = probs.get('length', {})
+                container_type_weights = [
+                    length_probs.get('20', {}).get('probability', 0.177),        # TWEU
+                    length_probs.get('30', {}).get('probability', 0.018),        # THEU
+                    length_probs.get('40', {}).get('probability', 0.521),        # FEU
+                    length_probs.get('40', {}).get('probability', 0.0) * 
+                    length_probs.get('40', {}).get('probability_high_cube', 0.1115),  # FFEU (40-foot High Cube)
+                    length_probs.get('trailer', {}).get('probability', 0.033),   # Trailer
+                    length_probs.get('swap body', {}).get('probability', 0.251)  # Swap Body
+                ]
+        
+        # Fallback if no config available or empty weights
+        if not container_type_weights or sum(container_type_weights) == 0:
+            container_type_weights = [0.532, 0.026, 0.180, 0.032, 0.014, 0.216]  # Default weights
+        
+        # Normalize weights to ensure they sum to 1
+        weight_sum = sum(container_type_weights)
+        if weight_sum > 0:
+            container_type_weights = [w / weight_sum for w in container_type_weights]
+        else:
+            # If all weights are zero, use uniform distribution
+            container_type_weights = [1.0 / len(container_types) for _ in container_types]
+
+        # Random container type
         container_type = np.random.choice(container_types, p=container_type_weights)
         
         # Random goods type
@@ -696,7 +746,7 @@ class WarpContainerRegistry:
         # Random departure time if not provided
         if departure_time is None:
             # Between 1 and 10 days from now
-            departure_time = self.terminal_state.simulation_time[0] + np.random.randint(86400, 864000)
+            departure_time = float(self.terminal_state.simulation_time.numpy()[0]) + np.random.randint(86400, 864000)
         
         # Create the container
         return self.create_container(

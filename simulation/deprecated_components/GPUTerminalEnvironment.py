@@ -20,9 +20,9 @@ from simulation.terminal_components.TerminalTruck import TerminalTruck
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 # Import GPU-accelerated components
-from simulation.terminal_components.GPUStorageYard import GPUStorageYard
-from simulation.terminal_components.GPURMGCrane import GPURMGCrane
-from simulation.terminal_components.GPUActionMaskGenerator import GPUActionMaskGenerator
+from simulation.deprecated_components.GPUStorageYard import GPUStorageYard
+from simulation.deprecated_components.GPURMGCrane import GPURMGCrane
+from simulation.deprecated_components.GPUActionMaskGenerator import GPUActionMaskGenerator
 
 
 class GPUTerminalEnvironment(gym.Env):
