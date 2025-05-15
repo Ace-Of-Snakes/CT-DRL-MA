@@ -184,9 +184,6 @@ class WarpTerminalAgent(nn.Module):
         self.update_every = 4      # Update target network every N steps
         self.step_count = 0
         
-        # Register Warp kernels
-        self._register_kernels()
-        
         # Position type detection
         self.storage_position_threshold = int(0.6 * state_dim)
         
@@ -201,12 +198,6 @@ class WarpTerminalAgent(nn.Module):
         print(f"- Transfer head: {self.transfer_head}")
         print(f"- Yard head: {self.yard_head}")
         print(f"- Device: {self.device}")
-    
-    def _register_kernels(self):
-        """Register Warp kernels for agent operations."""
-        # Action selection kernels
-        wp.register_kernel(self._kernel_filter_valid_actions)
-        wp.register_kernel(self._kernel_calculate_action_scores)
     
     @staticmethod
     @wp.kernel

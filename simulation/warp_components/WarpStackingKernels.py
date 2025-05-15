@@ -384,7 +384,7 @@ class WarpStackingKernels:
             return
         
         # Check priority order
-        priority_violations = 0
+        priority_violations = int(0)
         for i in range(height-1):
             # Get container indices
             lower_idx = yard_container_indices[row, bay, i]
@@ -405,7 +405,7 @@ class WarpStackingKernels:
             # Check priority order (higher priority should be on top)
             # Lower priority number means higher actual priority
             if lower_priority < upper_priority:
-                priority_violations += 1
+                priority_violations = int(priority_violations + 1)
                 quality_score[0] = float(quality_score[0] - 10.0)
             
             # Check departure time order (containers leaving sooner should be on top)
@@ -421,11 +421,11 @@ class WarpStackingKernels:
         # Overall stack quality factors
         if height > 3:
             # Tall stacks are slightly penalized
-            quality_score[0] = float(quality_score[0] - (height - 3) * 5.0)
+            quality_score[0] = float(quality_score[0] - float(height - 3) * 5.0)
         
         # Ensure score stays in reasonable bounds
         if quality_score[0] < 0:
-            quality_score[0] = 0
+            quality_score[0] = 0.0
 
     # def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32),
     #                                 container_dimensions: wp.array(dtype=wp.float32),
@@ -580,13 +580,13 @@ class WarpStackingKernels:
     #                                     num_bays: int):
 
     @wp.kernel
-    def _kernel_identify_suboptimal_stacks(container_properties: wp.array(dtype=wp.float32),
-                                        yard_container_indices: wp.array(dtype=wp.int32),
-                                        stack_heights: wp.array(dtype=wp.int32),
-                                        current_time: float,
-                                        problem_scores: wp.array(dtype=wp.float32),
-                                        num_rows: int,
-                                        num_bays: int):
+    def _kernel_identify_suboptimal_stacks(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                        yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                        stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                        current_time: wp.float32,
+                                        problem_scores: wp.array(dtype=wp.float32, ndim=2),
+                                        num_rows: wp.int32,
+                                        num_bays: wp.int32):
         """
         Kernel to identify suboptimal stacks that need reshuffling.
         
