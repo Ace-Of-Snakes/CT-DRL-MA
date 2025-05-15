@@ -1,4 +1,5 @@
 import numpy as np
+import warp as wp
 from datetime import datetime, timedelta
 import time
 import gymnasium as gym
@@ -195,65 +196,76 @@ class WarpTerminalEnvironment(gym.Env):
     def _reset_terminal_state(self):
         """Reset all terminal state arrays."""
         # Reset container arrays
-        self.terminal_state.container_positions.fill(-1)
-        self.terminal_state.container_vehicles.fill(-1)
-        self.terminal_state.container_properties[:, 6].fill(0.0)  # Inactive containers
+        self.terminal_state.container_positions.fill_(-1)
+        self.terminal_state.container_vehicles.fill_(-1)
+        self.terminal_state.container_properties[:, 6].fill_(0.0)  # Inactive containers
         
         # Reset yard arrays
-        self.terminal_state.yard_container_indices.fill(-1)
-        self.terminal_state.stack_heights.fill(0)
+        self.terminal_state.yard_container_indices.fill_(-1)
+        self.terminal_state.stack_heights.fill_(0)
         
         # Reset vehicle arrays
-        self.terminal_state.vehicle_positions.fill(-1)
-        self.terminal_state.vehicle_properties[:, 6].fill(0.0)  # Inactive vehicles
-        self.terminal_state.vehicle_containers.fill(-1)
-        self.terminal_state.vehicle_container_counts.fill(0)
-        self.terminal_state.parking_vehicles.fill(-1)
-        self.terminal_state.rail_track_vehicles.fill(-1)
+        self.terminal_state.vehicle_positions.fill_(-1)
+        self.terminal_state.vehicle_properties[:, 6].fill_(0.0)  # Inactive vehicles
+        self.terminal_state.vehicle_containers.fill_(-1)
+        self.terminal_state.vehicle_container_counts.fill_(0)
+        self.terminal_state.parking_vehicles.fill_(-1)
+        self.terminal_state.rail_track_vehicles.fill_(-1)
         
         # Reset queues
-        self.terminal_state.vehicle_queues.fill(-1)
-        self.terminal_state.queue_sizes.fill(0)
+        self.terminal_state.vehicle_queues.fill_(-1)
+        self.terminal_state.queue_sizes.fill_(0)
         
         # Reset crane state
-        self.terminal_state.crane_properties[:, 0].fill(0.0)  # Idle status
-        self.terminal_state.crane_properties[:, 1].fill(-1.0)  # No container loaded
-        self.terminal_state.crane_properties[:, 2].fill(0.0)  # Available time
+        self.terminal_state.crane_properties[:, 0].fill_(0.0)  # Idle status
+        self.terminal_state.crane_properties[:, 1].fill_(-1.0)  # No container loaded
+        self.terminal_state.crane_properties[:, 2].fill_(0.0)  # Available time
     
     def _initialize_cranes(self):
         """Initialize cranes at their starting positions."""
+        # Create a CPU-side array first
+        num_cranes = self.num_cranes
+        crane_positions_np = np.zeros((num_cranes, 2), dtype=np.float32)
+        crane_target_positions_np = np.zeros((num_cranes, 2), dtype=np.float32)
+        crane_operational_areas_np = np.zeros((num_cranes, 4), dtype=np.float32)
+        
         # Set initial positions for cranes
         # Place them evenly across the terminal
         terminal_length = self.num_rail_slots_per_track * 24.0  # Approximate slot length
-        for i in range(self.num_cranes):
+        for i in range(num_cranes):
             # Distribute cranes evenly along x-axis
-            x_pos = (i + 1) * terminal_length / (self.num_cranes + 1)
+            x_pos = (i + 1) * terminal_length / (num_cranes + 1)
             
             # Place cranes at the center of rails area
             y_pos = self.num_rail_tracks * 2.5  # Approximate position
             
-            # Set crane position
-            self.terminal_state.crane_positions[i, 0] = x_pos
-            self.terminal_state.crane_positions[i, 1] = y_pos
+            # Set crane position in NumPy array
+            crane_positions_np[i, 0] = x_pos
+            crane_positions_np[i, 1] = y_pos
             
             # Set crane target position to same as current position
-            self.terminal_state.crane_target_positions[i, 0] = x_pos
-            self.terminal_state.crane_target_positions[i, 1] = y_pos
+            crane_target_positions_np[i, 0] = x_pos
+            crane_target_positions_np[i, 1] = y_pos
             
             # Define operational area for crane
-            self.terminal_state.crane_operational_areas[i, 0] = 0.0  # min_x
-            self.terminal_state.crane_operational_areas[i, 1] = 0.0  # min_y
-            self.terminal_state.crane_operational_areas[i, 2] = terminal_length  # max_x
+            crane_operational_areas_np[i, 0] = 0.0  # min_x
+            crane_operational_areas_np[i, 1] = 0.0  # min_y
+            crane_operational_areas_np[i, 2] = terminal_length  # max_x
             
             # If multiple cranes, divide the y-range
-            if self.num_cranes > 1:
+            if num_cranes > 1:
                 area_height = self.num_storage_rows * 10.0  # Approximate
-                section_height = area_height / self.num_cranes
-                self.terminal_state.crane_operational_areas[i, 1] = i * section_height
-                self.terminal_state.crane_operational_areas[i, 3] = (i + 1) * section_height
+                section_height = area_height / num_cranes
+                crane_operational_areas_np[i, 1] = i * section_height
+                crane_operational_areas_np[i, 3] = (i + 1) * section_height
             else:
                 # Single crane covers the entire terminal height
-                self.terminal_state.crane_operational_areas[i, 3] = self.num_storage_rows * 10.0
+                crane_operational_areas_np[i, 3] = self.num_storage_rows * 10.0
+        
+        # Convert NumPy arrays to Warp arrays in one step
+        self.terminal_state.crane_positions = wp.array(crane_positions_np, dtype=wp.float32, device=self.device)
+        self.terminal_state.crane_target_positions = wp.array(crane_target_positions_np, dtype=wp.float32, device=self.device)
+        self.terminal_state.crane_operational_areas = wp.array(crane_operational_areas_np, dtype=wp.float32, device=self.device)
     
     def _generate_initial_containers(self):
         """Generate initial containers in the storage yard."""
@@ -682,8 +694,6 @@ class WarpTerminalEnvironment(gym.Env):
     def _init_warp(self, device=None):
         """Safely initialize Warp and register kernels."""
         # Import warp here, not at module level
-        import warp as wp
-        self.wp = wp
         
         # Set device
         self.device = device if device else ("cuda" if wp.get_cuda_device_count() > 0 else "cpu")
@@ -843,7 +853,6 @@ class WarpTerminalEnvironment(gym.Env):
 
     def _generate_action_masks(self):
         """Generate action masks for the current state."""
-        wp = self.wp
         global _kernel_instances
         
         # Calculate total number of positions

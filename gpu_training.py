@@ -13,9 +13,9 @@ import json
 from pathlib import Path
 
 # Import previously implemented classes
-from simulation.agents.OptimizedTerminalAgent import OptimizedTerminalAgent
+from simulation.deprecated_components.OptimizedTerminalAgent import OptimizedTerminalAgent
 from simulation.TerminalConfig import TerminalConfig
-from simulation.GPUTerminalEnvironment import GPUTerminalEnvironment
+from simulation.deprecated_components.GPUTerminalEnvironment import GPUTerminalEnvironment
 
 class GPUTrainingLogger:
     """GPU-optimized logger for training with file output and console display."""
@@ -495,7 +495,7 @@ class GPUCurriculumTrainer:
         special_areas['swap_body'].append((first_row, swap_start, swap_end))
         
         # Import directly instead of using a method that might not exist
-        from simulation.terminal_components.GPUStorageYard import GPUStorageYard
+        from simulation.deprecated_components.GPUStorageYard import GPUStorageYard
         
         return GPUStorageYard(
             num_rows=env.terminal.num_storage_rows,

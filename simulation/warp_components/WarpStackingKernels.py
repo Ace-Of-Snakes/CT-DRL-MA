@@ -3,6 +3,82 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 import time
 
+
+# Standalone kernel functions for stacking validation
+@wp.kernel
+def kernel_validate_container_placement(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                    container_dimensions: wp.array(dtype=wp.float32, ndim=2),
+                                    yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                                    stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                                    container_idx: wp.int32,
+                                    row: wp.int32,
+                                    bay: wp.int32,
+                                    max_height: wp.int32,
+                                    result: wp.array(dtype=wp.int32, ndim=1)):
+    """Kernel to check if a container can be placed at a specific position."""
+    # Default to invalid
+    result[0] = 0
+    
+    # Get current stack height
+    height = stack_heights[row, bay]
+    
+    # Check if stack is full
+    if height >= max_height:
+        return
+    
+    # Get container properties
+    container_type = int(container_properties[container_idx, 0])
+    container_goods = int(container_properties[container_idx, 1])
+    container_weight = container_properties[container_idx, 3]
+    is_stackable = bool(container_properties[container_idx, 4])
+    stack_compatibility = int(container_properties[container_idx, 5])
+    
+    # If container is not stackable, only allow on empty positions
+    if not is_stackable and height > 0:
+        return
+    
+    # Check if container can be stacked on the current top container
+    if height > 0:
+        # Get the top container index
+        top_container_idx = yard_container_indices[row, bay, height-1]
+        
+        # Invalid if no container at top (should not happen)
+        if top_container_idx < 0:
+            return
+            
+        # Get top container properties
+        top_type = int(container_properties[top_container_idx, 0])
+        top_goods = int(container_properties[top_container_idx, 1])
+        top_weight = container_properties[top_container_idx, 3]
+        top_stackable = bool(container_properties[top_container_idx, 4])
+        top_compatibility = int(container_properties[top_container_idx, 5])
+        
+        # Check stackability
+        if not top_stackable:
+            return
+            
+        # Check stack compatibility
+        if stack_compatibility == 0 or top_compatibility == 0:
+            # None compatibility - can't stack
+            return
+            
+        # Self compatibility - must be same type and goods
+        if stack_compatibility == 1 or top_compatibility == 1:
+            if container_type != top_type or container_goods != top_goods:
+                return
+        
+        # Size compatibility - must be same size
+        if stack_compatibility == 2 or top_compatibility == 2:
+            if container_type != top_type:
+                return
+        
+        # Weight constraint - container above should be lighter
+        if container_weight > top_weight:
+            return
+    
+    # All checks passed, container can be stacked here
+    result[0] = 1
+
 class WarpStackingKernels:
     """
     GPU-accelerated kernels for container stacking operations using NVIDIA Warp.
@@ -34,6 +110,135 @@ class WarpStackingKernels:
         
         print(f"WarpStackingKernels initialized on device: {self.device}")
     
+    def can_place_at(self, container_id_or_idx, position_str) -> bool:
+        """
+        Check if a container can be placed at a specific position.
+        
+        Args:
+            container_id_or_idx: Container ID or index
+            position_str: Position string (e.g., 'A1')
+            
+        Returns:
+            True if the container can be placed, False otherwise
+        """
+        # Convert container ID to index if needed
+        container_idx = container_id_or_idx
+        if isinstance(container_id_or_idx, str):
+            container_idx = self.container_registry._get_container_idx(container_id_or_idx)
+            
+        if container_idx < 0:
+            return False
+        
+        # Parse position string
+        if len(position_str) < 2 or not position_str[0].isalpha():
+            return False
+            
+        row_letter = position_str[0].upper()
+        
+        try:
+            bay_num = int(position_str[1:])
+        except ValueError:
+            return False
+        
+        # Convert to indices
+        if not hasattr(self.terminal_state, 'row_names') or row_letter not in self.terminal_state.row_names:
+            return False
+            
+        row_idx = self.terminal_state.row_names.index(row_letter)
+        bay_idx = bay_num - 1  # Convert to 0-based index
+        
+        # Check bounds
+        if row_idx < 0 or row_idx >= self.terminal_state.num_storage_rows:
+            return False
+            
+        if bay_idx < 0 or bay_idx >= self.terminal_state.num_storage_bays:
+            return False
+        
+        # Get the stack height at this position
+        stack_heights_np = self.terminal_state.stack_heights.numpy()
+        height = int(stack_heights_np[row_idx, bay_idx])
+        
+        # Check if stack is full
+        if height >= self.terminal_state.max_stack_height:
+            return False
+        
+        # Get container properties
+        container_props = self.terminal_state.container_properties.numpy()
+        container_type = int(container_props[container_idx, 0])
+        container_goods = int(container_props[container_idx, 1])
+        container_weight = float(container_props[container_idx, 3])
+        is_stackable = bool(container_props[container_idx, 4])
+        stack_compatibility = int(container_props[container_idx, 5])
+        
+        # If container is not stackable, only allow on empty positions
+        if not is_stackable and height > 0:
+            return False
+        
+        # Check if container can be stacked on the current top container
+        if height > 0:
+            # Get the yard container indices
+            yard_indices = self.terminal_state.yard_container_indices.numpy()
+            
+            # Get top container index
+            top_container_idx = int(yard_indices[row_idx, bay_idx, height-1])
+            
+            # Skip if invalid container (should not happen)
+            if top_container_idx < 0:
+                return False
+                
+            # Get top container properties
+            top_type = int(container_props[top_container_idx, 0])
+            top_goods = int(container_props[top_container_idx, 1])
+            top_weight = float(container_props[top_container_idx, 3])
+            top_stackable = bool(container_props[top_container_idx, 4])
+            top_compatibility = int(container_props[top_container_idx, 5])
+            
+            # Check stackability
+            if not top_stackable:
+                return False
+                
+            # Check stack compatibility
+            if stack_compatibility == 0 or top_compatibility == 0:
+                # None compatibility - can't stack
+                return False
+                
+            # Self compatibility - must be same type and goods
+            if stack_compatibility == 1 or top_compatibility == 1:
+                if container_type != top_type or container_goods != top_goods:
+                    return False
+            
+            # Size compatibility - must be same size
+            if stack_compatibility == 2 or top_compatibility == 2:
+                if container_type != top_type:
+                    return False
+            
+            # Weight constraint - container above should be lighter
+            if container_weight > top_weight:
+                return False
+        
+        # All checks passed, container can be stacked here
+        return True
+    
+    def can_accept_container(self, position_str: str, container_id_or_idx) -> bool:
+        """
+        Check if a container can be placed at a position.
+        
+        Args:
+            position_str: Position string (e.g., 'A1')
+            container_id_or_idx: Container ID or index
+            
+        Returns:
+            True if container can be placed, False otherwise
+        """
+        # Convert container ID to index if needed
+        container_idx = container_id_or_idx
+        if isinstance(container_id_or_idx, str):
+            container_idx = self.container_registry._get_container_idx(container_id_or_idx)
+                
+        if container_idx < 0:
+            return False
+        
+        return self.stacking_kernels.can_place_at(container_idx, position_str)
     # def _register_kernels(self):
     #     """Register Warp kernels for stacking operations."""
     #     # Register validation kernel
@@ -55,14 +260,14 @@ class WarpStackingKernels:
 
 
     @wp.kernel
-    def _kernel_validate_stack(container_properties: wp.array,
-                             container_dimensions: wp.array,
-                             yard_container_indices: wp.array,
-                             stack_heights: wp.array,
-                             row: int,
-                             bay: int,
-                             max_height: int,
-                             valid: wp.array):
+    def _kernel_validate_stack(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                            container_dimensions: wp.array(dtype=wp.float32, ndim=2),
+                            yard_container_indices: wp.array(dtype=wp.int32, ndim=3),
+                            stack_heights: wp.array(dtype=wp.int32, ndim=2),
+                            row: wp.int32,
+                            bay: wp.int32,
+                            max_height: wp.int32,
+                            valid: wp.array(dtype=wp.int32, ndim=1)):
         """
         Kernel to validate if a stack is valid according to stacking rules.
         
