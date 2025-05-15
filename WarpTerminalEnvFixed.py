@@ -317,23 +317,57 @@ class WarpTerminalEnvironment(gym.Env):
             
             # Add to event queue
             self._add_event(arrival_time, 1, i)  # Event type 1 = Train arrival
-    
+    # Add these kernels to WarpTerminalEnvironment class
+
+    @wp.kernel
+    def _kernel_add_event_to_queue(event_queue: wp.array(dtype=wp.float32, ndim=2),
+                                queue_idx: wp.int32,
+                                time: wp.float32,
+                                event_type: wp.int32,
+                                event_data: wp.int32):
+        """Add event to the event queue."""
+        event_queue[queue_idx, 0] = time
+        event_queue[queue_idx, 1] = float(event_type)  # Cast to float since the array is float32
+        event_queue[queue_idx, 2] = float(event_data)  # Cast to float since the array is float32
+
+    @wp.kernel
+    def _kernel_update_queue_size(queue_size: wp.array(dtype=wp.int32, ndim=1),
+                            new_size: wp.int32):
+        """Update the event queue size."""
+        queue_size[0] = new_size
+
     def _add_event(self, time, event_type, event_data):
         """Add an event to the queue at the specified time."""
         # Get current event queue size
-        queue_size = int(self.terminal_state.event_queue_size[0])
+        queue_size_np = self.terminal_state.event_queue_size.numpy()
+        queue_size = int(queue_size_np[0])
         
         # Check if there's room in the queue
         if queue_size >= 1000:  # Max queue size
             return False
         
-        # Add event to queue
-        self.terminal_state.event_queue[queue_size, 0] = time
-        self.terminal_state.event_queue[queue_size, 1] = event_type
-        self.terminal_state.event_queue[queue_size, 2] = event_data
+        # Add event to queue using kernel
+        wp.launch(
+            kernel=self._kernel_add_event_to_queue,
+            dim=1,
+            inputs=[
+                self.terminal_state.event_queue,
+                queue_size,
+                float(time),
+                int(event_type),
+                int(event_data)
+            ]
+        )
         
-        # Increment queue size
-        self.terminal_state.event_queue_size[0] = queue_size + 1
+        # Increment queue size using kernel
+        wp.launch(
+            kernel=self._kernel_update_queue_size,
+            dim=1,
+            inputs=[
+                self.terminal_state.event_queue_size,
+                queue_size + 1
+            ]
+        )
         
         return True
     
@@ -717,9 +751,9 @@ class WarpTerminalEnvironment(gym.Env):
                                         num_positions: wp.int32,
                                         crane_mask: wp.array(dtype=wp.int32, ndim=3)):
                 # Get thread indices
-                crane_idx = wp.tid(0)
-                src_idx = wp.tid(1)
-                dst_idx = wp.tid(2)
+                crane_idx, src_idx, dst_idx = wp.tid()
+                # src_idx = wp.tid()[1]
+                # dst_idx = wp.tid()[2]
                 
                 # Check bounds
                 if (crane_idx >= num_cranes or 
@@ -736,10 +770,10 @@ class WarpTerminalEnvironment(gym.Env):
                     return
                     
                 # Check if source position has a container
-                source_has_container = False
+                source_has_container = bool(False)
                 for container_idx in range(container_positions.shape[0]):
                     if container_positions[container_idx] == src_idx:
-                        source_has_container = True
+                        source_has_container = bool(True)
                         break
                         
                 if not source_has_container:
@@ -754,8 +788,8 @@ class WarpTerminalEnvironment(gym.Env):
                                                 num_parking_spots: wp.int32,
                                                 truck_parking_mask: wp.array(dtype=wp.int32, ndim=2)):
                 # Get thread indices
-                truck_idx = wp.tid(0)
-                spot_idx = wp.tid(1)
+                truck_idx, spot_idx = wp.tid()
+                # spot_idx = wp.tid(1)
                 
                 # Check bounds
                 if truck_idx >= num_vehicles or spot_idx >= num_parking_spots:
@@ -785,9 +819,9 @@ class WarpTerminalEnvironment(gym.Env):
                                                 num_positions: wp.int32,
                                                 terminal_truck_mask: wp.array(dtype=wp.int32, ndim=3)):
                 # Get thread indices
-                truck_idx = wp.tid(0)
-                src_idx = wp.tid(1)
-                dst_idx = wp.tid(2)
+                truck_idx, src_idx, dst_idx = wp.tid()
+                # src_idx = wp.tid(1)
+                # dst_idx = wp.tid(2)
                 
                 # Check bounds
                 if (truck_idx >= num_terminal_trucks or
@@ -924,7 +958,37 @@ class WarpTerminalEnvironment(gym.Env):
         }
         
         return action_mask
-    
+    @wp.kernel
+    def _kernel_set_float_value(arr: wp.array(dtype=wp.float32, ndim=1), 
+                            idx: wp.int32, 
+                            value: wp.float32):
+        """Set a value in a float array at the specified index."""
+        arr[idx] = value
+
+    @wp.kernel
+    def _kernel_set_int_value(arr: wp.array(dtype=wp.int32, ndim=1), 
+                            idx: wp.int32, 
+                            value: wp.int32):
+        """Set a value in an int array at the specified index."""
+        arr[idx] = value
+
+    @wp.kernel
+    def _kernel_add_event_to_queue(event_queue: wp.array(dtype=wp.float32, ndim=2),
+                                queue_idx: wp.int32,
+                                time: wp.float32,
+                                event_type: wp.int32,
+                                event_data: wp.int32):
+        """Add event to the event queue."""
+        event_queue[queue_idx, 0] = time
+        event_queue[queue_idx, 1] = float(event_type)
+        event_queue[queue_idx, 2] = float(event_data)
+
+    @wp.kernel
+    def _kernel_update_queue_size(queue_size: wp.array(dtype=wp.int32, ndim=1),
+                            new_size: wp.int32):
+        """Update the event queue size."""
+        queue_size[0] = new_size
+
     def reset(self, seed=None, options=None):
         """Reset the environment to initial state."""
         start_time = time.time()
@@ -932,12 +996,22 @@ class WarpTerminalEnvironment(gym.Env):
         # Reset random seed
         if seed is not None:
             np.random.seed(seed)
-            self.terminal_state.simulation_params[2] = seed
+            # Use kernel to set simulation param
+            wp.launch(
+                kernel=self._kernel_set_float_value,
+                dim=1,
+                inputs=[self.terminal_state.simulation_params, 2, float(seed)]
+            )
         
         # Reset simulation time
         self.current_simulation_time = 0.0
         self.current_simulation_datetime = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
-        self.terminal_state.simulation_time[0] = 0.0
+        # Use kernel to set simulation time
+        wp.launch(
+            kernel=self._kernel_set_float_value,
+            dim=1,
+            inputs=[self.terminal_state.simulation_time, 0, 0.0]
+        )
         
         # Reset all terminal state arrays
         self._reset_terminal_state()
