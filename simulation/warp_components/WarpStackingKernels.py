@@ -1,6 +1,6 @@
 import warp as wp
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 import time
 
 
@@ -79,6 +79,7 @@ def kernel_validate_container_placement(container_properties: wp.array(dtype=wp.
     # All checks passed, container can be stacked here
     result[0] = 1
 
+
 class WarpStackingKernels:
     """
     GPU-accelerated kernels for container stacking operations using NVIDIA Warp.
@@ -104,28 +105,209 @@ class WarpStackingKernels:
         # Performance tracking
         self.validation_times = []
         self.optimization_times = []
+        self.lookup_times = []
         
-        # Register Warp kernels
-        # self._register_kernels()
+        # Compatibility matrix for optimized lookups
+        self.compatibility_matrix_np = None
+        self.use_matrix_lookup = False
+        
+        # Initialize flag to track when we've initialized the matrix
+        self._matrix_initialized = False
         
         print(f"WarpStackingKernels initialized on device: {self.device}")
     
-    def can_place_at(self, container_id_or_idx, position_str) -> bool:
+    def use_compatibility_matrix(self, compatibility_matrix: np.ndarray) -> None:
         """
-        Check if a container can be placed at a specific position.
+        Configure the stacking kernels to use a precomputed compatibility matrix.
         
         Args:
-            container_id_or_idx: Container ID or index
-            position_str: Position string (e.g., 'A1')
+            compatibility_matrix: Numpy array of precomputed stacking compatibility
+        """
+        if compatibility_matrix is None:
+            self.use_matrix_lookup = False
+            self._matrix_initialized = False
+            return
+            
+        self.compatibility_matrix_np = compatibility_matrix
+        self.use_matrix_lookup = True
+        self._matrix_initialized = True
+        
+        print(f"Stacking kernels configured to use compatibility matrix")
+        print(f"Matrix shape: {compatibility_matrix.shape}")
+        print(f"Matrix memory usage: {compatibility_matrix.nbytes / (1024 * 1024):.2f} MB")
+    
+    def calculate_compatibility_matrix(self) -> np.ndarray:
+        """
+        Calculate the full container-to-container compatibility matrix.
+        
+        Returns:
+            Numpy array containing compatibility results [upper_container, lower_container]
+        """
+        start_time = time.time()
+        
+        # Create numpy array for compatibility matrix
+        max_containers = self.terminal_state.max_containers
+        compatibility_matrix = np.zeros((max_containers, max_containers), dtype=np.int32)
+        
+        # Get container properties as numpy array for efficient processing
+        container_props = self.terminal_state.container_properties.numpy()
+        
+        # Precompute for each container pair
+        for upper_idx in range(max_containers):
+            # Skip inactive containers
+            if container_props[upper_idx, 6] <= 0:  # Check active flag
+                continue
+                
+            for lower_idx in range(max_containers):
+                # Skip inactive containers and self-stacking
+                if container_props[lower_idx, 6] <= 0 or upper_idx == lower_idx:
+                    continue
+                
+                # Get container properties
+                upper_type = int(container_props[upper_idx, 0])
+                upper_goods = int(container_props[upper_idx, 1])
+                upper_weight = float(container_props[upper_idx, 3])
+                upper_compatibility = int(container_props[upper_idx, 5])
+                
+                lower_type = int(container_props[lower_idx, 0])
+                lower_goods = int(container_props[lower_idx, 1])
+                lower_weight = float(container_props[lower_idx, 3])
+                lower_stackable = bool(container_props[lower_idx, 4])
+                lower_compatibility = int(container_props[lower_idx, 5])
+                
+                # Can't stack on non-stackable container
+                if not lower_stackable:
+                    continue
+                
+                # Check compatibility
+                can_stack = True
+                
+                # None compatibility - can't stack
+                if lower_compatibility == 0 or upper_compatibility == 0:
+                    can_stack = False
+                
+                # Self compatibility - must be same type and goods
+                elif lower_compatibility == 1 or upper_compatibility == 1:
+                    if lower_type != upper_type or lower_goods != upper_goods:
+                        can_stack = False
+                
+                # Size compatibility - must be same size
+                elif lower_compatibility == 2 or upper_compatibility == 2:
+                    if lower_type != upper_type:
+                        can_stack = False
+                
+                # Weight constraint - container above should be lighter
+                if upper_weight > lower_weight:
+                    can_stack = False
+                
+                # Update matrix
+                if can_stack:
+                    compatibility_matrix[upper_idx, lower_idx] = 1
+        
+        calculation_time = time.time() - start_time
+        print(f"Compatibility matrix calculated in {calculation_time:.2f} seconds")
+        
+        # Store matrix for later use
+        self.compatibility_matrix_np = compatibility_matrix
+        self.use_matrix_lookup = True
+        self._matrix_initialized = True
+        
+        return compatibility_matrix
+    
+    def can_place_at(self, container_idx: int, position_str: str) -> bool:
+        """
+        Check if a container can be placed at a position.
+        
+        Args:
+            container_idx: Container index
+            position_str: Position string
             
         Returns:
-            True if the container can be placed, False otherwise
+            True if container can be placed, False otherwise
         """
-        # Convert container ID to index if needed
-        container_idx = container_id_or_idx
-        if isinstance(container_id_or_idx, str):
-            container_idx = self.container_registry._get_container_idx(container_id_or_idx)
+        # Initialize the compatibility matrix if needed and flagged to use it
+        if self.use_matrix_lookup and not self._matrix_initialized:
+            self.calculate_compatibility_matrix()
             
+        lookup_start = time.time()
+        
+        # Use compatibility matrix if available and enabled
+        if self.use_matrix_lookup and self.compatibility_matrix_np is not None:
+            # Parse position to find existing container
+            if len(position_str) < 2 or not position_str[0].isalpha():
+                return False
+                
+            row_letter = position_str[0].upper()
+            
+            try:
+                bay_num = int(position_str[1:])
+            except ValueError:
+                return False
+            
+            # Convert to indices
+            if not hasattr(self.terminal_state, 'row_names') or row_letter not in self.terminal_state.row_names:
+                return False
+                
+            row_idx = self.terminal_state.row_names.index(row_letter)
+            bay_idx = bay_num - 1  # Convert to 0-based index
+            
+            # Check bounds
+            if row_idx < 0 or row_idx >= self.terminal_state.num_storage_rows:
+                return False
+                
+            if bay_idx < 0 or bay_idx >= self.terminal_state.num_storage_bays:
+                return False
+            
+            # Get stack height
+            stack_heights_np = self.terminal_state.stack_heights.numpy()
+            height = int(stack_heights_np[row_idx, bay_idx])
+            
+            # Empty stack - container can be placed if valid
+            if height == 0:
+                self.lookup_times.append(time.time() - lookup_start)
+                return True
+            
+            # Check if stack is full
+            if height >= self.terminal_state.max_stack_height:
+                self.lookup_times.append(time.time() - lookup_start)
+                return False
+            
+            # Get top container index
+            yard_indices_np = self.terminal_state.yard_container_indices.numpy()
+            lower_container_idx = int(yard_indices_np[row_idx, bay_idx, height-1])
+            
+            # Check if we got a valid container
+            if lower_container_idx < 0:
+                self.lookup_times.append(time.time() - lookup_start)
+                return False
+                
+            # Check compatibility matrix
+            try:
+                result = bool(self.compatibility_matrix_np[container_idx, lower_container_idx])
+                self.lookup_times.append(time.time() - lookup_start)
+                return result
+            except (IndexError, TypeError):
+                # Fall back to original method if lookup fails
+                pass
+        
+        # Fall back to standard calculation
+        result = self._can_place_at_original(container_idx, position_str)
+        self.lookup_times.append(time.time() - lookup_start)
+        return result
+    
+    def _can_place_at_original(self, container_idx: int, position_str: str) -> bool:
+        """
+        Original stacking validation method using direct property checks.
+        
+        Args:
+            container_idx: Container index
+            position_str: Position string
+            
+        Returns:
+            True if container can be placed, False otherwise
+        """
+        start_time = time.time()
+        
         if container_idx < 0:
             return False
         
@@ -217,48 +399,125 @@ class WarpStackingKernels:
                 return False
         
         # All checks passed, container can be stacked here
+        self.validation_times.append(time.time() - start_time)
         return True
     
-    def can_accept_container(self, position_str: str, container_id_or_idx) -> bool:
+    def are_compatible(self, upper_container_idx: int, lower_container_idx: int) -> bool:
         """
-        Check if a container can be placed at a position.
+        Check if one container can be stacked on another.
         
         Args:
-            position_str: Position string (e.g., 'A1')
-            container_id_or_idx: Container ID or index
+            upper_container_idx: Index of container to be placed on top
+            lower_container_idx: Index of container at the bottom
             
         Returns:
-            True if container can be placed, False otherwise
+            True if containers are compatible for stacking, False otherwise
         """
-        # Convert container ID to index if needed
-        container_idx = container_id_or_idx
-        if isinstance(container_id_or_idx, str):
-            container_idx = self.container_registry._get_container_idx(container_id_or_idx)
-                
-        if container_idx < 0:
+        # Initialize the compatibility matrix if needed and flagged to use it
+        if self.use_matrix_lookup and not self._matrix_initialized:
+            self.calculate_compatibility_matrix()
+        
+        start_time = time.time()
+        
+        # Use compatibility matrix if available
+        if self.use_matrix_lookup and self.compatibility_matrix_np is not None:
+            try:
+                result = bool(self.compatibility_matrix_np[upper_container_idx, lower_container_idx])
+                self.lookup_times.append(time.time() - start_time)
+                return result
+            except (IndexError, TypeError):
+                # Fall back to direct check if lookup fails
+                pass
+        
+        # Direct property check if matrix not available
+        container_props = self.terminal_state.container_properties.numpy()
+        
+        # Check bounds and active status
+        if (upper_container_idx < 0 or upper_container_idx >= len(container_props) or
+            lower_container_idx < 0 or lower_container_idx >= len(container_props) or
+            container_props[upper_container_idx, 6] <= 0 or  # Check active flag
+            container_props[lower_container_idx, 6] <= 0):   # Check active flag
             return False
         
-        return self.stacking_kernels.can_place_at(container_idx, position_str)
-    # def _register_kernels(self):
-    #     """Register Warp kernels for stacking operations."""
-    #     # Register validation kernel
-    #     wp.register_kernel(self._kernel_validate_stack)
+        # Get container properties
+        upper_type = int(container_props[upper_container_idx, 0])
+        upper_goods = int(container_props[upper_container_idx, 1])
+        upper_weight = float(container_props[upper_container_idx, 3])
+        upper_compatibility = int(container_props[upper_container_idx, 5])
         
-    #     # Register optimization kernels
-    #     wp.register_kernel(self._kernel_calculate_stack_quality)
-    #     wp.register_kernel(self._kernel_find_optimal_locations)
-    #     wp.register_kernel(self._kernel_identify_suboptimal_stacks)
-
-    # def _kernel_validate_stack(container_properties: wp.array(dtype=wp.float32),
-    #                          container_dimensions: wp.array(dtype=wp.float32),
-    #                          yard_container_indices: wp.array(dtype=wp.int32),
-    #                          stack_heights: wp.array(dtype=wp.int32),
-    #                          row: int,
-    #                          bay: int,
-    #                          max_height: int,
-    #                          valid: wp.array(dtype=wp.int32)):
-
-
+        lower_type = int(container_props[lower_container_idx, 0])
+        lower_goods = int(container_props[lower_container_idx, 1])
+        lower_weight = float(container_props[lower_container_idx, 3])
+        lower_stackable = bool(container_props[lower_container_idx, 4])
+        lower_compatibility = int(container_props[lower_container_idx, 5])
+        
+        # Can't stack on non-stackable container
+        if not lower_stackable:
+            return False
+        
+        # Check compatibility
+        can_stack = True
+        
+        # None compatibility - can't stack
+        if lower_compatibility == 0 or upper_compatibility == 0:
+            can_stack = False
+        
+        # Self compatibility - must be same type and goods
+        elif lower_compatibility == 1 or upper_compatibility == 1:
+            if lower_type != upper_type or lower_goods != upper_goods:
+                can_stack = False
+        
+        # Size compatibility - must be same size
+        elif lower_compatibility == 2 or upper_compatibility == 2:
+            if lower_type != upper_type:
+                can_stack = False
+        
+        # Weight constraint - container above should be lighter
+        if upper_weight > lower_weight:
+            can_stack = False
+        
+        self.validation_times.append(time.time() - start_time)
+        return can_stack
+    
+    def validate_stack(self, row: int, bay: int) -> bool:
+        """
+        Validate if a stack at the given position is valid according to stacking rules.
+        
+        Args:
+            row: Row index
+            bay: Bay index
+            
+        Returns:
+            True if the stack is valid, False otherwise
+        """
+        start_time = time.time()
+        
+        # Create result array on device
+        valid = wp.zeros(1, dtype=wp.int32, device=self.device)
+        
+        # Run the validation kernel
+        wp.launch(
+            kernel=self._kernel_validate_stack,
+            dim=1,
+            inputs=[
+                self.terminal_state.container_properties,
+                self.terminal_state.container_dimensions,
+                self.terminal_state.yard_container_indices,
+                self.terminal_state.stack_heights,
+                row,
+                bay,
+                self.terminal_state.max_stack_height,
+                valid
+            ]
+        )
+        
+        result = bool(valid[0])
+        
+        # Track performance
+        self.validation_times.append(time.time() - start_time)
+        
+        return result
+    
     @wp.kernel
     def _kernel_validate_stack(container_properties: wp.array(dtype=wp.float32, ndim=2),
                             container_dimensions: wp.array(dtype=wp.float32, ndim=2),
@@ -347,6 +606,7 @@ class WarpStackingKernels:
             if upper_weight > lower_weight:
                 valid[0] = 0
                 return
+    
     @wp.kernel
     def _kernel_get_container_properties(container_properties: wp.array(dtype=wp.float32, ndim=2),
                                     container_idx: wp.int32,
@@ -436,17 +696,6 @@ class WarpStackingKernels:
         # Ensure score stays in reasonable bounds
         if quality_score[0] < 0:
             quality_score[0] = 0.0
-
-    # def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32),
-    #                                 container_dimensions: wp.array(dtype=wp.float32),
-    #                                 yard_container_indices: wp.array(dtype=wp.int32),
-    #                                 stack_heights: wp.array(dtype=wp.int32),
-    #                                 special_area_masks: Dict[str, wp.array],
-    #                                 container_idx: int,
-    #                                 suitability_scores: wp.array(dtype=wp.float32),
-    #                                 num_rows: int,
-    #                                 num_bays: int):
-
 
     @wp.kernel
     def _kernel_find_optimal_locations(container_properties: wp.array(dtype=wp.float32, ndim=2),
@@ -579,15 +828,6 @@ class WarpStackingKernels:
         else:
             # Empty position - always valid but lower priority than stacking
             suitability_scores[row, bay] = 50.0
-    
-
-    # def _kernel_identify_suboptimal_stacks(container_properties: wp.array(dtype=wp.float32),
-    #                                     yard_container_indices: wp.array(dtype=wp.int32),
-    #                                     stack_heights: wp.array(dtype=wp.int32),
-    #                                     current_time: float,
-    #                                     problem_scores: wp.array(dtype=wp.float32),
-    #                                     num_rows: int,
-    #                                     num_bays: int):
 
     @wp.kernel
     def _kernel_identify_suboptimal_stacks(container_properties: wp.array(dtype=wp.float32, ndim=2),
@@ -664,45 +904,6 @@ class WarpStackingKernels:
                             problem_scores[row, bay] += 50.0
                         elif time_until_departure < 172800:  # Less than 2 days
                             problem_scores[row, bay] += 20.0
-    
-    def validate_stack(self, row: int, bay: int) -> bool:
-        """
-        Validate if a stack at the given position is valid according to stacking rules.
-        
-        Args:
-            row: Row index
-            bay: Bay index
-            
-        Returns:
-            True if the stack is valid, False otherwise
-        """
-        start_time = time.time()
-        
-        # Create result array on device
-        valid = wp.zeros(1, dtype=wp.int32, device=self.device)
-        
-        # Run the validation kernel
-        wp.launch(
-            kernel=self._kernel_validate_stack,
-            dim=1,
-            inputs=[
-                self.terminal_state.container_properties,
-                self.terminal_state.container_dimensions,
-                self.terminal_state.yard_container_indices,
-                self.terminal_state.stack_heights,
-                row,
-                bay,
-                self.terminal_state.max_stack_height,
-                valid
-            ]
-        )
-        
-        result = bool(valid[0])
-        
-        # Track performance
-        self.validation_times.append(time.time() - start_time)
-        
-        return result
     
     def calculate_stack_quality(self, row: int, bay: int) -> float:
         """
@@ -891,10 +1092,6 @@ class WarpStackingKernels:
     
     def print_performance_stats(self):
         """Print performance statistics for stacking operations."""
-        if not self.validation_times and not self.optimization_times:
-            print("No performance data available.")
-            return
-        
         print("\nStacking Operations Performance Statistics:")
         
         if self.validation_times:
@@ -904,3 +1101,15 @@ class WarpStackingKernels:
         if self.optimization_times:
             avg_optimization = sum(self.optimization_times) / len(self.optimization_times) * 1000
             print(f"  Optimization operations: {avg_optimization:.2f}ms average")
+        
+        if self.lookup_times:
+            avg_lookup = sum(self.lookup_times) / len(self.lookup_times) * 1000
+            print(f"  Compatibility lookup: {avg_lookup:.2f}ms average")
+            
+            if self.validation_times:
+                speedup = sum(self.validation_times) / max(1, sum(self.lookup_times))
+                print(f"  Lookup speedup: {speedup:.2f}x faster than direct validation")
+        
+        if hasattr(self, 'compatibility_matrix_np') and self.compatibility_matrix_np is not None:
+            memory_usage = self.compatibility_matrix_np.nbytes / (1024 * 1024)
+            print(f"  Compatibility matrix memory usage: {memory_usage:.2f} MB")
