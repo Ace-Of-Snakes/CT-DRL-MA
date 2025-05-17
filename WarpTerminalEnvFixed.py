@@ -1,13 +1,13 @@
 import numpy as np
 import warp as wp
+import torch
 from datetime import datetime, timedelta
 import time
+import os
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
 from typing import Dict, Tuple, List, Optional, Any, Union
-
-# DO NOT import warp at module level
 
 # Placeholder for kernels
 _kernel_instances = {
@@ -95,6 +95,14 @@ class WarpTerminalEnvironment(gym.Env):
         
         # Simplified rendering mode (for faster training)
         self.simplified_rendering = False
+        
+        # Initialize optimization flags (default to disabled)
+        self.use_precomputed_events = False
+        self.use_precomputed_movements = False
+        self.use_precomputed_stacking = False
+        
+        # Optimization performance tracking
+        self.optimized_step_times = []
 
     def _setup_action_observation_spaces(self):
         """Set up the action and observation spaces for the environment."""
@@ -171,13 +179,6 @@ class WarpTerminalEnvironment(gym.Env):
         # Copy mappings from terminal state
         self.position_to_idx = self.terminal_state.position_to_idx.copy()
         self.idx_to_position = self.terminal_state.idx_to_position.copy()
-    
-    # def _register_kernels(self):
-    #     """Register Warp kernels for environment operations."""
-    #     # Register kernels for generating action masks
-    #     wp.register_kernel(self._kernel_generate_crane_mask)
-    #     wp.register_kernel(self._kernel_generate_truck_parking_mask)
-    #     wp.register_kernel(self._kernel_generate_terminal_truck_mask)
     
     def _initialize_simulation(self):
         """Initialize the simulation with starting vehicles and containers."""
@@ -317,8 +318,7 @@ class WarpTerminalEnvironment(gym.Env):
             
             # Add to event queue
             self._add_event(arrival_time, 1, i)  # Event type 1 = Train arrival
-    # Add these kernels to WarpTerminalEnvironment class
-
+        
     @wp.kernel
     def _kernel_add_event_to_queue(event_queue: wp.array(dtype=wp.float32, ndim=2),
                                 queue_idx: wp.int32,
@@ -371,7 +371,6 @@ class WarpTerminalEnvironment(gym.Env):
         
         return True
     
-
     @wp.kernel
     def _kernel_get_event_data(event_queue: wp.array(dtype=wp.float32, ndim=2),
                             event_idx: wp.int32,
@@ -397,7 +396,6 @@ class WarpTerminalEnvironment(gym.Env):
         event_queue[dst_idx, 0] = event_queue[src_idx, 0]
         event_queue[dst_idx, 1] = event_queue[src_idx, 1]
         event_queue[dst_idx, 2] = event_queue[src_idx, 2]
-    
     
     def _process_vehicle_arrivals(self, time_advance=0):
         """Process vehicle arrivals for the current time."""
@@ -504,12 +502,14 @@ class WarpTerminalEnvironment(gym.Env):
                 # Schedule train arrival
                 arrival_time = current_time + np.random.uniform(0, time_advance)
                 self._add_event(arrival_time, 1, 0)
+                
     @wp.kernel
     def _kernel_update_container_position(container_positions: wp.array(dtype=wp.int32, ndim=1),
                                         container_idx: wp.int32,
                                         position_idx: wp.int32):
         """Update a container's position index."""
         container_positions[container_idx] = position_idx
+        
     def _parse_position(self, position_str):
         """Parse position string into row and bay indices."""
         if len(position_str) < 2 or not position_str[0].isalpha():
@@ -530,6 +530,7 @@ class WarpTerminalEnvironment(gym.Env):
         bay_idx = bay_num - 1  # Convert to 0-based index
         
         return row_idx, bay_idx
+        
     @wp.kernel
     def _kernel_set_vehicle_properties(vehicle_properties: wp.array(dtype=wp.float32, ndim=2),
                                     vehicle_idx: wp.int32,
@@ -538,7 +539,50 @@ class WarpTerminalEnvironment(gym.Env):
         for i in range(props.shape[0]):
             vehicle_properties[vehicle_idx, i] = props[i]
 
-    # 3. Fix the _create_truck_arrival function
+    @wp.kernel
+    def _kernel_set_element_vehicle_container(vehicle_containers: wp.array(dtype=wp.int32, ndim=2),
+                                          vehicle_idx: wp.int32,
+                                          container_slot: wp.int32,
+                                          container_idx: wp.int32):
+        """Set a container on a vehicle in a specific slot."""
+        vehicle_containers[vehicle_idx, container_slot] = container_idx
+
+    @wp.kernel
+    def _kernel_set_element_container_vehicle(container_vehicles: wp.array(dtype=wp.int32, ndim=1),
+                                          container_idx: wp.int32,
+                                          vehicle_idx: wp.int32):
+        """Set which vehicle a container is on."""
+        container_vehicles[container_idx] = vehicle_idx
+
+    @wp.kernel
+    def _kernel_set_int_value(arr: wp.array(dtype=wp.int32, ndim=1), 
+                          idx: wp.int32, 
+                          value: wp.int32):
+        """Set a value in an int array at the specified index."""
+        arr[idx] = value
+
+    @wp.kernel
+    def _kernel_set_element_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
+                                  queue_idx: wp.int32,
+                                  size: wp.int32):
+        """Set queue size for a specific queue."""
+        queue_sizes[queue_idx] = size
+
+    @wp.kernel
+    def _kernel_set_element_vehicle_queue(vehicle_queues: wp.array(dtype=wp.int32, ndim=2),
+                                      queue_idx: wp.int32,
+                                      pos_idx: wp.int32,
+                                      vehicle_idx: wp.int32):
+        """Set vehicle in queue at specified position."""
+        vehicle_queues[queue_idx, pos_idx] = vehicle_idx
+
+    @wp.kernel
+    def _kernel_get_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
+                          queue_idx: wp.int32,
+                          result: wp.array(dtype=wp.int32, ndim=1)):
+        """Get queue size and store in result array."""
+        result[0] = queue_sizes[queue_idx]
+
     def _create_truck_arrival(self):
         """Create a new truck arrival and add it to the queue."""
         # Find an available vehicle slot
@@ -653,22 +697,6 @@ class WarpTerminalEnvironment(gym.Env):
         self.trucks_arrived += 1
         
         return vehicle_idx
-    
-    @wp.kernel
-    def _kernel_set_vehicle_container(vehicle_containers: wp.array(dtype=wp.int32, ndim=2),
-                                    vehicle_idx: wp.int32,
-                                    container_slot: wp.int32,
-                                    container_idx: wp.int32):
-        """Set a container on a vehicle in a specific slot."""
-        vehicle_containers[vehicle_idx, container_slot] = container_idx
-
-    @wp.kernel
-    def _kernel_set_container_vehicle(container_vehicles: wp.array(dtype=wp.int32, ndim=1),
-                                container_idx: wp.int32,
-                                vehicle_idx: wp.int32):
-        """Set which vehicle a container is on."""
-        container_vehicles[container_idx] = vehicle_idx
-
 
     def _create_train_arrival(self):
         """Create a new train arrival and add it to the queue."""
@@ -715,7 +743,7 @@ class WarpTerminalEnvironment(gym.Env):
             
             # Assign container to train (one at a time)
             wp.launch(
-                kernel=self._kernel_set_vehicle_container,
+                kernel=self._kernel_set_element_vehicle_container,
                 dim=1,
                 inputs=[
                     self.terminal_state.vehicle_containers,
@@ -727,7 +755,7 @@ class WarpTerminalEnvironment(gym.Env):
             
             # Update container's vehicle
             wp.launch(
-                kernel=self._kernel_set_container_vehicle,
+                kernel=self._kernel_set_element_container_vehicle,
                 dim=1,
                 inputs=[
                     self.terminal_state.container_vehicles,
@@ -777,6 +805,13 @@ class WarpTerminalEnvironment(gym.Env):
         
         return vehicle_idx
     
+    @wp.kernel
+    def _kernel_set_float_value(arr: wp.array(dtype=wp.float32, ndim=1), 
+                            idx: wp.int32, 
+                            value: wp.float32):
+        """Set a value in a float array at the specified index."""
+        arr[idx] = value
+
     def _process_vehicle_departures(self):
         """Process vehicle departures for the current time."""
         current_time = self.current_simulation_time
@@ -890,8 +925,6 @@ class WarpTerminalEnvironment(gym.Env):
                     arrival_time = current_time + np.random.uniform(3600, 7200)  # 1-2 hours
                     self._add_event(arrival_time, 1, 0)
     
-# 1. First, add these essential kernel functions to properly handle array operations
-
     @wp.kernel
     def _kernel_set_element_crane_properties(properties: wp.array(dtype=wp.float32, ndim=2),
                                         crane_idx: wp.int32,
@@ -900,50 +933,6 @@ class WarpTerminalEnvironment(gym.Env):
         """Set a value in crane properties array."""
         properties[crane_idx, prop_idx] = value
 
-    @wp.kernel
-    def _kernel_set_element_container_vehicle(container_vehicles: wp.array(dtype=wp.int32, ndim=1),
-                                        container_idx: wp.int32,
-                                        vehicle_idx: wp.int32):
-        """Set vehicle index for a container."""
-        container_vehicles[container_idx] = vehicle_idx
-
-    @wp.kernel
-    def _kernel_set_element_vehicle_container(vehicle_containers: wp.array(dtype=wp.int32, ndim=2),
-                                        vehicle_idx: wp.int32,
-                                        slot_idx: wp.int32,
-                                        container_idx: wp.int32):
-        """Set container index for a vehicle slot."""
-        vehicle_containers[vehicle_idx, slot_idx] = container_idx
-
-    @wp.kernel
-    def _kernel_set_element_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
-                                    queue_idx: wp.int32,
-                                    size: wp.int32):
-        """Set queue size for a specific queue."""
-        queue_sizes[queue_idx] = size
-
-    @wp.kernel
-    def _kernel_set_element_vehicle_queue(vehicle_queues: wp.array(dtype=wp.int32, ndim=2),
-                                    queue_idx: wp.int32,
-                                    pos_idx: wp.int32,
-                                    vehicle_idx: wp.int32):
-        """Set vehicle in queue at specified position."""
-        vehicle_queues[queue_idx, pos_idx] = vehicle_idx
-
-    @wp.kernel
-    def _kernel_set_simulation_time(simulation_time: wp.array(dtype=wp.float32, ndim=1),
-                                time_value: wp.float32):
-        """Set the simulation time."""
-        simulation_time[0] = time_value
-
-    @wp.kernel
-    def _kernel_get_queue_size(queue_sizes: wp.array(dtype=wp.int32, ndim=1),
-                            queue_idx: wp.int32,
-                            result: wp.array(dtype=wp.int32, ndim=1)):
-        """Get queue size and store in result array."""
-        result[0] = queue_sizes[queue_idx]
-
-# 2. Fix the _execute_crane_movement function
     def _execute_crane_movement(self, crane_action):
         """Execute a crane movement action."""
         crane_idx, src_idx, dst_idx = crane_action
@@ -1144,6 +1133,7 @@ class WarpTerminalEnvironment(gym.Env):
         }
         
         return observation
+        
     def _init_warp(self, device=None):
         """Safely initialize Warp and register kernels."""
         # Import warp here, not at module level
@@ -1171,8 +1161,6 @@ class WarpTerminalEnvironment(gym.Env):
                                         crane_mask: wp.array(dtype=wp.int32, ndim=3)):
                 # Get thread indices
                 crane_idx, src_idx, dst_idx = wp.tid()
-                # src_idx = wp.tid()[1]
-                # dst_idx = wp.tid()[2]
                 
                 # Check bounds
                 if (crane_idx >= num_cranes or 
@@ -1208,7 +1196,6 @@ class WarpTerminalEnvironment(gym.Env):
                                                 truck_parking_mask: wp.array(dtype=wp.int32, ndim=2)):
                 # Get thread indices
                 truck_idx, spot_idx = wp.tid()
-                # spot_idx = wp.tid(1)
                 
                 # Check bounds
                 if truck_idx >= num_vehicles or spot_idx >= num_parking_spots:
@@ -1239,8 +1226,6 @@ class WarpTerminalEnvironment(gym.Env):
                                                 terminal_truck_mask: wp.array(dtype=wp.int32, ndim=3)):
                 # Get thread indices
                 truck_idx, src_idx, dst_idx = wp.tid()
-                # src_idx = wp.tid(1)
-                # dst_idx = wp.tid(2)
                 
                 # Check bounds
                 if (truck_idx >= num_terminal_trucks or
@@ -1377,39 +1362,29 @@ class WarpTerminalEnvironment(gym.Env):
         }
         
         return action_mask
-    @wp.kernel
-    def _kernel_set_float_value(arr: wp.array(dtype=wp.float32, ndim=1), 
-                            idx: wp.int32, 
-                            value: wp.float32):
-        """Set a value in a float array at the specified index."""
-        arr[idx] = value
 
     @wp.kernel
-    def _kernel_set_int_value(arr: wp.array(dtype=wp.int32, ndim=1), 
-                            idx: wp.int32, 
-                            value: wp.int32):
-        """Set a value in an int array at the specified index."""
-        arr[idx] = value
-
-    @wp.kernel
-    def _kernel_add_event_to_queue(event_queue: wp.array(dtype=wp.float32, ndim=2),
-                                queue_idx: wp.int32,
-                                time: wp.float32,
-                                event_type: wp.int32,
-                                event_data: wp.int32):
-        """Add event to the event queue."""
-        event_queue[queue_idx, 0] = time
-        event_queue[queue_idx, 1] = float(event_type)
-        event_queue[queue_idx, 2] = float(event_data)
-
-    @wp.kernel
-    def _kernel_update_queue_size(queue_size: wp.array(dtype=wp.int32, ndim=1),
-                            new_size: wp.int32):
-        """Update the event queue size."""
-        queue_size[0] = new_size
+    def _kernel_set_simulation_time(simulation_time: wp.array(dtype=wp.float32, ndim=1),
+                                time_value: wp.float32):
+        """Set the simulation time."""
+        simulation_time[0] = time_value
 
     def reset(self, seed=None, options=None):
-        """Reset the environment to initial state."""
+        """
+        Reset the environment to initial state and initialize optimizations.
+        
+        Args:
+            seed: Random seed
+            options: Dictionary of options including:
+                - 'optimize': Whether to use optimizations (default: True)
+                - 'precompute_events': Whether to precompute events (default: True)
+                - 'precompute_movements': Whether to precompute movements (default: True)
+                - 'precompute_stacking': Whether to precompute stacking (default: True)
+                - 'save_tables': Whether to save precomputed tables (default: False)
+        
+        Returns:
+            Tuple of (observation, info)
+        """
         start_time = time.time()
         
         # Reset random seed
@@ -1443,12 +1418,50 @@ class WarpTerminalEnvironment(gym.Env):
         # Reinitialize the simulation
         self._initialize_simulation()
         
+        # Initialize optimizations if requested
+        use_optimizations = True
+        if options is not None and 'optimize' in options:
+            use_optimizations = options['optimize']
+        
+        if use_optimizations:
+            # Extract optimization options
+            precompute_events = True
+            precompute_movements = True
+            precompute_stacking = True
+            save_tables = False
+            
+            if options is not None:
+                if 'precompute_events' in options:
+                    precompute_events = options['precompute_events']
+                if 'precompute_movements' in options:
+                    precompute_movements = options['precompute_movements']
+                if 'precompute_stacking' in options:
+                    precompute_stacking = options['precompute_stacking']
+                if 'save_tables' in options:
+                    save_tables = options['save_tables']
+            
+            # Initialize optimizations
+            self.initialize_optimizations(
+                precompute_events=precompute_events,
+                precompute_movements=precompute_movements,
+                precompute_stacking=precompute_stacking,
+                save_tables=save_tables
+            )
+            
+            # Replace step with optimized step
+            if not hasattr(self, 'original_step'):
+                self.original_step = self.step
+                self.step = self.optimized_step
+        
         # Get initial observation
         observation = self._get_observation()
         
         # Reset performance tracking
         if self.log_performance:
             self.step_times = []
+        
+        # Create optimized step times array
+        self.optimized_step_times = []
         
         # Track reset time
         reset_time = time.time() - start_time
@@ -1457,7 +1470,6 @@ class WarpTerminalEnvironment(gym.Env):
         
         return observation, {}
     
-    # 4. Fix the step method to correctly update simulation time
     def step(self, action):
         """Take a step in the environment using the provided action."""
         start_time = time.time()
@@ -1573,6 +1585,15 @@ class WarpTerminalEnvironment(gym.Env):
                 # Approximate positions
                 return ((bay_num - 1) * 12.0, self.num_rail_tracks * 5.0 + 10.0 + row_idx * 10.0)
     
+    def _get_position_type_code(self, position_str):
+        """Get numeric code for position type (0=rail, 1=truck, 2=storage)."""
+        if position_str.startswith('t') and '_' in position_str:
+            return 0  # Rail
+        elif position_str.startswith('p_'):
+            return 1  # Truck
+        else:
+            return 2  # Storage
+
     def render(self, mode='human'):
         """Render the environment."""
         if self.simplified_rendering:
@@ -1791,6 +1812,776 @@ class WarpTerminalEnvironment(gym.Env):
         
         if hasattr(self.stacking_kernels, 'print_performance_stats'):
             self.stacking_kernels.print_performance_stats()
+            
+        # Print optimization statistics if available
+        if hasattr(self, 'optimized_step_times') and self.optimized_step_times:
+            self.print_optimization_stats()
+    
+    #
+    # OPTIMIZATION METHODS - NEW CODE FOR MEMORY-PERFORMANCE TRADEOFF
+    #
+    
+    def initialize_optimizations(self, 
+                               precompute_events=True, 
+                               precompute_movements=True,
+                               precompute_stacking=True,
+                               save_tables=False,
+                               tables_path="./precomputed/"):
+        """
+        Initialize all optimization components to trade memory for speed.
+        
+        Args:
+            precompute_events: Whether to precompute vehicle events
+            precompute_movements: Whether to precompute movement times
+            precompute_stacking: Whether to precompute stacking compatibility
+            save_tables: Whether to save precomputed tables to disk
+            tables_path: Path to save/load precomputed tables
+        """
+        optimization_start = time.time()
+        
+        # Store optimization flags
+        self.use_precomputed_events = precompute_events
+        self.use_precomputed_movements = precompute_movements
+        self.use_precomputed_stacking = precompute_stacking
+        
+        # Ensure directory exists if saving tables
+        if save_tables:
+            import os
+            os.makedirs(tables_path, exist_ok=True)
+        
+        # Track memory usage
+        initial_memory = 0
+        if self.device == 'cuda' and torch.cuda.is_available():
+            initial_memory = torch.cuda.memory_allocated() / (1024 * 1024)  # MB
+        
+        if precompute_movements:
+            print("Precomputing movement lookup tables...")
+            self._initialize_movement_lookup_tables(save_tables, tables_path)
+        
+        if precompute_stacking:
+            print("Precomputing stacking compatibility matrix...")
+            self._initialize_stacking_compatibility(save_tables, tables_path)
+        
+        if precompute_events:
+            print("Precomputing vehicle arrival events...")
+            self._initialize_event_precomputation(save_tables, tables_path)
+        
+        # Calculate memory usage
+        final_memory = 0
+        if self.device == 'cuda' and torch.cuda.is_available():
+            final_memory = torch.cuda.memory_allocated() / (1024 * 1024)  # MB
+            
+        optimization_time = time.time() - optimization_start
+        
+        print(f"Optimizations initialized in {optimization_time:.2f} seconds")
+        print(f"Memory usage: {final_memory - initial_memory:.2f} MB")
+
+    def _initialize_movement_lookup_tables(self, save_tables=False, tables_path="./precomputed/"):
+        """Initialize movement lookup tables."""
+        movement_start = time.time()
+        
+        # Get position information
+        num_positions = len(self.position_to_idx)
+        
+        # Define container types to precompute
+        container_types = ["TEU", "FEU", "HQ", "Trailer", "Swap Body"]
+        type_indices = {t: i for i, t in enumerate(container_types)}
+        
+        # Define stack heights to precompute (0-5 containers)
+        max_stack_heights = 6
+        
+        # Try to load from file first
+        table_path = os.path.join(tables_path, "movement_lookup.npy")
+        if os.path.exists(table_path):
+            try:
+                print(f"Loading movement lookup tables from {table_path}...")
+                self.movement_lookup_tables = np.load(table_path)
+                self.movement_lookup_config = {
+                    'position_to_idx': self.position_to_idx,
+                    'container_types': container_types,
+                    'type_indices': type_indices,
+                    'max_stack_heights': max_stack_heights
+                }
+                
+                # Convert to appropriate shape if needed
+                if self.movement_lookup_tables.shape != (num_positions, num_positions, len(container_types), max_stack_heights):
+                    print("Loaded table has incorrect shape, recomputing...")
+                    self.movement_lookup_tables = None
+            except Exception as e:
+                print(f"Error loading movement tables: {e}")
+                self.movement_lookup_tables = None
+        
+        # If not loaded, compute from scratch
+        if not hasattr(self, 'movement_lookup_tables') or self.movement_lookup_tables is None:
+            print("Computing movement lookup tables from scratch...")
+            
+            # Create numpy array for lookup tables - we use numpy arrays for better indexing
+            self.movement_lookup_tables = np.zeros(
+                (num_positions, num_positions, len(container_types), max_stack_heights), 
+                dtype=np.float32
+            )
+            
+            self.movement_lookup_config = {
+                'position_to_idx': self.position_to_idx,
+                'container_types': container_types,
+                'type_indices': type_indices,
+                'max_stack_heights': max_stack_heights
+            }
+            
+            # Process positions in batches
+            batch_size = 50  # Adjust based on memory constraints
+            for src_start in range(0, num_positions, batch_size):
+                src_end = min(src_start + batch_size, num_positions)
+                print(f"Processing sources {src_start}-{src_end} of {num_positions}...")
+                
+                for src_idx in range(src_start, src_end):
+                    src_pos = self.idx_to_position.get(src_idx)
+                    if src_pos is None:
+                        continue
+                    
+                    # Get position type for source
+                    src_type = self._get_position_type_code(src_pos)
+                    
+                    for dst_idx in range(num_positions):
+                        dst_pos = self.idx_to_position.get(dst_idx)
+                        if dst_pos is None or src_pos == dst_pos:
+                            continue
+                        
+                        # Get position type for destination
+                        dst_type = self._get_position_type_code(dst_pos)
+                        
+                        # Compute for each container type and stack height
+                        for type_idx, container_type in enumerate(container_types):
+                            for stack_idx in range(max_stack_heights):
+                                # Calculate stack height in meters
+                                stack_height = stack_idx * 2.59  # Standard container height
+                                
+                                try:
+                                    # Use existing movement calculator
+                                    movement_time = self.movement_calculator.calculate_movement_time(
+                                        src_pos, dst_pos, 0, 
+                                        container_type=type_idx,  # Pass type index directly
+                                        stack_height=stack_height
+                                    )
+                                    
+                                    # Store in numpy array
+                                    self.movement_lookup_tables[src_idx, dst_idx, type_idx, stack_idx] = movement_time
+                                except Exception as e:
+                                    # Use a default time if calculation fails
+                                    self.movement_lookup_tables[src_idx, dst_idx, type_idx, stack_idx] = 100.0
+            
+            # Save to file if requested
+            if save_tables:
+                try:
+                    print(f"Saving movement lookup tables to {table_path}...")
+                    np.save(table_path, self.movement_lookup_tables)
+                except Exception as e:
+                    print(f"Error saving movement tables: {e}")
+        
+        movement_time = time.time() - movement_start
+        print(f"Movement lookup tables initialized in {movement_time:.2f} seconds")
+        print(f"Table shape: {self.movement_lookup_tables.shape}, Memory: {self.movement_lookup_tables.nbytes / (1024*1024):.2f} MB")
+        
+        # Set up movement calculator to use lookup tables
+        if hasattr(self.movement_calculator, 'use_lookup_tables'):
+            self.movement_calculator.use_lookup_tables(
+                self.movement_lookup_tables,
+                container_types,
+                max_stack_heights
+            )
+
+    def _initialize_stacking_compatibility(self, save_tables=False, tables_path="./precomputed/"):
+        """Initialize stacking compatibility matrix."""
+        stacking_start = time.time()
+        
+        # Calculate matrix size
+        max_containers = self.terminal_state.max_containers
+        
+        # Try to load from file first
+        matrix_path = os.path.join(tables_path, "stacking_matrix.npy")
+        if os.path.exists(matrix_path):
+            try:
+                print(f"Loading stacking compatibility matrix from {matrix_path}...")
+                self.stacking_compatibility_matrix = np.load(matrix_path)
+                
+                # Verify shape
+                if self.stacking_compatibility_matrix.shape != (max_containers, max_containers):
+                    print("Loaded matrix has incorrect shape, recomputing...")
+                    self.stacking_compatibility_matrix = None
+            except Exception as e:
+                print(f"Error loading stacking matrix: {e}")
+                self.stacking_compatibility_matrix = None
+        
+        # If not loaded, compute from scratch
+        if not hasattr(self, 'stacking_compatibility_matrix') or self.stacking_compatibility_matrix is None:
+            print("Computing stacking compatibility matrix from scratch...")
+            
+            # Create numpy array for compatibility matrix
+            self.stacking_compatibility_matrix = np.zeros((max_containers, max_containers), dtype=np.int32)
+            
+            # Precompute for each container pair
+            for upper_idx in range(max_containers):
+                # Skip inactive containers
+                container_props = self.terminal_state.container_properties.numpy()
+                if container_props[upper_idx, 6] <= 0:  # Check active flag
+                    continue
+                    
+                for lower_idx in range(max_containers):
+                    # Skip inactive containers and self-stacking
+                    if container_props[lower_idx, 6] <= 0 or upper_idx == lower_idx:
+                        continue
+                    
+                    # Get container properties
+                    upper_type = int(container_props[upper_idx, 0])
+                    upper_goods = int(container_props[upper_idx, 1])
+                    upper_weight = float(container_props[upper_idx, 3])
+                    upper_compatibility = int(container_props[upper_idx, 5])
+                    
+                    lower_type = int(container_props[lower_idx, 0])
+                    lower_goods = int(container_props[lower_idx, 1])
+                    lower_weight = float(container_props[lower_idx, 3])
+                    lower_stackable = bool(container_props[lower_idx, 4])
+                    lower_compatibility = int(container_props[lower_idx, 5])
+                    
+                    # Check stacking rules
+                    
+                    # Can't stack on non-stackable container
+                    if not lower_stackable:
+                        continue
+                    
+                    # Check compatibility
+                    can_stack = True
+                    
+                    # None compatibility - can't stack
+                    if lower_compatibility == 0 or upper_compatibility == 0:
+                        can_stack = False
+                    
+                    # Self compatibility - must be same type and goods
+                    elif lower_compatibility == 1 or upper_compatibility == 1:
+                        if lower_type != upper_type or lower_goods != upper_goods:
+                            can_stack = False
+                    
+                    # Size compatibility - must be same size
+                    elif lower_compatibility == 2 or upper_compatibility == 2:
+                        if lower_type != upper_type:
+                            can_stack = False
+                    
+                    # Weight constraint - container above should be lighter
+                    if upper_weight > lower_weight:
+                        can_stack = False
+                    
+                    # Update matrix
+                    if can_stack:
+                        self.stacking_compatibility_matrix[upper_idx, lower_idx] = 1
+            
+            # Save to file if requested
+            if save_tables:
+                try:
+                    print(f"Saving stacking compatibility matrix to {matrix_path}...")
+                    np.save(matrix_path, self.stacking_compatibility_matrix)
+                except Exception as e:
+                    print(f"Error saving stacking matrix: {e}")
+        
+        stacking_time = time.time() - stacking_start
+        print(f"Stacking compatibility matrix initialized in {stacking_time:.2f} seconds")
+        print(f"Matrix shape: {self.stacking_compatibility_matrix.shape}, Memory: {self.stacking_compatibility_matrix.nbytes / (1024*1024):.2f} MB")
+        
+        # Set up stacking kernels to use compatibility matrix
+        if hasattr(self.stacking_kernels, 'use_compatibility_matrix'):
+            self.stacking_kernels.use_compatibility_matrix(self.stacking_compatibility_matrix)
+
+    def _initialize_event_precomputation(self, save_tables=False, tables_path="./precomputed/"):
+        """Initialize event precomputation."""
+        event_start = time.time()
+        
+        # Calculate maximum events
+        simulation_days = self.max_simulation_time / 86400
+        events_per_day = (self.max_trucks_per_day + self.max_trains_per_day) * 2  # Arrive & depart
+        max_events = int(simulation_days * events_per_day)
+        
+        # Try to load from file first
+        events_path = os.path.join(tables_path, "precomputed_events.npy")
+        if os.path.exists(events_path):
+            try:
+                print(f"Loading precomputed events from {events_path}...")
+                events_data = np.load(events_path, allow_pickle=True).item()
+                
+                self.precomputed_events = events_data['events']
+                self.event_count = events_data['count']
+                self.current_event_idx = 0
+                
+                # Verify configuration matches
+                if (events_data['max_simulation_time'] != self.max_simulation_time or
+                    events_data['max_trucks_per_day'] != self.max_trucks_per_day or
+                    events_data['max_trains_per_day'] != self.max_trains_per_day):
+                    print("Loaded events have different configuration, recomputing...")
+                    self.precomputed_events = None
+            except Exception as e:
+                print(f"Error loading precomputed events: {e}")
+                self.precomputed_events = None
+        
+        # If not loaded, compute from scratch
+        if not hasattr(self, 'precomputed_events') or self.precomputed_events is None:
+            print("Computing events from scratch...")
+            
+            # Create numpy array for events [time, type, data]
+            self.precomputed_events = np.zeros((max_events, 3), dtype=np.float32)
+            self.event_count = 0
+            self.current_event_idx = 0
+            
+            # Generate all vehicle arrivals for entire simulation
+            for day in range(int(simulation_days)):
+                day_start = day * 86400
+                
+                # Generate truck arrivals
+                num_trucks = np.random.randint(5, self.max_trucks_per_day + 1)
+                for i in range(num_trucks):
+                    arrival_time = day_start + np.random.uniform(0, 86400)
+                    self._add_precomputed_event(arrival_time, 0, i)  # 0 = truck arrival
+                
+                # Generate train arrivals
+                num_trains = np.random.randint(1, self.max_trains_per_day + 1)
+                for i in range(num_trains):
+                    arrival_time = day_start + np.random.uniform(0, 86400)
+                    self._add_precomputed_event(arrival_time, 1, i)  # 1 = train arrival
+            
+            # Sort events by time
+            event_indices = np.argsort(self.precomputed_events[:self.event_count, 0])
+            self.precomputed_events[:self.event_count] = self.precomputed_events[event_indices]
+            
+            # Save to file if requested
+            if save_tables:
+                try:
+                    print(f"Saving precomputed events to {events_path}...")
+                    events_data = {
+                        'events': self.precomputed_events,
+                        'count': self.event_count,
+                        'max_simulation_time': self.max_simulation_time,
+                        'max_trucks_per_day': self.max_trucks_per_day,
+                        'max_trains_per_day': self.max_trains_per_day
+                    }
+                    np.save(events_path, events_data)
+                except Exception as e:
+                    print(f"Error saving precomputed events: {e}")
+        
+        event_time = time.time() - event_start
+        print(f"Event precomputation initialized in {event_time:.2f} seconds")
+        print(f"Precomputed {self.event_count} events, Memory: {self.precomputed_events.nbytes / (1024*1024):.2f} MB")
+
+    def _add_precomputed_event(self, time, event_type, event_data):
+        """Add an event to the precomputed events array."""
+        if not hasattr(self, 'event_count') or self.event_count >= len(self.precomputed_events):
+            return False
+        
+        # Add event to array
+        self.precomputed_events[self.event_count, 0] = time
+        self.precomputed_events[self.event_count, 1] = event_type
+        self.precomputed_events[self.event_count, 2] = event_data
+        
+        self.event_count += 1
+        return True
+
+    def get_movement_time(self, src_pos, dst_pos, container_type_idx=2, stack_height=0.0):
+        """
+        Get movement time from lookup table if available.
+        
+        Args:
+            src_pos: Source position string
+            dst_pos: Destination position string
+            container_type_idx: Container type index (0-4)
+            stack_height: Height of container stack
+            
+        Returns:
+            Movement time in seconds
+        """
+        if not hasattr(self, 'use_precomputed_movements') or not self.use_precomputed_movements:
+            # Use original calculation
+            return self.movement_calculator.calculate_movement_time(
+                src_pos, dst_pos, 0, container_type=container_type_idx, stack_height=stack_height
+            )
+        
+        if not hasattr(self, 'movement_lookup_tables') or self.movement_lookup_tables is None:
+            # Lookup tables not initialized
+            return self.movement_calculator.calculate_movement_time(
+                src_pos, dst_pos, 0, container_type=container_type_idx, stack_height=stack_height
+            )
+        
+        # Get indices
+        src_idx = self.position_to_idx.get(src_pos, -1)
+        dst_idx = self.position_to_idx.get(dst_pos, -1)
+        
+        if src_idx == -1 or dst_idx == -1:
+            # Invalid positions
+            return self.movement_calculator.calculate_movement_time(
+                src_pos, dst_pos, 0, container_type=container_type_idx, stack_height=stack_height
+            )
+        
+        # Convert stack height to index
+        container_height = 2.59  # Standard container height
+        stack_idx = min(int(stack_height / container_height), self.movement_lookup_config['max_stack_heights'] - 1)
+        
+        # Convert container type string to index if needed
+        if isinstance(container_type_idx, str):
+            type_idx = self.movement_lookup_config['type_indices'].get(container_type_idx, 0)
+        else:
+            type_idx = container_type_idx
+        
+        # Get time from lookup table
+        return self.movement_lookup_tables[src_idx, dst_idx, type_idx, stack_idx]
+
+    def can_stack(self, upper_container_idx, lower_container_idx):
+        """
+        Check if upper container can be stacked on lower container.
+        
+        Args:
+            upper_container_idx: Index of container to be placed on top
+            lower_container_idx: Index of container at the bottom
+            
+        Returns:
+            True if stacking is valid, False otherwise
+        """
+        if not hasattr(self, 'use_precomputed_stacking') or not self.use_precomputed_stacking:
+            # Use original validation
+            return self.stacking_kernels.can_place_at(upper_container_idx, lower_container_idx)
+        
+        if not hasattr(self, 'stacking_compatibility_matrix') or self.stacking_compatibility_matrix is None:
+            # Matrix not initialized
+            return self.stacking_kernels.can_place_at(upper_container_idx, lower_container_idx)
+        
+        # Validate indices
+        if (upper_container_idx < 0 or upper_container_idx >= len(self.stacking_compatibility_matrix) or
+            lower_container_idx < 0 or lower_container_idx >= len(self.stacking_compatibility_matrix)):
+            return False
+        
+        # Check compatibility
+        return bool(self.stacking_compatibility_matrix[upper_container_idx, lower_container_idx])
+
+    def fast_forward_to_next_event(self):
+        """
+        Fast forward to the next vehicle arrival event.
+        
+        Returns:
+            Time advanced in seconds
+        """
+        if not hasattr(self, 'use_precomputed_events') or not self.use_precomputed_events:
+            # Use standard time advance
+            self._advance_time(300)  # 5 minutes
+            return 300.0
+        
+        if not hasattr(self, 'precomputed_events') or self.precomputed_events is None:
+            # Events not precomputed
+            self._advance_time(300)  # 5 minutes
+            return 300.0
+        
+        # Get current time
+        current_time = self.current_simulation_time
+        
+        # Find next event
+        next_event_idx = -1
+        for i in range(self.event_count):
+            if self.precomputed_events[i, 0] > current_time:
+                next_event_idx = i
+                break
+        
+        if next_event_idx == -1:
+            # No more events
+            self._advance_time(300)  # 5 minutes
+            return 300.0
+        
+        # Get event info
+        next_time = self.precomputed_events[next_event_idx, 0]
+        event_type = int(self.precomputed_events[next_event_idx, 1])
+        event_data = int(self.precomputed_events[next_event_idx, 2])
+        
+        # Calculate time delta
+        time_delta = next_time - current_time
+        
+        # Don't advance more than 30 minutes at once
+        max_advance = 1800.0  # 30 minutes
+        if time_delta > max_advance:
+            self._advance_time(max_advance)
+            return max_advance
+        
+        # Update simulation time
+        self._advance_time(time_delta)
+        
+        # Process the event
+        if event_type == 0:  # Truck arrival
+            self._create_truck_arrival()
+        elif event_type == 1:  # Train arrival
+            self._create_train_arrival()
+        
+        return time_delta
+
+    def optimized_step(self, action):
+        """
+        Optimized step method using precomputed data.
+        
+        Args:
+            action: Action dictionary
+            
+        Returns:
+            Tuple of (observation, reward, terminated, truncated, info)
+        """
+        # Start timing
+        step_start = time.time()
+        
+        # Execute action
+        action_type = action['action_type']
+        
+        if action_type == 0:  # Crane movement
+            reward = self._execute_optimized_crane_movement(action['crane_movement'])
+        elif action_type == 1:  # Truck parking
+            reward = self._execute_truck_parking(action['truck_parking'])
+        elif action_type == 2:  # Terminal truck
+            reward = self._execute_terminal_truck(action['terminal_truck'])
+        else:
+            # Invalid action type
+            reward = 0.0
+        
+        # If no action was taken, advance simulation time
+        if reward == 0:
+            if hasattr(self, 'use_precomputed_events') and self.use_precomputed_events:
+                # Use optimized time advancement
+                self.fast_forward_to_next_event()
+            else:
+                # Use standard time advancement
+                self._advance_time(300)  # 5 minutes
+        
+        # Update simulation time in terminal state
+        current_time = self.current_simulation_time
+        wp.launch(
+            kernel=self._kernel_set_simulation_time,
+            dim=1,
+            inputs=[
+                self.terminal_state.simulation_time,
+                float(current_time)
+            ]
+        )
+        
+        # Process vehicle arrivals and departures
+        if not hasattr(self, 'use_precomputed_events') or not self.use_precomputed_events:
+            # Use regular processing
+            self._process_vehicle_arrivals()
+            self._process_vehicle_departures()
+        
+        # Check if episode is done
+        terminated = False
+        truncated = current_time >= self.max_simulation_time
+        
+        # Get new observation
+        observation = self._get_observation()
+        
+        # Create info dictionary with performance metrics
+        step_time = time.time() - step_start
+        info = {
+            'simulation_time': current_time,
+            'simulation_datetime': self.current_simulation_datetime,
+            'trucks_handled': self.trucks_arrived,
+            'trains_handled': self.trains_arrived,
+            'containers_moved': self.containers_moved,
+            'step_compute_time': step_time
+        }
+        
+        # Track step time
+        if hasattr(self, 'optimized_step_times'):
+            self.optimized_step_times.append(step_time)
+        else:
+            self.optimized_step_times = [step_time]
+        
+        return observation, reward, terminated, truncated, info
+
+    def _execute_optimized_crane_movement(self, crane_action):
+        """
+        Execute a crane movement with optimized lookups.
+        
+        Args:
+            crane_action: Crane movement action [crane_idx, src_idx, dst_idx]
+            
+        Returns:
+            Reward for the action
+        """
+        crane_idx, src_idx, dst_idx = crane_action
+        
+        # Convert indices to position strings
+        src_pos = self.idx_to_position.get(src_idx, None)
+        dst_pos = self.idx_to_position.get(dst_idx, None)
+        
+        if src_pos is None or dst_pos is None:
+            # Invalid position indices
+            return 0.0
+        
+        # Check if crane is available
+        crane_props_np = self.terminal_state.crane_properties.numpy()
+        crane_available_time = float(crane_props_np[crane_idx, 2])
+        if crane_available_time > self.current_simulation_time:
+            return 0.0
+        
+        # Get container at source position
+        container_idx = -1
+        if src_pos[0].isalpha() and src_pos[0].upper() in self.storage_yard.row_names:
+            # Storage position
+            container_idx, _ = self.storage_yard.get_top_container(src_pos)
+            if container_idx is None:
+                container_idx = -1
+        else:
+            # Rail or parking position
+            # This would normally check vehicles at these positions
+            pass
+        
+        if container_idx < 0:
+            # No container at source position
+            return 0.0
+        
+        # Check if container can be placed at destination
+        can_place = False
+        if dst_pos[0].isalpha() and dst_pos[0].upper() in self.storage_yard.row_names:
+            # Storage position - use optimized stacking check if available
+            if hasattr(self, 'use_precomputed_stacking') and self.use_precomputed_stacking:
+                row, bay = self._parse_position(dst_pos)
+                if row is not None and bay is not None:
+                    stack_heights_np = self.terminal_state.stack_heights.numpy()
+                    height = int(stack_heights_np[row, bay])
+                    
+                    if height > 0:
+                        # Get top container in destination stack
+                        yard_indices_np = self.terminal_state.yard_container_indices.numpy()
+                        top_container_idx = int(yard_indices_np[row, bay, height - 1])
+                        
+                        if top_container_idx >= 0:
+                            # Check if can stack using optimized lookup
+                            can_place = self.can_stack(container_idx, top_container_idx)
+                        else:
+                            can_place = True  # No container in stack
+                    else:
+                        can_place = True  # Empty stack
+            else:
+                # Use original validation
+                can_place = self.storage_yard.can_accept_container(dst_pos, container_idx)
+        else:
+            # Rail or parking position
+            can_place = True  # Assume we can place
+        
+        if not can_place:
+            # Cannot place container at destination
+            return 0.0
+        
+        # Get container type for movement time calculation
+        container_props_np = self.terminal_state.container_properties.numpy()
+        container_type_idx = int(container_props_np[container_idx, 0])
+        
+        # Get stack height if needed
+        stack_height = 0.0
+        if dst_pos[0].isalpha() and dst_pos[0].upper() in self.storage_yard.row_names:
+            row, bay = self._parse_position(dst_pos)
+            if row is not None and bay is not None:
+                stack_heights_np = self.terminal_state.stack_heights.numpy()
+                stack_height = float(stack_heights_np[row, bay])
+        
+        # Get movement time using optimized lookup
+        movement_time = self.get_movement_time(src_pos, dst_pos, container_type_idx, stack_height)
+        
+        # Update crane position and time
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_properties,
+                crane_idx,
+                2,  # Index for available time
+                float(self.current_simulation_time + movement_time)
+            ]
+        )
+        
+        # Update crane position for visualization
+        dst_coords = self._get_position_coordinates(dst_pos)
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_positions,
+                crane_idx,
+                0,  # X coordinate
+                float(dst_coords[0])
+            ]
+        )
+        
+        wp.launch(
+            kernel=self._kernel_set_element_crane_properties,
+            dim=1,
+            inputs=[
+                self.terminal_state.crane_positions,
+                crane_idx,
+                1,  # Y coordinate
+                float(dst_coords[1])
+            ]
+        )
+        
+        # Remove container from source
+        if src_pos[0].isalpha() and src_pos[0].upper() in self.storage_yard.row_names:
+            # Storage position
+            self.storage_yard.remove_container(src_pos)
+        
+        # Place container at destination
+        if dst_pos[0].isalpha() and dst_pos[0].upper() in self.storage_yard.row_names:
+            # Storage position
+            self.storage_yard.add_container(container_idx, dst_pos)
+        
+        # Update container position
+        dst_position_idx = self.position_to_idx.get(dst_pos, -1)
+        wp.launch(
+            kernel=self._kernel_update_container_position,
+            dim=1,
+            inputs=[self.terminal_state.container_positions, container_idx, dst_position_idx]
+        )
+        
+        # Increment containers moved
+        self.containers_moved += 1
+        
+        # Reward proportional to movement efficiency (inverse of time)
+        reward = 10.0 / (1.0 + movement_time / 60.0)  # Normalize to ~0-10 range
+        
+        return reward
+
+    def print_optimization_stats(self):
+        """Print statistics about optimization performance."""
+        print("\nOptimization Performance Statistics:")
+        
+        # Memory usage
+        memory_usage = 0.0
+        
+        if hasattr(self, 'movement_lookup_tables') and self.movement_lookup_tables is not None:
+            movement_memory = self.movement_lookup_tables.nbytes / (1024 * 1024)  # MB
+            memory_usage += movement_memory
+            print(f"  Movement lookup tables: {movement_memory:.2f} MB")
+        
+        if hasattr(self, 'stacking_compatibility_matrix') and self.stacking_compatibility_matrix is not None:
+            stacking_memory = self.stacking_compatibility_matrix.nbytes / (1024 * 1024)  # MB
+            memory_usage += stacking_memory
+            print(f"  Stacking compatibility matrix: {stacking_memory:.2f} MB")
+        
+        if hasattr(self, 'precomputed_events') and self.precomputed_events is not None:
+            event_memory = self.precomputed_events.nbytes / (1024 * 1024)  # MB
+            memory_usage += event_memory
+            print(f"  Precomputed events: {event_memory:.2f} MB")
+        
+        print(f"  Total memory usage: {memory_usage:.2f} MB")
+        
+        # Step time performance
+        if hasattr(self, 'step_times') and self.step_times and hasattr(self, 'optimized_step_times') and self.optimized_step_times:
+            original_avg = sum(self.step_times) / len(self.step_times) * 1000  # ms
+            optimized_avg = sum(self.optimized_step_times) / len(self.optimized_step_times) * 1000  # ms
+            
+            print(f"\nStep time performance:")
+            print(f"  Original implementation: {original_avg:.2f}ms average")
+            print(f"  Optimized implementation: {optimized_avg:.2f}ms average")
+            
+            if optimized_avg > 0:
+                speedup = original_avg / optimized_avg
+                print(f"  Speedup: {speedup:.2f}x faster")
+        
+        # Container movement stats
+        print(f"\nContainer movements: {self.containers_moved}")
 
 
 class QueueWrapper:
