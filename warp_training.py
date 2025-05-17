@@ -381,7 +381,7 @@ class WarpCurriculumTrainer:
         # Initialize current stage
         self.current_stage = 0
     
-    def create_environment(self, stage_config):
+    def create_environment(self, stage_config, optimization_options=None):
         """Create environment with configuration for current curriculum stage."""
         # Create Warp-accelerated environment
         env = WarpTerminalEnvironment(
@@ -405,6 +405,106 @@ class WarpCurriculumTrainer:
         
         # Enable simplified rendering for faster training
         env.set_simplified_rendering(True)
+        
+        # Initialize optimizations if requested
+        if optimization_options and optimization_options.get('optimize', False):
+            # Import optimization components only when needed
+            try:
+                from simulation.precomputing.WarpOptimizedSimulator import WarpOptimizedSimulator
+                
+                # Log optimization settings
+                self.logger.logger.info("Initializing optimized simulator with:")
+                for key, value in optimization_options.items():
+                    self.logger.logger.info(f"  {key}: {value}")
+                
+                # Create tables directory if saving tables
+                tables_dir = optimization_options.get('tables_dir', 'precomputed')
+                if optimization_options.get('save_tables', False):
+                    os.makedirs(tables_dir, exist_ok=True)
+                
+                # Create simulator
+                simulator = WarpOptimizedSimulator(
+                    terminal_env=env,
+                    initialize_on_creation=False,  # We'll initialize manually
+                    precompute_events=optimization_options.get('precompute_events', True),
+                    precompute_movements=optimization_options.get('precompute_movements', True),
+                    precompute_stacking=optimization_options.get('precompute_stacking', True),
+                    device=self.device
+                )
+                
+                # Try to load precomputed tables if enabled
+                if optimization_options.get('load_tables', False):
+                    self.logger.logger.info(f"Attempting to load precomputed tables from {tables_dir}...")
+                    
+                    # Check for movement lookup table
+                    movement_path = os.path.join(tables_dir, "movement_lookup.npy")
+                    if os.path.exists(movement_path) and simulator.precompute_movements:
+                        self.logger.logger.info(f"Loading movement lookup table from {movement_path}")
+                        if hasattr(simulator, 'movement_lookup') and simulator.movement_lookup is not None:
+                            simulator.movement_lookup.precomputed = False
+                    
+                    # Check for stacking compatibility matrix
+                    stacking_path = os.path.join(tables_dir, "stacking_matrix.npy")
+                    if os.path.exists(stacking_path) and simulator.precompute_stacking:
+                        self.logger.logger.info(f"Loading stacking compatibility matrix from {stacking_path}")
+                        if hasattr(simulator, 'stacking_matrix') and simulator.stacking_matrix is not None:
+                            simulator.stacking_matrix.precomputed = False
+                        # simulator.stacking_matrix.precomputed = False  # To avoid initializing twice
+                    
+                    # Check for event precomputation
+                    events_path = os.path.join(tables_dir, "precomputed_events.npy")
+                    if os.path.exists(events_path) and simulator.precompute_events:
+                        self.logger.logger.info(f"Loading precomputed events from {events_path}")
+                        if hasattr(simulator, 'event_precomputer') and simulator.event_precomputer is not None:
+                            simulator.event_precomputer.precomputed = False
+                        # simulator.event_precomputer.precomputed = False  # To avoid initializing twice
+                
+                # Initialize simulator
+                simulator.initialize()
+                
+                # Save precomputed tables if enabled
+                if optimization_options.get('save_tables', False):
+                    self.logger.logger.info(f"Saving precomputed tables to {tables_dir}...")
+                    
+                    # Save movement lookup table
+                    if simulator.precompute_movements and simulator.movement_lookup is not None:
+                        movement_path = os.path.join(tables_dir, "movement_lookup.npy")
+                        np.save(movement_path, simulator.movement_lookup.movement_times.numpy())
+                        self.logger.logger.info(f"Saved movement lookup table to {movement_path}")
+                    
+                    # Save stacking compatibility matrix
+                    if simulator.precompute_stacking and simulator.stacking_matrix is not None:
+                        stacking_path = os.path.join(tables_dir, "stacking_matrix.npy")
+                        np.save(stacking_path, simulator.stacking_matrix.compatibility_matrix.numpy())
+                        self.logger.logger.info(f"Saved stacking compatibility matrix to {stacking_path}")
+                    
+                    # Save precomputed events
+                    if simulator.precompute_events and simulator.event_precomputer is not None:
+                        events_path = os.path.join(tables_dir, "precomputed_events.npy")
+                        events_data = {
+                            'events': simulator.event_precomputer.precomputed_events.numpy(),
+                            'count': simulator.event_precomputer.event_count,
+                            'max_simulation_time': env.max_simulation_time,
+                            'max_trucks_per_day': env.max_trucks_per_day,
+                            'max_trains_per_day': env.max_trains_per_day
+                        }
+                        np.save(events_path, events_data)
+                        self.logger.logger.info(f"Saved precomputed events to {events_path}")
+                
+                # Replace environment step with optimized version
+                simulator.replace_env_step()
+                
+                # Attach simulator to environment for later access
+                env.optimized_simulator = simulator
+                
+            except ImportError as e:
+                self.logger.logger.error(f"Failed to import optimization components: {e}")
+                self.logger.logger.warning("Continuing without optimizations")
+            except Exception as e:
+                self.logger.logger.error(f"Error initializing optimizations: {e}")
+                self.logger.logger.warning("Continuing without optimizations")
+                import traceback
+                traceback.print_exc()
         
         return env
     
@@ -493,14 +593,15 @@ class WarpCurriculumTrainer:
             return torch.cuda.memory_allocated() / 1e6  # MB
         return 0
     
-    def train(self, total_episodes=None, resume_checkpoint=None):
+    # Fixed training loop in WarpCurriculumTrainer class
+    def train(self, total_episodes=None, resume_checkpoint=None, optimization_options=None):
         """Train agents through curriculum stages with Warp acceleration."""
         # Initialize tracking variables
         episode_count = 0
         
         # Initialize agent with first stage environment
         self.logger.logger.info(f"Creating Warp environment for stage 1 ({self.curriculum_stages[0]['name']})...")
-        env = self.create_environment(self.curriculum_stages[self.current_stage])
+        env = self.create_environment(self.curriculum_stages[self.current_stage], optimization_options)
         agent = self.create_agent(env)
         
         # Load checkpoint if resuming
@@ -519,7 +620,7 @@ class WarpCurriculumTrainer:
                 self.logger.logger.info(f"\nStarting Stage {self.current_stage + 1}: {stage_name}")
                 
                 # Create environment for current stage
-                env = self.create_environment(stage_config)
+                env = self.create_environment(stage_config, optimization_options)
                 
                 # Reset stage tracking
                 stage_rewards = []
@@ -668,6 +769,9 @@ class WarpCurriculumTrainer:
         consecutive_wait_count = 0
         last_stack_check_time = env.current_simulation_time
         
+        # Check if using optimized simulation
+        using_optimized = hasattr(env, 'optimized_simulator') and env.optimized_simulator is not None
+        
         # Main training loop 
         while not done and not truncated and env.current_simulation_time < max_simulation_time:
             # Check for pre-marshalling needs
@@ -683,50 +787,76 @@ class WarpCurriculumTrainer:
             if action is None:
                 consecutive_wait_count += 1
                 
-                # Check stacks every 15 minutes of simulation time
-                stack_check_interval = 15 * 60  # 15 minutes
-                time_since_last_check = env.current_simulation_time - last_stack_check_time
-                
-                # First, use small time increments to check frequently for new optimization opportunities
-                if time_since_last_check >= stack_check_interval:
-                    # Update last check time
-                    last_stack_check_time = env.current_simulation_time
-                    
-                    # Check if pre-marshalling is needed now
-                    needs_premarshalling = agent._evaluate_need_for_premarshalling(env)
-                    
-                    # If no pre-marshalling needed and no vehicles, advance time more aggressively
-                    if not needs_premarshalling and env.truck_queue.size() == 0 and env.train_queue.size() == 0:
-                        # More aggressive time jump - but still max 1 hour
-                        advance_time = min(60 * 60, 5 * 60 * consecutive_wait_count)  # Increase time jumps but cap at 1 hour
-                    else:
-                        # Reset consecutive wait counter if we found something to do
-                        consecutive_wait_count = 0
-                        advance_time = 5 * 60  # 5 minutes
+                # Time advancement strategy depends on optimization status
+                if using_optimized and env.optimized_simulator.precompute_events:
+                    # Use optimized time advancement with event precomputation
+                    try:
+                        # Let optimized simulator handle time advancement
+                        next_state, reward, done, truncated, info = env.step(None)  # Pass None to trigger wait action
+                        env_step_time = info.get('step_compute_time', 0) * 1000  # ms
+                        step_times.append(env_step_time)
+                    except Exception as e:
+                        print(f"Error executing optimized wait: {e}")
+                        # Fall back to manual time advancement
+                        if hasattr(env, '_advance_time'):
+                            env._advance_time(300)  # 5 minutes
+                        elif hasattr(env, 'optimized_simulator') and hasattr(env.optimized_simulator, 'fast_forward_to_next_event'):
+                            env.optimized_simulator.fast_forward_to_next_event()
+                        
+                        # Get observation
+                        next_state = env._get_observation()
+                        done = env.current_simulation_time >= env.max_simulation_time
+                        truncated = False
+                        reward = 0
                 else:
-                    # Small time jumps between stack checks
-                    advance_time = 5 * 60  # 5 minutes
-                
-                # Execute a wait action and force time advancement
-                try:
-                    start_time = time.time()
+                    # Traditional time advancement
+                    # Check stacks every 15 minutes of simulation time
+                    stack_check_interval = 15 * 60  # 15 minutes
+                    time_since_last_check = env.current_simulation_time - last_stack_check_time
                     
-                    # Use environment's create_wait_action to ensure valid indices
-                    wait_action = env.create_wait_action()
+                    # First, use small time increments to check frequently for new optimization opportunities
+                    if time_since_last_check >= stack_check_interval:
+                        # Update last check time
+                        last_stack_check_time = env.current_simulation_time
+                        
+                        # Check if pre-marshalling is needed now
+                        needs_premarshalling = agent._evaluate_need_for_premarshalling(env)
+                        
+                        # If no pre-marshalling needed and no vehicles, advance time more aggressively
+                        if not needs_premarshalling and env.truck_queue.size() == 0 and env.train_queue.size() == 0:
+                            # More aggressive time jump - but still max 1 hour
+                            advance_time = min(60 * 60, 5 * 60 * consecutive_wait_count)  # Increase time jumps but cap at 1 hour
+                        else:
+                            # Reset consecutive wait counter if we found something to do
+                            consecutive_wait_count = 0
+                            advance_time = 5 * 60  # 5 minutes
+                    else:
+                        # Small time jumps between stack checks
+                        advance_time = 5 * 60  # 5 minutes
                     
-                    next_state, reward, done, truncated, info = env.step(wait_action)
-                    step_time = (time.time() - start_time) * 1000  # Convert to ms
-                    step_times.append(step_time)
-                except Exception as e:
-                    print(f"Error executing wait action: {e}")
-                    # If the wait action fails, just advance time manually
-                    env._advance_time(advance_time)
-                    
-                    # Get observation
-                    next_state = env._get_observation()
-                    done = env.current_simulation_time >= env.max_simulation_time
-                    truncated = False
-                    reward = 0
+                    # Execute a wait action and force time advancement
+                    try:
+                        start_time = time.time()
+                        
+                        # Use environment's create_wait_action to ensure valid indices
+                        wait_action = env.create_wait_action()
+                        
+                        next_state, reward, done, truncated, info = env.step(wait_action)
+                        step_time = (time.time() - start_time) * 1000  # Convert to ms
+                        step_times.append(step_time)
+                    except Exception as e:
+                        print(f"Error executing wait action: {e}")
+                        # If the wait action fails, just advance time manually
+                        if hasattr(env, '_advance_time'):
+                            env._advance_time(advance_time)
+                        elif hasattr(env, 'optimized_simulator') and hasattr(env.optimized_simulator, 'fast_forward_to_next_event'):
+                            env.optimized_simulator.fast_forward_to_next_event()
+                        
+                        # Get observation
+                        next_state = env._get_observation()
+                        done = env.current_simulation_time >= env.max_simulation_time
+                        truncated = False
+                        reward = 0
                 
                 episode_steps += 1
                 
@@ -754,7 +884,13 @@ class WarpCurriculumTrainer:
                 # Execute action in environment and track time
                 start_time = time.time()
                 next_state, reward, done, truncated, info = env.step(action)
-                step_time = (time.time() - start_time) * 1000  # Convert to ms
+                
+                # Get step time from info if available, otherwise calculate
+                if 'step_compute_time' in info:
+                    step_time = info['step_compute_time'] * 1000  # Convert seconds to ms
+                else:
+                    step_time = (time.time() - start_time) * 1000  # Convert to ms
+                    
                 step_times.append(step_time)
                 
                 episode_reward += reward
@@ -770,7 +906,13 @@ class WarpCurriculumTrainer:
                     # Track execution time
                     start_time = time.time()
                     next_state, reward, done, truncated, info = env.step(wait_action)
-                    step_time = (time.time() - start_time) * 1000  # Convert to ms
+                    
+                    # Get step time from info if available, otherwise calculate
+                    if 'step_compute_time' in info:
+                        step_time = info['step_compute_time'] * 1000  # Convert seconds to ms
+                    else:
+                        step_time = (time.time() - start_time) * 1000  # Convert to ms
+                        
                     step_times.append(step_time)
                     
                     episode_reward += reward  # Usually 0 for wait actions
@@ -778,7 +920,10 @@ class WarpCurriculumTrainer:
                 except Exception as e2:
                     # If the wait action also fails, just advance time manually
                     self.logger.logger.warning(f"Wait action also failed: {e2}. Advancing time manually.")
-                    env._advance_time(60)  # Advance 1 minute
+                    if hasattr(env, '_advance_time'):
+                        env._advance_time(60)  # Advance 1 minute
+                    elif hasattr(env, 'optimized_simulator') and hasattr(env.optimized_simulator, 'fast_forward_to_next_event'):
+                        env.optimized_simulator.fast_forward_to_next_event()
                     
                     # Get observation
                     next_state = env._get_observation()
@@ -819,6 +964,12 @@ class WarpCurriculumTrainer:
             if avg_step_time is None or len(env.step_times) > len(step_times):
                 avg_step_time = env_avg_step_time
         
+        # Check if optimized simulation has its own tracking
+        if hasattr(env, 'optimized_simulator') and hasattr(env.optimized_simulator, 'step_times') and env.optimized_simulator.step_times:
+            sim_avg_step_time = np.mean(env.optimized_simulator.step_times) * 1000  # Convert to ms
+            if avg_step_time is None or not step_times:
+                avg_step_time = sim_avg_step_time
+        
         return episode_reward, episode_steps, mean_loss, action_counts, avg_step_time
     
     def save_checkpoint(self, agent, episode, suffix=None):
@@ -837,7 +988,7 @@ class WarpCurriculumTrainer:
             memory_usage = torch.cuda.memory_allocated() / 1e6  # MB
             self.logger.logger.info(f"GPU memory after saving: {memory_usage:.1f} MB")
     
-    def evaluate(self, agent, num_episodes=5, render=False):
+    def evaluate(self, agent, num_episodes=5, render=False, optimization_options=None):
         """
         Evaluate trained agent on the environment.
         
@@ -845,15 +996,16 @@ class WarpCurriculumTrainer:
             agent: Trained agent
             num_episodes: Number of evaluation episodes
             render: Whether to render the environment
+            optimization_options: Dictionary of optimization options
             
         Returns:
             Dictionary of evaluation metrics
         """
         # Create full-sized environment for evaluation
         full_config = self.curriculum_stages[-1]
-        env = self.create_environment(full_config)
+        env = self.create_environment(full_config, optimization_options)
         
-        # Disable simplified rendering for evaluation
+        # Disable simplified rendering for evaluation if rendering is enabled
         env.set_simplified_rendering(not render)
         
         # Run evaluation episodes
@@ -864,6 +1016,9 @@ class WarpCurriculumTrainer:
         
         self.logger.logger.info(f"\nEvaluating agent for {num_episodes} episodes...")
         eval_pbar = tqdm(total=num_episodes, desc="Evaluating")
+        
+        # Track step times during evaluation
+        eval_step_times = []
         
         for episode in range(num_episodes):
             state, _ = env.reset()
@@ -879,20 +1034,30 @@ class WarpCurriculumTrainer:
                 
                 # Handle case where no actions are available
                 if action is None:
-                    # Wait until next available time
-                    advance_time = 300  # 5 minutes
-                    env._advance_time(advance_time)
-                    
-                    # Get observation
-                    next_state = env._get_observation()
-                    reward = 0
+                    # Check if using optimized simulation
+                    if hasattr(env, 'optimized_simulator') and env.optimized_simulator is not None:
+                        # Use optimized time advancement
+                        next_state, reward, done, truncated, info = env.step(None)  # Pass None to trigger wait action
+                    else:
+                        # Wait until next available time
+                        advance_time = 300  # 5 minutes
+                        if hasattr(env, '_advance_time'):
+                            env._advance_time(advance_time)
+                        
+                        # Get observation
+                        next_state = env._get_observation()
+                        reward = 0
                 else:
                     # Process tensor action by converting to appropriate format
                     if isinstance(action['crane_movement'], torch.Tensor):
                         action['crane_movement'] = action['crane_movement'].cpu().numpy()
                     
                     # Take action in environment
-                    next_state, reward, done, truncated, _ = env.step(action)
+                    start_time = time.time()
+                    next_state, reward, done, truncated, info = env.step(action)
+                    step_time = (time.time() - start_time) * 1000  # Convert to ms
+                    eval_step_times.append(step_time)
+                    
                     episode_reward += reward
                     
                     # Update action count
@@ -932,11 +1097,22 @@ class WarpCurriculumTrainer:
             'action_counts': action_counts
         }
         
+        # Add step time metrics if available
+        if eval_step_times:
+            evaluation_metrics['mean_step_time'] = np.mean(eval_step_times)
+            evaluation_metrics['min_step_time'] = np.min(eval_step_times)
+            evaluation_metrics['max_step_time'] = np.max(eval_step_times)
+        
         # Log evaluation results
         self.logger.logger.info("\nEvaluation Results:")
         self.logger.logger.info(f"  Mean Reward: {evaluation_metrics['mean_reward']:.2f} ± {evaluation_metrics['std_reward']:.2f}")
         self.logger.logger.info(f"  Mean Steps: {evaluation_metrics['mean_steps']:.2f}")
         self.logger.logger.info(f"  Mean Simulation Days: {evaluation_metrics['mean_days']:.2f}")
+        
+        # Log step time metrics if available
+        if 'mean_step_time' in evaluation_metrics:
+            self.logger.logger.info(f"  Step Time: {evaluation_metrics['mean_step_time']:.2f}ms average")
+            self.logger.logger.info(f"  Step Time Range: {evaluation_metrics['min_step_time']:.2f}ms - {evaluation_metrics['max_step_time']:.2f}ms")
         
         # Log action distribution
         action_str = " | ".join([f"{key}: {count}" for key, count in action_counts.items()])
@@ -945,5 +1121,10 @@ class WarpCurriculumTrainer:
         # Print environment performance stats if available
         if hasattr(env, 'print_performance_stats'):
             env.print_performance_stats()
+        
+        # Print optimizer stats if available
+        if hasattr(env, 'optimized_simulator') and env.optimized_simulator is not None:
+            self.logger.logger.info("\nOptimization Performance:")
+            env.optimized_simulator.print_performance_stats()
         
         return evaluation_metrics

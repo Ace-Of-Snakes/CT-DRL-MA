@@ -55,8 +55,12 @@ class WarpMovementLookupTable:
         # Initialize lookup tables
         self.movement_times = None
         
+        # Flag to track if tables have been precomputed
+        self.precomputed = False
+        
         # Time tracking for performance metrics
         self.lookup_times = []
+        self.original_calculation_times = []
         
         print(f"WarpMovementLookupTable initialized on device: {self.device}")
         print(f"Positions: {self.num_positions}, Container types: {len(self.container_types)}")
@@ -70,11 +74,18 @@ class WarpMovementLookupTable:
     
     def precompute_movement_times(self) -> None:
         """Precompute all possible movement times and store in lookup table."""
+        if self.precomputed:
+            print("Movement times already precomputed, skipping.")
+            return
+            
         start_time = time.time()
         
         # Create lookup table [positions, positions, container_types, stack_heights]
+        shape = (self.num_positions, self.num_positions, len(self.container_types), self.max_stack_heights)
+        print(f"Creating movement lookup table with shape {shape}...")
+        
         self.movement_times = wp.zeros(
-            (self.num_positions, self.num_positions, len(self.container_types), self.max_stack_heights),
+            shape,
             dtype=wp.float32,
             device=self.device
         )
@@ -91,13 +102,11 @@ class WarpMovementLookupTable:
             self._process_position_batch(start_idx, end_idx)
         
         end_time = time.time()
+        self.precomputed = True
         print(f"Movement lookup table precomputation completed in {end_time - start_time:.2f} seconds")
     
     def _process_position_batch(self, start_src_idx: int, end_src_idx: int) -> None:
         """Process a batch of source positions to populate the lookup table."""
-        # List source position names for this batch
-        position_indices = list(self.idx_to_position.keys())
-        
         # Process each source position
         for src_idx in range(start_src_idx, end_src_idx):
             if src_idx >= self.num_positions:
@@ -121,6 +130,9 @@ class WarpMovementLookupTable:
                 
                 # For each container type
                 for type_idx, container_type in enumerate(self.container_types):
+                    # Convert string type to numeric index for movement calculator
+                    type_code = self._get_type_code(container_type)
+                    
                     # For each stack height
                     for stack_idx in range(self.max_stack_heights):
                         # Calculate stack height in meters
@@ -129,7 +141,9 @@ class WarpMovementLookupTable:
                         # Calculate movement time
                         try:
                             time_value = self.movement_calculator.calculate_movement_time(
-                                src_pos, dst_pos, container_type, stack_height
+                                src_pos, dst_pos, 0, # Use crane 0
+                                container_type=type_code,
+                                stack_height=stack_height
                             )
                             
                             # Store in lookup table using kernel
@@ -147,6 +161,7 @@ class WarpMovementLookupTable:
                             )
                         except Exception as e:
                             # Handle calculation errors gracefully
+                            print(f"Error calculating movement time for {src_pos}->{dst_pos} (type {container_type}, stack {stack_height}): {e}")
                             wp.launch(
                                 kernel=self._kernel_set_movement_time,
                                 dim=1,
@@ -159,6 +174,20 @@ class WarpMovementLookupTable:
                                     float(100.0)  # Default fallback time
                                 ]
                             )
+    
+    def _get_type_code(self, container_type: str) -> int:
+        """Convert container type string to numeric code for movement calculator."""
+        # Map string types to numeric codes expected by movement calculator
+        type_codes = {
+            "TEU": 0,
+            "THEU": 1,
+            "FEU": 2,
+            "FFEU": 3,
+            "HQ": 3,  # High cube is like FFEU
+            "Trailer": 4,
+            "Swap Body": 5
+        }
+        return type_codes.get(container_type, 2)  # Default to FEU (2)
     
     @wp.kernel
     def _kernel_set_movement_time(movement_times: wp.array(dtype=wp.float32, ndim=4),
@@ -195,7 +224,7 @@ class WarpMovementLookupTable:
             stack_height: Height of container stack
             
         Returns:
-            Movement time in seconds or None if positions not found
+            Movement time in seconds or 100.0 if positions not found
         """
         start_time = time.time()
         
@@ -204,7 +233,23 @@ class WarpMovementLookupTable:
         dst_idx = self.position_to_idx.get(dst_pos, -1)
         
         if src_idx == -1 or dst_idx == -1:
-            return None
+            # Fall back to original calculation
+            original_start = time.time()
+            try:
+                type_code = self._get_type_code(container_type)
+                movement_time = self.movement_calculator.calculate_movement_time(
+                    src_pos, dst_pos, 0, container_type=type_code, stack_height=stack_height
+                )
+                self.original_calculation_times.append(time.time() - original_start)
+                self.lookup_times.append(time.time() - start_time)
+                return movement_time
+            except:
+                self.lookup_times.append(time.time() - start_time)
+                return 100.0  # Default fallback time
+        
+        # Ensure movement times have been precomputed
+        if not self.precomputed or self.movement_times is None:
+            self.precompute_movement_times()
         
         # Get container type index
         type_idx = self.container_type_to_idx.get(container_type, 0)  # Default to first type if not found
@@ -247,17 +292,54 @@ class WarpMovementLookupTable:
         else:
             return 'storage_slot'
             
+    def load_table(self, table_data: np.ndarray) -> bool:
+        """
+        Load movement lookup table from NumPy array.
+        
+        Args:
+            table_data: NumPy array containing movement lookup table
+            
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        try:
+            # Check shape compatibility
+            expected_shape = (self.num_positions, self.num_positions, len(self.container_types), self.max_stack_heights)
+            if table_data.shape != expected_shape:
+                print(f"Error loading table: Shape mismatch. Expected {expected_shape}, got {table_data.shape}")
+                return False
+                
+            # Create Warp array from NumPy data
+            self.movement_times = wp.array(table_data, dtype=wp.float32, device=self.device)
+            self.precomputed = True
+            return True
+        except Exception as e:
+            print(f"Error loading movement lookup table: {e}")
+            return False
+    
     def print_performance_stats(self) -> None:
         """Print performance statistics for movement time lookups."""
-        if not self.lookup_times:
-            print("No lookup performance data available.")
-            return
+        print("\nMovement Lookup Table Performance:")
         
-        avg_lookup = sum(self.lookup_times) / len(self.lookup_times) * 1000  # Convert to ms
-        print(f"Movement lookup performance: {avg_lookup:.4f}ms average")
+        # Memory usage
+        memory_usage = self._estimate_memory_usage()
+        print(f"  Memory usage: {memory_usage:.2f} MB")
         
-        # Memory usage statistics
-        if self.movement_times is not None:
-            memory_usage = (self.num_positions * self.num_positions * 
-                          len(self.container_types) * self.max_stack_heights * 4) / (1024 * 1024)
-            print(f"Movement lookup table memory usage: {memory_usage:.2f} MB")
+        # Lookup performance
+        if self.lookup_times:
+            avg_lookup = sum(self.lookup_times) / len(self.lookup_times) * 1000  # Convert to ms
+            min_lookup = min(self.lookup_times) * 1000
+            max_lookup = max(self.lookup_times) * 1000
+            print(f"  Lookup time: {avg_lookup:.4f}ms average (range: {min_lookup:.4f}ms - {max_lookup:.4f}ms)")
+            print(f"  Total lookups: {len(self.lookup_times)}")
+        
+        # Original calculation performance
+        if self.original_calculation_times:
+            avg_original = sum(self.original_calculation_times) / len(self.original_calculation_times) * 1000  # Convert to ms
+            print(f"  Original calculation time: {avg_original:.4f}ms average")
+            print(f"  Original calculations: {len(self.original_calculation_times)} (lookup misses)")
+            
+            # Speedup if both are available
+            if self.lookup_times and avg_lookup > 0:
+                speedup = avg_original / avg_lookup
+                print(f"  Speedup: {speedup:.2f}x faster with lookup")

@@ -1071,10 +1071,20 @@ class WarpTerminalEnvironment(gym.Env):
         return 0.0
     
     def _advance_time(self, seconds):
-        """Advance simulation time by the specified number of seconds."""
+        """Modified advance_time method to properly handle time advancement."""
         # Update simulation time
         self.current_simulation_time += seconds
         self.current_simulation_datetime += timedelta(seconds=seconds)
+        
+        # Update simulation time in terminal state using kernel
+        wp.launch(
+            kernel=self._kernel_set_simulation_time,
+            dim=1,
+            inputs=[
+                self.terminal_state.simulation_time,
+                float(self.current_simulation_time)
+            ]
+        )
         
         # Process vehicle arrivals and departures
         self._process_vehicle_arrivals(seconds)
@@ -1471,71 +1481,62 @@ class WarpTerminalEnvironment(gym.Env):
         return observation, {}
     
     def step(self, action):
-        """Take a step in the environment using the provided action."""
+        """Take a step with improved error handling."""
         start_time = time.time()
         
-        # Extract action components
-        action_type = action['action_type']
-        
-        # Execute the action based on type
-        if action_type == 0:  # Crane movement
-            reward = self._execute_crane_movement(action['crane_movement'])
-        elif action_type == 1:  # Truck parking
-            reward = self._execute_truck_parking(action['truck_parking'])
-        elif action_type == 2:  # Terminal truck
-            reward = self._execute_terminal_truck(action['terminal_truck'])
-        else:
-            # Invalid action type
+        try:
+            # Extract action components
+            action_type = action['action_type']
+            
+            # Execute the action based on type
+            if action_type == 0:  # Crane movement
+                reward = self._execute_crane_movement(action['crane_movement'])
+            elif action_type == 1:  # Truck parking
+                reward = self._execute_truck_parking(action['truck_parking'])
+            elif action_type == 2:  # Terminal truck
+                reward = self._execute_terminal_truck(action['terminal_truck'])
+            else:
+                # Invalid action type
+                reward = 0.0
+                
+        except (IndexError, TypeError, ValueError, AttributeError) as e:
+            # Catch all common errors during action execution
+            print(f"Error executing action: {e}")
             reward = 0.0
-        
-        # Advance simulation time if no action was taken
-        if reward == 0:
+            
+            # Skip wait action and go directly to time advancement
             self._advance_time(300)  # 5 minutes
-        
-        # Update simulation time in terminal state using kernel
-        wp.launch(
-            kernel=self._kernel_set_simulation_time,
-            dim=1,
-            inputs=[
-                self.terminal_state.simulation_time,
-                self.current_simulation_time
-            ]
-        )
-        
-        # Process arrivals and departures for the current time
-        self._process_vehicle_arrivals()
-        self._process_vehicle_departures()
-        
-        # Check if episode is done
-        terminated = False
-        truncated = self.current_simulation_time >= self.max_simulation_time
-        
-        # Get new observation
-        observation = self._get_observation()
-        
-        # Create info dictionary
-        info = {
-            'simulation_time': self.current_simulation_time,
-            'simulation_datetime': self.current_simulation_datetime,
-            'trucks_handled': self.trucks_arrived,
-            'trains_handled': self.trains_arrived,
-            'containers_moved': self.containers_moved
-        }
-        
-        # Track step time
-        step_time = time.time() - start_time
-        if self.log_performance:
-            self.step_times.append(step_time)
-        
-        return observation, reward, terminated, truncated, info
+            
+            # Get new observation
+            observation = self._get_observation()
+            
+            # Check if episode is done
+            terminated = False
+            truncated = self.current_simulation_time >= self.max_simulation_time
+            
+            # Create info dictionary
+            info = {
+                'simulation_time': self.current_simulation_time,
+                'simulation_datetime': self.current_simulation_datetime,
+                'trucks_handled': self.trucks_arrived,
+                'trains_handled': self.trains_arrived,
+                'containers_moved': self.containers_moved
+            }
+            
+            # Track step time
+            step_time = time.time() - start_time
+            if self.log_performance:
+                self.step_times.append(step_time)
+            
+            return observation, reward, terminated, truncated, info
     
     def create_wait_action(self):
         """Create a valid wait action (no-op)."""
         return {
             'action_type': 0,  # Crane movement
-            'crane_movement': np.array([0, 0, 0]),
-            'truck_parking': np.array([0, 0]),
-            'terminal_truck': np.array([0, 0, 0])
+            'crane_movement': np.array([0, 0, 0], dtype=np.int32),
+            'truck_parking': np.array([0, 0], dtype=np.int32),
+            'terminal_truck': np.array([0, 0, 0], dtype=np.int32)
         }
     
     def _get_position_coordinates(self, position_str):
