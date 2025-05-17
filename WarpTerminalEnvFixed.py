@@ -935,7 +935,14 @@ class WarpTerminalEnvironment(gym.Env):
 
     def _execute_crane_movement(self, crane_action):
         """Execute a crane movement action."""
-        crane_idx, src_idx, dst_idx = crane_action
+        # Handle both tuple and numpy array inputs
+        if isinstance(crane_action, np.ndarray):
+            # Ensure we have a copy, not a view
+            crane_action = crane_action.copy()
+            crane_idx, src_idx, dst_idx = int(crane_action[0]), int(crane_action[1]), int(crane_action[2])
+        else:
+            # Handle tuple, list, or other sequence
+            crane_idx, src_idx, dst_idx = crane_action
         
         # Convert indices to position strings
         src_pos = self.idx_to_position.get(src_idx, None)
