@@ -52,6 +52,9 @@ class WarpStackingCompatibilityMatrix:
                 device=self.device
             )
         
+        # Flag to track if matrix has been precomputed
+        self.precomputed = False
+        
         # Track performance
         self.lookup_times = []
         
@@ -72,32 +75,37 @@ class WarpStackingCompatibilityMatrix:
     
     def precompute_compatibility(self) -> None:
         """Precompute compatibility for all containers."""
+        if self.precomputed:
+            print("Compatibility matrix already precomputed, skipping.")
+            return
+            
         start_time = time.time()
         
-        if self.use_bit_packing:
-            # Use bit-packed kernel
-            wp.launch(
-                kernel=self._kernel_compute_compatibility_matrix_packed,
-                dim=[self.max_containers, self.max_containers],
-                inputs=[
-                    self.terminal_state.container_properties,
-                    self.terminal_state.container_dimensions,
-                    self.compatibility_matrix
-                ]
-            )
-        else:
-            # Use standard kernel
-            wp.launch(
-                kernel=self._kernel_compute_compatibility_matrix,
-                dim=[self.max_containers, self.max_containers],
-                inputs=[
-                    self.terminal_state.container_properties,
-                    self.terminal_state.container_dimensions,
-                    self.compatibility_matrix
-                ]
-            )
+        # if self.use_bit_packing:
+        #     # Use bit-packed kernel
+        #     wp.launch(
+        #         kernel=self._kernel_compute_compatibility_matrix_packed,
+        #         dim=[self.max_containers, self.max_containers],
+        #         inputs=[
+        #             self.terminal_state.container_properties,
+        #             self.terminal_state.container_dimensions,
+        #             self.compatibility_matrix
+        #         ]
+        #     )
+        # else:
+        # Use standard kernel
+        wp.launch(
+            kernel=self._kernel_compute_compatibility_matrix,
+            dim=[self.max_containers, self.max_containers],
+            inputs=[
+                self.terminal_state.container_properties,
+                self.terminal_state.container_dimensions,
+                self.compatibility_matrix
+            ]
+        )
         
         end_time = time.time()
+        self.precomputed = True
         print(f"Compatibility matrix computation completed in {end_time - start_time:.2f} seconds")
     
     @wp.kernel
@@ -166,73 +174,73 @@ class WarpStackingCompatibilityMatrix:
         if can_stack:
             compatibility_matrix[j, i] = 1
     
-    @wp.kernel
-    def _kernel_compute_compatibility_matrix_packed(
-        container_properties: wp.array(dtype=wp.float32, ndim=2),
-        container_dimensions: wp.array(dtype=wp.float32, ndim=2),
-        compatibility_matrix: wp.array(dtype=wp.int32, ndim=2)) -> None:
-        """
-        Kernel to compute compatibility with bit packing for memory efficiency.
+    # @wp.kernel
+    # def _kernel_compute_compatibility_matrix_packed(
+    #     container_properties: wp.array(dtype=wp.float32, ndim=2),
+    #     container_dimensions: wp.array(dtype=wp.float32, ndim=2),
+    #     compatibility_matrix: wp.array(dtype=wp.int32, ndim=2)) -> None:
+    #     """
+    #     Kernel to compute compatibility with bit packing for memory efficiency.
         
-        Args:
-            container_properties: Container properties array
-            container_dimensions: Container dimensions array
-            compatibility_matrix: Output packed matrix for compatibility results
-        """
-        # Get container indices
-        i, j = wp.tid()
+    #     Args:
+    #         container_properties: Container properties array
+    #         container_dimensions: Container dimensions array
+    #         compatibility_matrix: Output packed matrix for compatibility results
+    #     """
+    #     # Get container indices
+    #     i, j = wp.tid()
         
-        # Only compute for active containers and valid stacking (j on top of i)
-        if (container_properties[i, 6] <= 0 or  # i inactive
-            container_properties[j, 6] <= 0 or  # j inactive
-            i == j):  # Same container
-            return
+    #     # Only compute for active containers and valid stacking (j on top of i)
+    #     if (container_properties[i, 6] <= 0 or  # i inactive
+    #         container_properties[j, 6] <= 0 or  # j inactive
+    #         i == j):  # Same container
+    #         return
         
-        # Calculate bit position
-        bit_index = i % 32
-        word_index = i // 32
+    #     # Calculate bit position
+    #     bit_index = i % 32
+    #     word_index = i // 32
         
-        # Get container properties
-        i_type = int(container_properties[i, 0])
-        i_goods = int(container_properties[i, 1])
-        i_weight = container_properties[i, 3]
-        i_stackable = bool(container_properties[i, 4])
-        i_compatibility = int(container_properties[i, 5])
+    #     # Get container properties
+    #     i_type = int(container_properties[i, 0])
+    #     i_goods = int(container_properties[i, 1])
+    #     i_weight = container_properties[i, 3]
+    #     i_stackable = bool(container_properties[i, 4])
+    #     i_compatibility = int(container_properties[i, 5])
         
-        j_type = int(container_properties[j, 0])
-        j_goods = int(container_properties[j, 1])
-        j_weight = container_properties[j, 3]
-        j_compatibility = int(container_properties[j, 5])
+    #     j_type = int(container_properties[j, 0])
+    #     j_goods = int(container_properties[j, 1])
+    #     j_weight = container_properties[j, 3]
+    #     j_compatibility = int(container_properties[j, 5])
         
-        # Can't stack on non-stackable container
-        if not i_stackable:
-            return
+    #     # Can't stack on non-stackable container
+    #     if not i_stackable:
+    #         return
         
-        # Check compatibility
-        can_stack = True
+    #     # Check compatibility
+    #     can_stack = True
         
-        # None compatibility - can't stack
-        if i_compatibility == 0 or j_compatibility == 0:
-            can_stack = False
+    #     # None compatibility - can't stack
+    #     if i_compatibility == 0 or j_compatibility == 0:
+    #         can_stack = False
         
-        # Self compatibility - must be same type and goods
-        elif i_compatibility == 1 or j_compatibility == 1:
-            if i_type != j_type or i_goods != j_goods:
-                can_stack = False
+    #     # Self compatibility - must be same type and goods
+    #     elif i_compatibility == 1 or j_compatibility == 1:
+    #         if i_type != j_type or i_goods != j_goods:
+    #             can_stack = False
         
-        # Size compatibility - must be same size
-        elif i_compatibility == 2 or j_compatibility == 2:
-            if i_type != j_type:
-                can_stack = False
+    #     # Size compatibility - must be same size
+    #     elif i_compatibility == 2 or j_compatibility == 2:
+    #         if i_type != j_type:
+    #             can_stack = False
         
-        # Weight constraint - container above should be lighter
-        if j_weight > i_weight:
-            can_stack = False
+    #     # Weight constraint - container above should be lighter
+    #     if j_weight > i_weight:
+    #         can_stack = False
         
-        # Update compatibility matrix using atomic operations
-        if can_stack:
-            bit_mask = 1 << bit_index
-            wp.atomic_or(compatibility_matrix, (j, word_index), bit_mask)
+    #     # Update compatibility matrix using atomic operations
+    #     if can_stack:
+    #         bit_mask = 1 << bit_index
+    #         wp.atomic_or(compatibility_matrix, (j, word_index), bit_mask)
     
     @wp.kernel
     def _kernel_get_compatibility(
@@ -257,7 +265,12 @@ class WarpStackingCompatibilityMatrix:
             word_index = lower_container_idx // 32
             word = compatibility_matrix[upper_container_idx, word_index]
             bit_mask = 1 << bit_index
-            result[0] = 1 if (word & bit_mask) != 0 else 0
+            if (word & bit_mask) != 0:
+                # Container is compatible
+                result[0] = 1
+            else:
+                # Container is not compatible
+                result[0] = 0
         else:
             # Get from standard matrix
             result[0] = compatibility_matrix[upper_container_idx, lower_container_idx]
@@ -283,6 +296,10 @@ class WarpStackingCompatibilityMatrix:
             
         if lower_container_idx < 0 or lower_container_idx >= self.max_containers:
             return False
+        
+        # Ensure compatibility has been precomputed
+        if not self.precomputed:
+            self.precompute_compatibility()
             
         # Create result array
         result = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -304,4 +321,52 @@ class WarpStackingCompatibilityMatrix:
         can_stack = bool(result.numpy()[0])
         
         # Track lookup time
-        self.lookup_times.ap
+        self.lookup_times.append(time.time() - start_time)
+        
+        return can_stack
+    
+    def load_matrix(self, matrix_data: np.ndarray) -> bool:
+        """
+        Load compatibility matrix from NumPy array.
+        
+        Args:
+            matrix_data: NumPy array containing compatibility matrix
+            
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        try:
+            # Check shape compatibility
+            if self.use_bit_packing:
+                packed_width = (self.max_containers + 31) // 32
+                expected_shape = (self.max_containers, packed_width)
+            else:
+                expected_shape = (self.max_containers, self.max_containers)
+                
+            if matrix_data.shape != expected_shape:
+                print(f"Error loading matrix: Shape mismatch. Expected {expected_shape}, got {matrix_data.shape}")
+                return False
+                
+            # Create Warp array from NumPy data
+            self.compatibility_matrix = wp.array(matrix_data, dtype=wp.int32, device=self.device)
+            self.precomputed = True
+            return True
+        except Exception as e:
+            print(f"Error loading compatibility matrix: {e}")
+            return False
+    
+    def print_performance_stats(self) -> None:
+        """Print performance statistics for stacking compatibility lookups."""
+        print("\nStacking Compatibility Matrix Performance:")
+        
+        # Memory usage
+        memory_usage = self._estimate_memory_usage()
+        print(f"  Memory usage: {memory_usage:.2f} MB")
+        
+        # Lookup performance
+        if self.lookup_times:
+            avg_lookup = sum(self.lookup_times) / len(self.lookup_times) * 1000  # Convert to ms
+            min_lookup = min(self.lookup_times) * 1000
+            max_lookup = max(self.lookup_times) * 1000
+            print(f"  Lookup time: {avg_lookup:.4f}ms average (range: {min_lookup:.4f}ms - {max_lookup:.4f}ms)")
+            print(f"  Total lookups: {len(self.lookup_times)}")

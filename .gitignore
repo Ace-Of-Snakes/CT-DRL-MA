@@ -188,5 +188,9 @@ time_matrix.pkl
 # Models
 checkpoints/
 checklist
+
 # Results of different runs
 results/
+
+# generated action files
+precomputed/
