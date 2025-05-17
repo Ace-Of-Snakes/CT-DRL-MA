@@ -851,6 +851,17 @@ class WarpTerminalAgent(nn.Module):
         
         return needs_premarshalling
     
+    @wp.kernel
+    def _kernel_get_container_property(container_properties: wp.array(dtype=wp.float32, ndim=2),
+                                    container_idx: wp.int32,
+                                    property_idx: wp.int32,
+                                    result: wp.array(dtype=wp.float32, ndim=1)):
+        """Get a specific property of a container."""
+        if container_idx >= 0:
+            result[0] = container_properties[container_idx, property_idx]
+        else:
+            result[0] = -1.0
+
     def _estimate_move_improvement(self, env, source_position, dest_position):
         """
         Estimate how much a pre-marshalling move will improve yard state.
@@ -869,12 +880,14 @@ class WarpTerminalAgent(nn.Module):
             
         yard = env.storage_yard
         
+        # Setup result array for property extraction
+        property_result = wp.zeros(1, dtype=wp.float32, device=self.device)
+        
         # Get containers at source and destination
         try:
             source_containers = yard.get_containers_at_position(source_position)
             dest_containers = yard.get_containers_at_position(dest_position)
         except Exception as e:
-            print(f"Error getting containers: {e}")
             return 0.0
         
         # Defensively handle different return types
@@ -910,17 +923,45 @@ class WarpTerminalAgent(nn.Module):
             
             # Compare priorities if possible
             try:
-                top_priority = getattr(top_container, 'priority', 0)
-                if isinstance(top_container, (int, np.integer)):
+                # Get top container priority
+                top_priority = 0
+                if hasattr(top_container, 'priority'):
+                    top_priority = top_container.priority
+                elif isinstance(top_container, (int, np.integer)):
                     # It's a container index - get priority from registry
                     if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
-                        top_priority = env.terminal_state.container_properties[top_container, 2].numpy()
+                        # Use kernel to safely get the priority
+                        wp.launch(
+                            kernel=self._kernel_get_container_property,
+                            dim=1,
+                            inputs=[
+                                env.terminal_state.container_properties,
+                                top_container,
+                                2,  # Priority index
+                                property_result
+                            ]
+                        )
+                        top_priority = property_result.numpy()[0]
                 
-                bottom_priority = getattr(bottom_container, 'priority', 0)
-                if isinstance(bottom_container, (int, np.integer)):
+                # Get bottom container priority
+                bottom_priority = 0
+                if hasattr(bottom_container, 'priority'):
+                    bottom_priority = bottom_container.priority
+                elif isinstance(bottom_container, (int, np.integer)):
                     # It's a container index - get priority from registry
                     if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
-                        bottom_priority = env.terminal_state.container_properties[bottom_container, 2].numpy()
+                        # Use kernel to safely get the priority
+                        wp.launch(
+                            kernel=self._kernel_get_container_property,
+                            dim=1,
+                            inputs=[
+                                env.terminal_state.container_properties,
+                                bottom_container,
+                                2,  # Priority index
+                                property_result
+                            ]
+                        )
+                        bottom_priority = property_result.numpy()[0]
                 
                 # Better to have lower priority containers below higher priority ones
                 if top_priority >= bottom_priority:
@@ -928,35 +969,59 @@ class WarpTerminalAgent(nn.Module):
                 else:
                     improvement -= 2.0
             except Exception as e:
-                # Failed to compare priorities
-                print(f"Error comparing priorities: {e}")
+                # Failed to compare priorities, just continue
+                pass
         
         # Check if freeing up a problematic stack at source
         if isinstance(source_containers, dict) and len(source_containers) > 1:
             try:
                 # Get container below the top one
-                source_below_tier = max([t for t in source_containers.keys() if t < source_tier])
-                below_container = source_containers[source_below_tier]
-                
-                # Compare priorities if possible
-                top_priority = getattr(top_container, 'priority', 0)
-                if isinstance(top_container, (int, np.integer)):
-                    # It's a container index - get priority from registry
-                    if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
-                        top_priority = env.terminal_state.container_properties[top_container, 2].numpy()
-                
-                below_priority = getattr(below_container, 'priority', 0)
-                if isinstance(below_container, (int, np.integer)):
-                    # It's a container index - get priority from registry
-                    if hasattr(env, 'terminal_state') and hasattr(env.terminal_state, 'container_properties'):
-                        below_priority = env.terminal_state.container_properties[below_container, 2].numpy()
-                
-                # If removing top improves priority order
-                if top_priority < below_priority:
-                    improvement += 3.0
+                source_tiers = sorted(source_containers.keys())
+                if len(source_tiers) > 1:
+                    source_below_tier = source_tiers[-2]  # Second from top
+                    below_container = source_containers[source_below_tier]
+                    
+                    # Compare priorities if possible
+                    top_priority = 0
+                    if hasattr(top_container, 'priority'):
+                        top_priority = top_container.priority
+                    elif isinstance(top_container, (int, np.integer)):
+                        # Use kernel to safely get the priority
+                        wp.launch(
+                            kernel=self._kernel_get_container_property,
+                            dim=1,
+                            inputs=[
+                                env.terminal_state.container_properties,
+                                top_container,
+                                2,  # Priority index
+                                property_result
+                            ]
+                        )
+                        top_priority = property_result.numpy()[0]
+                    
+                    below_priority = 0
+                    if hasattr(below_container, 'priority'):
+                        below_priority = below_container.priority
+                    elif isinstance(below_container, (int, np.integer)):
+                        # Use kernel to safely get the priority
+                        wp.launch(
+                            kernel=self._kernel_get_container_property,
+                            dim=1,
+                            inputs=[
+                                env.terminal_state.container_properties,
+                                below_container,
+                                2,  # Priority index
+                                property_result
+                            ]
+                        )
+                        below_priority = property_result.numpy()[0]
+                    
+                    # If removing top improves priority order
+                    if top_priority < below_priority:
+                        improvement += 3.0
             except Exception as e:
-                # Failed to compare below container
-                print(f"Error checking stack: {e}")
+                # Failed to check stack, just continue
+                pass
         
         return improvement
     
