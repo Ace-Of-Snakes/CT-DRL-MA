@@ -402,7 +402,7 @@ class BitmapStorageYard:
     
     def get_proximity_mask(self, position: str, n: int, container=None) -> torch.Tensor:
         """
-        Get a bit mask for positions within n bays using efficient bit operations.
+        Get a bit mask for positions within n bays using vectorized tensor operations.
         
         Args:
             position: Position string (e.g., 'A1')
@@ -427,69 +427,66 @@ class BitmapStorageYard:
             if cache_key in self.proximity_masks:
                 return self.proximity_masks[cache_key]
             
-            # Create proximity mask using bit operations
+            # Create a base tensor of zeros
             proximity_mask = torch.zeros(self.total_bits // 64, dtype=torch.int64, device=self.device)
             
             # Calculate bay range
             min_bay = max(0, orig_bay_idx - n)
-            max_bay = min(self.num_bays - 1, orig_bay_idx + n)
+            max_bay = min(self.bits_per_row - 1, orig_bay_idx + n)
             
-            # For each row, create a bay mask (bits set for bays min_bay to max_bay)
+            # Create a mask for the valid bay range (a single row)
+            bay_range_mask = torch.zeros(self.bits_per_row, dtype=torch.bool, device=self.device)
+            bay_range_mask[min_bay:max_bay+1] = True
+            
+            # Expand to all rows by creating a 2D mask
+            full_mask = bay_range_mask.repeat(self.num_rows, 1)
+            
+            # Convert this 2D logical mask to our 1D bitmap format
             for row_idx in range(self.num_rows):
-                # Calculate bit range for this row
-                start_bit = row_idx * self.bits_per_row + min_bay
-                end_bit = row_idx * self.bits_per_row + max_bay
-                
-                # Set bits in range (optimized bit mask creation)
-                for bit in range(start_bit, end_bit + 1):
-                    word_idx = bit // 64
-                    bit_offset = bit % 64
-                    proximity_mask[word_idx] |= (1 << bit_offset)
+                row_start_bit = row_idx * self.bits_per_row
+                for bay_idx in range(self.bits_per_row):
+                    if bay_idx < self.num_bays and full_mask[row_idx, bay_idx]:
+                        bit_pos = row_start_bit + bay_idx
+                        word_idx = bit_pos // 64
+                        bit_offset = bit_pos % 64
+                        proximity_mask[word_idx] |= (1 << bit_offset)
             
-            # Clear the original position's bit
+            # Clear the original position
             orig_word_idx = bit_idx // 64
             orig_bit_offset = bit_idx % 64
             proximity_mask[orig_word_idx] &= ~(1 << orig_bit_offset)
             
-            # APPLY CONTAINER TYPE CONSTRAINTS USING BIT OPERATIONS
+            # Apply container type filtering
             if container is not None:
                 container_type = getattr(container, 'container_type', None)
                 goods_type = getattr(container, 'goods_type', 'Regular')
                 
-                # Create appropriate constraint mask
                 if container_type == "Trailer":
-                    # For trailers, only trailer areas
-                    constraint_mask = self.special_area_bitmaps['trailer']
+                    # Trailers can only go in trailer areas
+                    proximity_mask &= self.special_area_bitmaps['trailer']
                 elif container_type == "Swap Body":
-                    # For swap bodies, only swap body areas
-                    constraint_mask = self.special_area_bitmaps['swap_body']
+                    # Swap bodies can only go in swap body areas
+                    proximity_mask &= self.special_area_bitmaps['swap_body']
                 elif goods_type == "Reefer":
-                    # For reefer, only reefer areas
-                    constraint_mask = self.special_area_bitmaps['reefer']
+                    # Reefer containers need reefer areas
+                    proximity_mask &= self.special_area_bitmaps['reefer']
                 elif goods_type == "Dangerous":
-                    # For dangerous goods, only dangerous areas
-                    constraint_mask = self.special_area_bitmaps['dangerous']
+                    # Dangerous goods need dangerous areas
+                    proximity_mask &= self.special_area_bitmaps['dangerous']
                 else:
-                    # For regular containers, exclude all special areas
-                    # Start with all bits set
-                    constraint_mask = torch.ones_like(proximity_mask)
-                    
-                    # Clear bits for special areas using bitwise operations
-                    special_areas_mask = torch.zeros_like(proximity_mask)
+                    # Regular containers - invert the special area masks
+                    special_areas = torch.zeros_like(proximity_mask)
                     for area_type in ['reefer', 'dangerous', 'trailer', 'swap_body']:
-                        special_areas_mask |= self.special_area_bitmaps[area_type]
+                        special_areas |= self.special_area_bitmaps[area_type]
                     
-                    # Get regular areas by inverting special areas
-                    constraint_mask &= ~special_areas_mask
-                
-                # Apply constraint using bitwise AND
-                proximity_mask &= constraint_mask
+                    # Create a mask of non-special areas and apply it
+                    non_special_mask = ~special_areas
+                    proximity_mask &= non_special_mask
             
             # Cache the result
             self.proximity_masks[cache_key] = proximity_mask
             
             return proximity_mask
-            
         except ValueError:
             return torch.zeros(self.total_bits // 64, dtype=torch.int64, device=self.device)
     
@@ -637,7 +634,7 @@ class BitmapStorageYard:
     
     def visualize_bitmap(self, bitmap, title="Bitmap Visualization"):
         """
-        Visualize a bitmap as a 2D grid.
+        Visualize a bitmap as a 2D grid using vectorized operations.
         
         Args:
             bitmap: The bitmap to visualize
@@ -645,32 +642,26 @@ class BitmapStorageYard:
         """
         import matplotlib.pyplot as plt
         
-        # Create a 2D array
-        grid = torch.zeros((self.num_rows, self.num_bays), dtype=torch.int8)
+        # Create a 2D tensor representation
+        grid = torch.zeros((self.num_rows, self.num_bays), dtype=torch.float32, device=self.device)
         
-        # Fill grid from bitmap
-        for word_idx in range(len(bitmap)):
-            word = bitmap[word_idx].item()
-            if word == 0:
-                continue
-            
-            # Process each bit in the word
-            for bit_offset in range(64):
-                if (word >> bit_offset) & 1:
-                    bit_idx = word_idx * 64 + bit_offset
-                    
-                    # Calculate row and bay
-                    row_idx = bit_idx // self.bits_per_row
-                    bay_idx = bit_idx % self.bits_per_row
-                    
-                    # Skip if outside actual yard dimensions
-                    if row_idx >= self.num_rows or bay_idx >= self.num_bays:
-                        continue
-                    
-                    # Set the corresponding grid element
-                    grid[row_idx, bay_idx] = 1
+        # Convert bitmap to 2D grid using vectorized operations
+        bitmap_expanded = bitmap.view(-1, 1)  # Shape (n_words, 1)
+        bits_expanded = torch.arange(64, device=self.device).repeat(len(bitmap), 1)  # Shape (n_words, 64)
         
-        # Visualize the grid
+        # Generate all bit values
+        bit_values = (bitmap_expanded & (1 << bits_expanded)) != 0  # Shape (n_words, 64)
+        
+        # Flatten to 1D array of bits
+        all_bits = bit_values.view(-1)[:self.total_bits]  # Ensure we don't exceed total bits
+        
+        # Reshape to match our grid layout
+        reshaped_bits = all_bits.view(self.num_rows, self.bits_per_row)
+        
+        # Extract only the valid bays
+        grid = reshaped_bits[:, :self.num_bays].float()
+        
+        # Visualize using matplotlib
         plt.figure(figsize=(12, 6))
         plt.imshow(grid.cpu().numpy(), cmap='Blues', interpolation='none')
         plt.title(title)
