@@ -402,7 +402,10 @@ class BitmapStorageYard:
     
     def get_proximity_mask(self, position: str, n: int, container=None) -> torch.Tensor:
         """
-        Optimized proximity mask calculation using vectorized operations.
+        Create a proximity mask as a rectangular box that includes all rows
+        for bays within range n of the original bay.
+        
+        Uses tensor operations for efficiency.
         """
         try:
             # Get bit index and position details
@@ -413,57 +416,53 @@ class BitmapStorageYard:
             # Use cache for repeated calculations
             cache_key = (bit_idx, n)
             if container:
-                cache_key = (bit_idx, n, getattr(container, 'container_type', ''), 
-                            getattr(container, 'goods_type', ''))
+                container_type = getattr(container, 'container_type', 'default')
+                goods_type = getattr(container, 'goods_type', 'Regular')
+                cache_key = (bit_idx, n, container_type, goods_type)
                 
             if cache_key in self.proximity_masks:
                 return self.proximity_masks[cache_key]
             
-            # PRE-COMPUTE BAY RANGE BITMASKS
-            # This is a major optimization - we create a dictionary of pre-computed bay range masks
-            if not hasattr(self, 'bay_range_masks'):
-                self.bay_range_masks = {}
-                
-            # Create or retrieve bay range mask
-            bay_range_key = (orig_bay_idx, n, self.bits_per_row)
-            if bay_range_key not in self.bay_range_masks:
-                # Calculate bay range
-                min_bay = max(0, orig_bay_idx - n)
-                max_bay = min(self.bits_per_row - 1, orig_bay_idx + n)
-                
-                # Create mask for this bay range
-                bay_mask = torch.zeros(self.bits_per_row // 64 + 1, dtype=torch.int64, device=self.device)
-                for b in range(min_bay, max_bay + 1):
-                    if b != orig_bay_idx:  # Exclude original position
-                        word_idx = b // 64
-                        bit_offset = b % 64
-                        bay_mask[word_idx] |= (1 << bit_offset)
-                
-                self.bay_range_masks[bay_range_key] = bay_mask
-                
-            bay_mask = self.bay_range_masks[bay_range_key]
-            
-            # FAST BIT MANIPULATION FOR PROXIMITY
-            # Create proximity mask by replicating bay mask for each row
+            # Create an empty proximity mask
             proximity_mask = torch.zeros(self.total_bits // 64, dtype=torch.int64, device=self.device)
             
-            # Apply the bay mask to each row (vectorized)
-            row_offsets = torch.arange(self.num_rows, device=self.device) * (self.bits_per_row // 64)
-            for row_idx in range(self.num_rows):
-                # Calculate bit offset for this row
-                bit_offset = row_idx * self.bits_per_row
-                word_offset = bit_offset // 64
-                
-                # Copy bay mask to appropriate position in proximity mask
-                for i in range(len(bay_mask)):
-                    if word_offset + i < len(proximity_mask):
-                        proximity_mask[word_offset + i] |= bay_mask[i]
+            # TENSOR-BASED APPROACH
+            # 1. Create a 2D tensor of the yard (rows x bays)
+            yard_tensor = torch.zeros((self.num_rows, self.num_bays), dtype=torch.bool, device=self.device)
             
-            # Apply container type filtering (vectorized operations)
-            if container is not None:
-                container_type = getattr(container, 'container_type', None)
-                goods_type = getattr(container, 'goods_type', 'Regular')
+            # 2. Calculate bay range
+            min_bay = max(0, orig_bay_idx - n)
+            max_bay = min(self.num_bays - 1, orig_bay_idx + n)
+            
+            # 3. Set rectangular region to True (all rows, bays within range)
+            yard_tensor[:, min_bay:max_bay+1] = True
+            
+            # 4. Set original position to False (exclude it)
+            if 0 <= orig_row_idx < self.num_rows and 0 <= orig_bay_idx < self.num_bays:
+                yard_tensor[orig_row_idx, orig_bay_idx] = False
+            
+            # 5. Convert to bit indices
+            rows, bays = torch.where(yard_tensor)
+            bit_indices = rows * self.bits_per_row + bays
+            
+            # 6. Convert to word indices and bit positions
+            word_indices = bit_indices // 64
+            bit_positions = bit_indices % 64
+            
+            # 7. Set bits in proximity mask
+            # Group by word idx for efficiency
+            unique_words = torch.unique(word_indices)
+            for word_idx in unique_words:
+                word_idx_int = word_idx.item()
+                bits_in_word = bit_positions[word_indices == word_idx]
                 
+                # Set bits for this word
+                for bit in bits_in_word:
+                    proximity_mask[word_idx_int] |= (1 << bit.item())
+            
+            # 8. Apply container type filtering
+            if container:
+                # Apply appropriate filtering based on container type/goods
                 if container_type == "Trailer":
                     proximity_mask &= self.special_area_bitmaps['trailer']
                 elif container_type == "Swap Body":
@@ -473,20 +472,19 @@ class BitmapStorageYard:
                 elif goods_type == "Dangerous":
                     proximity_mask &= self.special_area_bitmaps['dangerous']
                 else:
-                    # Regular containers - create a mask of all non-special areas
-                    # This is pre-computed for efficiency
+                    # Regular containers - use non-special areas
                     if not hasattr(self, 'non_special_mask'):
-                        special_areas = torch.zeros_like(proximity_mask)
-                        for area_type in ['reefer', 'dangerous', 'trailer', 'swap_body']:
-                            special_areas |= self.special_area_bitmaps[area_type]
-                        self.non_special_mask = ~special_areas
+                        special_mask = torch.zeros_like(proximity_mask)
+                        for area in ['reefer', 'dangerous', 'trailer', 'swap_body']:
+                            special_mask |= self.special_area_bitmaps[area]
+                        self.non_special_mask = ~special_mask
                     
                     proximity_mask &= self.non_special_mask
             
-            # Cache the result
+            # Cache result
             self.proximity_masks[cache_key] = proximity_mask
-            
             return proximity_mask
+            
         except ValueError:
             return torch.zeros(self.total_bits // 64, dtype=torch.int64, device=self.device)
     
