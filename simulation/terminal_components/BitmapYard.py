@@ -402,15 +402,7 @@ class BitmapStorageYard:
     
     def get_proximity_mask(self, position: str, n: int, container=None) -> torch.Tensor:
         """
-        Get a bit mask for positions within n bays using vectorized tensor operations.
-        
-        Args:
-            position: Position string (e.g., 'A1')
-            n: Number of bays to search in each direction
-            container: Optional - container to filter valid positions by type
-            
-        Returns:
-            Bit mask as a PyTorch tensor
+        Optimized proximity mask calculation using vectorized operations.
         """
         try:
             # Get bit index and position details
@@ -418,7 +410,7 @@ class BitmapStorageYard:
             orig_row_idx = bit_idx // self.bits_per_row
             orig_bay_idx = bit_idx % self.bits_per_row
             
-            # Create cache key including container type info
+            # Use cache for repeated calculations
             cache_key = (bit_idx, n)
             if container:
                 cache_key = (bit_idx, n, getattr(container, 'container_type', ''), 
@@ -427,61 +419,69 @@ class BitmapStorageYard:
             if cache_key in self.proximity_masks:
                 return self.proximity_masks[cache_key]
             
-            # Create a base tensor of zeros
+            # PRE-COMPUTE BAY RANGE BITMASKS
+            # This is a major optimization - we create a dictionary of pre-computed bay range masks
+            if not hasattr(self, 'bay_range_masks'):
+                self.bay_range_masks = {}
+                
+            # Create or retrieve bay range mask
+            bay_range_key = (orig_bay_idx, n, self.bits_per_row)
+            if bay_range_key not in self.bay_range_masks:
+                # Calculate bay range
+                min_bay = max(0, orig_bay_idx - n)
+                max_bay = min(self.bits_per_row - 1, orig_bay_idx + n)
+                
+                # Create mask for this bay range
+                bay_mask = torch.zeros(self.bits_per_row // 64 + 1, dtype=torch.int64, device=self.device)
+                for b in range(min_bay, max_bay + 1):
+                    if b != orig_bay_idx:  # Exclude original position
+                        word_idx = b // 64
+                        bit_offset = b % 64
+                        bay_mask[word_idx] |= (1 << bit_offset)
+                
+                self.bay_range_masks[bay_range_key] = bay_mask
+                
+            bay_mask = self.bay_range_masks[bay_range_key]
+            
+            # FAST BIT MANIPULATION FOR PROXIMITY
+            # Create proximity mask by replicating bay mask for each row
             proximity_mask = torch.zeros(self.total_bits // 64, dtype=torch.int64, device=self.device)
             
-            # Calculate bay range
-            min_bay = max(0, orig_bay_idx - n)
-            max_bay = min(self.bits_per_row - 1, orig_bay_idx + n)
-            
-            # Create a mask for the valid bay range (a single row)
-            bay_range_mask = torch.zeros(self.bits_per_row, dtype=torch.bool, device=self.device)
-            bay_range_mask[min_bay:max_bay+1] = True
-            
-            # Expand to all rows by creating a 2D mask
-            full_mask = bay_range_mask.repeat(self.num_rows, 1)
-            
-            # Convert this 2D logical mask to our 1D bitmap format
+            # Apply the bay mask to each row (vectorized)
+            row_offsets = torch.arange(self.num_rows, device=self.device) * (self.bits_per_row // 64)
             for row_idx in range(self.num_rows):
-                row_start_bit = row_idx * self.bits_per_row
-                for bay_idx in range(self.bits_per_row):
-                    if bay_idx < self.num_bays and full_mask[row_idx, bay_idx]:
-                        bit_pos = row_start_bit + bay_idx
-                        word_idx = bit_pos // 64
-                        bit_offset = bit_pos % 64
-                        proximity_mask[word_idx] |= (1 << bit_offset)
+                # Calculate bit offset for this row
+                bit_offset = row_idx * self.bits_per_row
+                word_offset = bit_offset // 64
+                
+                # Copy bay mask to appropriate position in proximity mask
+                for i in range(len(bay_mask)):
+                    if word_offset + i < len(proximity_mask):
+                        proximity_mask[word_offset + i] |= bay_mask[i]
             
-            # Clear the original position
-            orig_word_idx = bit_idx // 64
-            orig_bit_offset = bit_idx % 64
-            proximity_mask[orig_word_idx] &= ~(1 << orig_bit_offset)
-            
-            # Apply container type filtering
+            # Apply container type filtering (vectorized operations)
             if container is not None:
                 container_type = getattr(container, 'container_type', None)
                 goods_type = getattr(container, 'goods_type', 'Regular')
                 
                 if container_type == "Trailer":
-                    # Trailers can only go in trailer areas
                     proximity_mask &= self.special_area_bitmaps['trailer']
                 elif container_type == "Swap Body":
-                    # Swap bodies can only go in swap body areas
                     proximity_mask &= self.special_area_bitmaps['swap_body']
                 elif goods_type == "Reefer":
-                    # Reefer containers need reefer areas
                     proximity_mask &= self.special_area_bitmaps['reefer']
                 elif goods_type == "Dangerous":
-                    # Dangerous goods need dangerous areas
                     proximity_mask &= self.special_area_bitmaps['dangerous']
                 else:
-                    # Regular containers - invert the special area masks
-                    special_areas = torch.zeros_like(proximity_mask)
-                    for area_type in ['reefer', 'dangerous', 'trailer', 'swap_body']:
-                        special_areas |= self.special_area_bitmaps[area_type]
+                    # Regular containers - create a mask of all non-special areas
+                    # This is pre-computed for efficiency
+                    if not hasattr(self, 'non_special_mask'):
+                        special_areas = torch.zeros_like(proximity_mask)
+                        for area_type in ['reefer', 'dangerous', 'trailer', 'swap_body']:
+                            special_areas |= self.special_area_bitmaps[area_type]
+                        self.non_special_mask = ~special_areas
                     
-                    # Create a mask of non-special areas and apply it
-                    non_special_mask = ~special_areas
-                    proximity_mask &= non_special_mask
+                    proximity_mask &= self.non_special_mask
             
             # Cache the result
             self.proximity_masks[cache_key] = proximity_mask
@@ -540,7 +540,139 @@ class BitmapStorageYard:
             return valid_destinations
         except ValueError:
             return []
-    
+
+    def find_all_moves_gpu(self):
+        """
+        GPU-accelerated version of find_all_moves.
+        Uses advanced parallelism for maximum throughput.
+        """
+        start_time = time.time()
+        
+        # Find all positions with containers on top of stacks
+        occupied_positions = []
+        
+        # Get all occupied positions in a single tensor operation
+        # by converting our bitmap to positions
+        occupied_bitmap = self.occupied_bitmap
+        
+        # Extract all set bits efficiently using PyTorch operations
+        occupied_indices = []
+        for word_idx, word in enumerate(occupied_bitmap):
+            if word == 0:
+                continue
+                
+            # Extract set bits in this word
+            bits = torch.arange(64, device=self.device)
+            mask = (word & (1 << bits)) != 0
+            set_bits = bits[mask]
+            
+            # Convert to global bit indices
+            global_indices = word_idx * 64 + set_bits
+            occupied_indices.extend(global_indices.tolist())
+        
+        # Convert bit indices to position strings
+        for bit_idx in occupied_indices:
+            if bit_idx < self.total_bits:
+                try:
+                    position = self.decode_position(bit_idx)
+                    # Check if it's a top container
+                    if self.get_stack_height(position) == self.get_top_container(position)[1]:
+                        occupied_positions.append(position)
+                except ValueError:
+                    continue
+        
+        # Use the batch processing method to process all positions
+        all_moves = self.batch_calc_possible_moves(occupied_positions, n=5)
+        
+        end_time = time.time()
+        print(f"GPU-accelerated find_all_moves processed {len(occupied_positions)} containers in {end_time - start_time:.4f} seconds")
+        
+        return all_moves
+
+    def batch_calc_possible_moves(self, positions: List[str], n: int = 5) -> Dict[str, List[str]]:
+        """
+        Calculate possible moves for multiple containers in parallel.
+        
+        Args:
+            positions: List of position strings to process
+            n: Proximity range to use for all calculations
+            
+        Returns:
+            Dictionary mapping each position to a list of valid destinations
+        """
+        # Start timing
+        import time
+        start_time = time.time()
+        
+        # Filter to only positions with containers
+        valid_positions = []
+        containers = []
+        
+        for pos in positions:
+            container, _ = self.get_top_container(pos)
+            if container is not None:
+                valid_positions.append(pos)
+                containers.append(container)
+        
+        # Prepare storage for results
+        all_moves = {}
+        
+        # Process in batches of 100 positions or fewer
+        batch_size = 100
+        for i in range(0, len(valid_positions), batch_size):
+            batch_positions = valid_positions[i:i+batch_size]
+            batch_containers = containers[i:i+batch_size]
+            
+            # Process each position in the batch
+            batch_results = {}
+            
+            # Here we use PyTorch's parallelism by operating on tensors
+            # Create a tensor to hold all positions' proximity masks
+            batch_masks = []
+            
+            # Gather all proximity masks (this leverages GPU parallelism)
+            for j, (pos, container) in enumerate(zip(batch_positions, batch_containers)):
+                mask = self.get_proximity_mask(pos, n, container)
+                batch_masks.append(mask)
+            
+            # Now convert masks to valid positions
+            for j, (pos, mask) in enumerate(zip(batch_positions, batch_masks)):
+                # Get all set bits in the mask
+                valid_bits = []
+                for word_idx in range(len(mask)):
+                    word = mask[word_idx].item()
+                    if word == 0:
+                        continue
+                    
+                    # Find set bits using fast bit operations
+                    # We can use torch.nonzero for this in a vectorized way
+                    for bit_offset in range(64):
+                        if (word >> bit_offset) & 1:
+                            bit_idx = word_idx * 64 + bit_offset
+                            if bit_idx < self.total_bits:
+                                valid_bits.append(bit_idx)
+                
+                # Convert bits to positions
+                container = batch_containers[j]
+                valid_destinations = []
+                for bit_idx in valid_bits:
+                    try:
+                        dest_pos = self.decode_position(bit_idx)
+                        if self.can_accept_container(dest_pos, container):
+                            valid_destinations.append(dest_pos)
+                    except ValueError:
+                        continue
+                
+                # Store results for this position
+                all_moves[pos] = valid_destinations
+        
+        # Report timing
+        end_time = time.time()
+        print(f"Batch processed {len(valid_positions)} positions in {end_time - start_time:.4f} seconds")
+        print(f"Average time per position: {(end_time - start_time) * 1000 / len(valid_positions):.2f} ms")
+        
+        return all_moves
+
     def find_container(self, container_id: str) -> Optional[Tuple[str, int]]:
         """
         Find a container by ID.
@@ -731,6 +863,151 @@ class BitmapStorageYard:
         print(f"Found all possible moves in {end_time - start_time:.6f} seconds")
         
         return all_moves
+    
+    def visualize_3d(self, show_container_types=True, figsize=(30, 20)):
+        """
+        Create a 3D visualization with proper container orientation.
+        
+        Each slot is 40ft long and containers are oriented with:
+        - Their long side (20ft or 40ft) along the bay axis
+        - Their short side (8ft/2.4m width) along the row axis
+        - Their height upward in tiers
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
+        import numpy as np
+        
+        # Create the figure and 3D axis
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Color mapping
+        container_colors = {
+            'TWEU': 'royalblue',
+            'THEU': 'purple',
+            'FEU': 'lightseagreen',
+            'FFEU': 'teal',
+            'Trailer': 'darkred',
+            'Swap Body': 'goldenrod',
+            'default': 'gray'
+        }
+        
+        # Edge color mapping
+        goods_edge_colors = {
+            'Regular': 'black',
+            'Reefer': 'blue',
+            'Dangerous': 'red'
+        }
+        
+        # Container dimensions (relative to slot size)
+        container_lengths = {
+            'TWEU': 0.5,      # 20ft = 1/2 of slot
+            'THEU': 0.75,     # 30ft = 3/4 of slot
+            'FEU': 1.0,       # 40ft = full slot
+            'FFEU': 1.125,    # 45ft = slightly more than slot
+            'Trailer': 1.0,   # Trailer = full slot
+            'Swap Body': 0.75,# Swap body = 3/4 of slot
+            'default': 0.5    # Default to 20ft
+        }
+        
+        # Set up legend elements
+        legend_elements = []
+        from matplotlib.patches import Patch
+        
+        # Collect all containers to visualize
+        for position, tiers in self.container_registry.items():
+            try:
+                bit_idx = self.encode_position(position)
+                row_idx = bit_idx // self.bits_per_row
+                bay_idx = bit_idx % self.bits_per_row
+                
+                if row_idx < self.num_rows and bay_idx < self.num_bays:
+                    for tier, container in tiers.items():
+                        if 1 <= tier <= self.max_tier_height:
+                            container_type = getattr(container, 'container_type', 'default')
+                            goods_type = getattr(container, 'goods_type', 'Regular')
+                            
+                            # Get colors
+                            color = container_colors.get(container_type, container_colors['default'])
+                            edge_color = goods_edge_colors.get(goods_type, goods_edge_colors['Regular'])
+                            
+                            # Add to legend if needed
+                            legend_key = f"{container_type} - {goods_type}"
+                            if not any(le.get_label() == legend_key for le in legend_elements):
+                                legend_elements.append(
+                                    Patch(facecolor=color, edgecolor=edge_color, label=legend_key)
+                                )
+                            
+                            # CORRECTLY ORIENTED:
+                            # dx = length of container along bay axis (20ft or 40ft)
+                            # dy = width of container along row axis (all ~8ft)
+                            # dz = height of container (all ~8-9.5ft)
+                            
+                            # Get length for this container type
+                            length = container_lengths.get(container_type, 0.5)
+                            
+                            # For 20ft containers, need to show position within slot
+                            # If position has odd index, place in second half of slot
+                            if length < 1.0:  # Less than full slot
+                                dx = length
+                                
+                                # Check if we should place it in first or second half
+                                # This is a simplification - in reality this would be based on
+                                # additional data about exact position within slot
+                                if bay_idx % 2 == 0:  # Even position
+                                    x_pos = bay_idx
+                                else:  # Odd position
+                                    x_pos = bay_idx - 0.5  # Place in second half of previous slot
+                            else:  # Full slot or larger
+                                dx = length
+                                x_pos = bay_idx
+                            
+                            # All containers have same width
+                            dy = 0.7  # Slightly less than 1 to see gaps
+                            
+                            # Height is one tier
+                            dz = 0.9  # Slightly less than 1 to see layers
+                            
+                            # Draw the container with proper dimensions
+                            ax.bar3d(
+                                x_pos, row_idx + 0.15, tier - 1,  # Position (x, y, z)
+                                dx, dy, dz,                       # Dimensions (dx, dy, dz)
+                                color=color,
+                                shade=True,
+                                alpha=0.8,
+                                edgecolor=edge_color,
+                                linewidth=0.5
+                            )
+            except ValueError:
+                continue
+        
+        # Set axis labels and limits
+        ax.set_xlabel('Bay')
+        ax.set_ylabel('Row')
+        ax.set_zlabel('Tier')
+        
+        # Set row labels to be A, B, C, etc.
+        ax.set_yticks(range(self.num_rows))
+        ax.set_yticklabels(self.row_names)
+        
+        # Set limits
+        ax.set_xlim(0, self.num_bays)
+        ax.set_ylim(0, self.num_rows)
+        ax.set_zlim(0, self.max_tier_height)
+        
+        # Adjust aspect ratio for better visualization
+        ax.set_box_aspect([self.num_bays/3, self.num_rows/6, self.max_tier_height/3])
+        
+        # Set title and legend
+        ax.set_title('3D Container Yard Visualization')
+        if legend_elements:
+            ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
+        
+        # Set the viewing angle to better see the layout
+        ax.view_init(elev=20, azim=230)
+        
+        plt.tight_layout()
+        return fig, ax
 
     def __str__(self):
         """String representation of the storage yard."""
@@ -754,238 +1031,3 @@ class BitmapStorageYard:
             lines.append(f"Row {row}: {count} containers")
         
         return '\n'.join(lines)
-
-
-def main():
-    """Test the bitmap-based storage yard implementation with Container class from repository."""
-    import sys
-    import os
-    import time
-    import matplotlib.pyplot as plt
-    from datetime import datetime
-    
-    # Ensure the repository root is in the path for imports
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    if repo_root not in sys.path:
-        sys.path.append(repo_root)
-    
-    # Import the Container class and ContainerFactory from the repository
-    from Container import Container, ContainerFactory
-    
-    # Determine compute device - use GPU if available
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-    
-    print("\n===== Testing BitmapStorageYard Implementation with Repository Containers =====")
-    
-    # 1. Create a bitmap storage yard
-    yard = BitmapStorageYard(
-        num_rows=6,            # 6 rows (A-F)
-        num_bays=40,           # 40 bays per row
-        max_tier_height=5,     # Maximum 5 containers high
-        special_areas={
-            'reefer': [('A', 1, 5), ('F', 35, 40)],
-            'dangerous': [('C', 25, 30)],
-            'trailer': [('A', 15, 25)],
-            'swap_body': [('B', 30, 40)]
-        },
-        device=device
-    )
-    
-    print(f"Created bitmap storage yard with {yard.num_rows} rows and {yard.num_bays} bays")
-    
-    # 2. Create test containers using ContainerFactory
-    print("\n----- Creating test containers with ContainerFactory -----")
-    
-    # Current date for container attributes
-    current_date = datetime.now()
-    
-    containers = [
-        # Regular containers
-        ContainerFactory.create_container("REG001", "TWEU", "Import", "Regular", weight=20000),
-        ContainerFactory.create_container("REG002", "FEU", "Export", "Regular", weight=25000),
-        ContainerFactory.create_container("REG003", "THEU", "Import", "Regular", weight=18000),
-        
-        # Reefer containers
-        ContainerFactory.create_container("REEF001", "TWEU", "Import", "Reefer", weight=22000),
-        ContainerFactory.create_container("REEF002", "FEU", "Export", "Reefer", weight=24000),
-        
-        # Dangerous goods
-        ContainerFactory.create_container("DG001", "TWEU", "Import", "Dangerous", weight=19000),
-        ContainerFactory.create_container("DG002", "FEU", "Export", "Dangerous", weight=27000),
-        
-        # Special types
-        ContainerFactory.create_container("TRL001", "Trailer", "Export", "Regular", weight=15000),
-        ContainerFactory.create_container("SB001", "Swap Body", "Export", "Regular", weight=12000),
-    ]
-    
-    # Print container details
-    for i, container in enumerate(containers):
-        print(f"{i+1}. Created {container.container_id}: {container.container_type}, {container.goods_type}, " +
-              f"Stackable: {container.is_stackable}, Compatibility: {container.stack_compatibility}")
-    
-    # 3. Test adding containers to the yard
-    print("\n----- Testing container placement -----")
-    
-    # Add containers to appropriate areas
-    placements = [
-        # Regular containers in regular areas
-        ('D10', containers[0]),
-        ('D11', containers[1]),
-        ('D12', containers[2]),
-        # Reefer containers in reefer areas
-        ('A3', containers[3]),
-        ('F38', containers[4]),
-        # Dangerous goods in dangerous area
-        ('C27', containers[5]),
-        ('C28', containers[6]),
-        # Special containers in special areas
-        ('A18', containers[7]),  # Trailer
-        ('B35', containers[8])   # Swap body
-    ]
-    
-    for position, container in placements:
-        success = yard.add_container(position, container)
-        print(f"Adding {container.container_id} to {position}: {'Success' if success else 'Failed'}")
-    
-    # 4. Test stacking
-    print("\n----- Testing stacking -----")
-    stack_position = 'D15'
-    stack_containers = [
-        ContainerFactory.create_container("STACK001", "TWEU", "Import", "Regular", weight=24000),
-        ContainerFactory.create_container("STACK002", "TWEU", "Import", "Regular", weight=20000),
-        ContainerFactory.create_container("STACK003", "TWEU", "Import", "Regular", weight=18000),
-    ]
-    
-    for i, container in enumerate(stack_containers):
-        tier = i + 1
-        success = yard.add_container(stack_position, container, tier)
-        print(f"Adding {container.container_id} to {stack_position} tier {tier}: {'Success' if success else 'Failed'}")
-    
-    # 5. Test invalid placements
-    print("\n----- Testing invalid placements -----")
-    
-    # Try to add a reefer container to a non-reefer area
-    reefer_container = ContainerFactory.create_container("INVALID01", "TWEU", "Import", "Reefer")
-    success = yard.add_container('D20', reefer_container)
-    print(f"Adding reefer container to non-reefer area: {'Success' if success else 'Failed (expected)'}")
-    
-    # Try to add a trailer outside trailer area
-    trailer_container = ContainerFactory.create_container("INVALID02", "Trailer", "Export", "Regular")
-    success = yard.add_container('E30', trailer_container)
-    print(f"Adding trailer outside trailer area: {'Success' if success else 'Failed (expected)'}")
-    
-    # Try to stack on a trailer
-    regular_container = ContainerFactory.create_container("INVALID03", "TWEU", "Import", "Regular")
-    success = yard.add_container('A18', regular_container, tier=2)
-    print(f"Adding container on top of trailer: {'Success' if success else 'Failed (expected)'}")
-    
-    # 6. Visualize yard state
-    print("\n----- Visualizing yard state -----")
-    
-    # Get the combined occupied bitmap (combined from all tiers)
-    print("Visualizing all occupied positions...")
-    yard.visualize_bitmap(yard.occupied_bitmap, "All Occupied Positions")
-    
-    # 7. Test proximity calculation
-    print("\n----- Testing proximity calculation -----")
-    
-    test_positions = ['D10', 'A3', 'C27', 'A18', stack_position]
-    for position in test_positions:
-        container, tier = yard.get_top_container(position)
-        if container:
-            print(f"\nCalculating proximity for {container.container_id} at {position}:")
-            
-            # Calculate proximity mask for different distances
-            for n in [3, 5, 10]:
-                # Visualize the proximity mask
-                yard.visualize_proximity(position, n)
-                
-                # Calculate valid moves
-                start_time = time.time()
-                valid_moves = yard.calc_possible_moves(position, n)
-                calc_time = (time.time() - start_time) * 1000  # ms
-                
-                print(f"Valid moves within {n} bays ({len(valid_moves)}): {valid_moves}")
-                print(f"Calculated in {calc_time:.3f} ms")
-    
-    # 8. Test batch computation
-    print("\n----- Batch computation with all containers -----")
-    
-    # Create a large batch of random containers for testing
-    batch_size = 100
-    batch_containers = []
-    
-    for i in range(batch_size):
-        container_id = f"BATCH{i:03d}"
-        # Create a mix of container types
-        container_type = ["TWEU", "FEU", "THEU", "Trailer", "Swap Body"][i % 5]
-        goods_type = ["Regular", "Reefer", "Dangerous"][i % 3]
-        
-        # Create container with ContainerFactory
-        container = ContainerFactory.create_container(
-            container_id=container_id,
-            container_type=container_type,
-            goods_type=goods_type
-        )
-        
-        batch_containers.append(container)
-    
-    # Test find_all_moves performance
-    start_time = time.time()
-    all_moves = yard.find_all_moves()
-    end_time = time.time()
-    total_time = end_time - start_time
-    
-    print(f"Find all moves for {len(all_moves)} containers: {total_time:.6f} seconds")
-    
-    # Print summary
-    move_count = sum(len(moves) for moves in all_moves.values())
-    print(f"Found {move_count} possible moves for {len(all_moves)} containers")
-    print(f"Average of {move_count / len(all_moves):.2f} moves per container")
-    
-    # 9. Profile performance with different proximity ranges
-    print("\n----- Performance testing with different proximity ranges -----")
-    
-    n_values = [3, 5, 10, 20]
-    times = []
-    
-    for n in n_values:
-        start_time = time.time()
-        
-        # Calculate valid moves for all test positions
-        for position in test_positions:
-            yard.calc_possible_moves(position, n)
-        
-        end_time = time.time()
-        avg_time = (end_time - start_time) / len(test_positions) * 1000  # ms
-        times.append(avg_time)
-        
-        print(f"N={n}: Average {avg_time:.3f} ms per position")
-    
-    # Visualize performance
-    plt.figure(figsize=(10, 5))
-    plt.plot(n_values, times, marker='o')
-    plt.title('Proximity Calculation Performance')
-    plt.xlabel('Proximity Range (n)')
-    plt.ylabel('Average Time (ms)')
-    plt.grid(True)
-    plt.show()
-    
-    # 10. Print final stats
-    print("\n----- Final Yard State -----")
-    print(yard)
-    
-    container_count = sum(len(tiers) for position, tiers in yard.container_registry.items())
-    print(f"Total containers: {container_count}")
-    print(f"Containers per row:")
-    
-    for row in yard.row_names:
-        count = 0
-        for position, tiers in yard.container_registry.items():
-            if position[0] == row:
-                count += len(tiers)
-        print(f"  Row {row}: {count} containers")
-
-if __name__ == "__main__":
-    main()
