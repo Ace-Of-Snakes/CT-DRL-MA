@@ -1,16 +1,23 @@
 import numpy as np
 import torch
 import time
-from typing import Dict, List, Tuple, Optional, Any
 import re
+from typing import Dict, List, Tuple, Optional, Any, Set
 
-
-class EnhancedBitmapYard:
+class SlotTierBitmapYard:
     """
-    GPU-accelerated bitmap representation of a container storage yard.
-    Uses bit operations for efficient container placement and movement calculations.
+    GPU-accelerated bitmap representation of a container storage yard
+    with flattened slot-tier representation.
     
-    Enhanced to handle container sizes using 10ft subslots (4 subslots per standard bay).
+    Uses a position format of {Row}{Bay.Slot}-T{Tier}, where:
+    - Each bay is divided into 4 slots of 10 feet each
+    - Tiers are explicitly represented in the position string
+    
+    Container placement rules:
+    - TWEU (20ft): 2 consecutive slots within the same bay
+    - THEU (30ft): 3 consecutive slots within the same bay
+    - FEU (40ft): All 4 slots of a bay (full bay)
+    - FFEU (45ft): 5 slots (spanning into adjacent bay)
     """
     
     def __init__(self, 
@@ -19,10 +26,9 @@ class EnhancedBitmapYard:
                 max_tier_height: int = 5,
                 row_names: List[str] = None,
                 special_areas: Dict[str, List[Tuple[str, int, int]]] = None,
-                subslots_per_bay: int = 4,
                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
         """
-        Initialize the enhanced bitmap storage yard with subslot handling.
+        Initialize the flattened slot-tier bitmap storage yard.
         
         Args:
             num_rows: Number of rows in the yard
@@ -30,14 +36,13 @@ class EnhancedBitmapYard:
             max_tier_height: Maximum stacking height
             row_names: Names for each row (defaults to A, B, C...)
             special_areas: Dictionary mapping special types to areas
-            subslots_per_bay: Number of subslots per bay (default 4 for 10ft subslots)
             device: Computation device ('cuda' or 'cpu')
         """
         self.num_rows = num_rows
         self.num_bays = num_bays
+        self.slots_per_bay = 4  # Each bay has 4 slots of 10ft each
         self.max_tier_height = max_tier_height
         self.device = device
-        self.subslots_per_bay = subslots_per_bay
         
         # Initialize row names if not provided
         if row_names is None:
@@ -45,355 +50,289 @@ class EnhancedBitmapYard:
         else:
             self.row_names = row_names[:num_rows]
         
-        # Calculate bitmap dimensions with subslots
-        # Each bay now has subslots_per_bay positions
-        self.total_subslots = num_bays * subslots_per_bay
+        # Calculate bitmap dimensions
+        # Each position is now {Row}{Bay.Slot}-T{Tier}
+        # Total slots = num_rows * num_bays * slots_per_bay * max_tier_height
+        self.total_slots = num_rows * num_bays * self.slots_per_bay * max_tier_height
         
-        # Calculate bits per row with 64-bit alignment
-        # This ensures we have enough words to hold all subslots
-        self.bits_per_row = ((self.total_subslots + 63) // 64) * 64
-        self.total_bits = self.num_rows * self.bits_per_row
-        
-        # Get number of 64-bit words needed for each bitmap
-        self.num_words = (self.total_bits + 63) // 64
-        
-        print(f"Initializing bitmap with dimensions:")
-        print(f"- Rows: {self.num_rows}, Bays: {self.num_bays}, Subslots per bay: {self.subslots_per_bay}")
-        print(f"- Total subslots: {self.total_subslots}, Bits per row: {self.bits_per_row}")
-        print(f"- Total bits: {self.total_bits}, Number of 64-bit words: {self.num_words}")
+        # Align to 64-bit boundaries for efficient operations
+        self.total_words = (self.total_slots + 63) // 64
         
         # Special areas for different container types
         if special_areas is None:
             # Default special areas
             self.special_areas = {
-                'reefer': [('A', 1, 5)],  # Row A, bays 1-5
+                'reefer': [('A', 1, 5)],     # Row A, bays 1-5
                 'dangerous': [('C', 6, 10)],  # Row C, bays 6-10
-                'trailer': [('A', 15, 25)],  # Row A, bays 15-25
+                'trailer': [('A', 15, 25)],   # Row A, bays 15-25
                 'swap_body': [('B', 30, 40)]  # Row B, bays 30-40
             }
         else:
             self.special_areas = special_areas
         
-        # Initialize bitmaps for each tier (using PyTorch for GPU compatibility)
-        # Each tier gets its own bitmap; bit=1 means occupied, bit=0 means free
-        self.tier_bitmaps = [torch.zeros(self.num_words, dtype=torch.int64, device=device) 
-                            for _ in range(max_tier_height)]
+        # Pre-compute powers of 2 for bit operations (to avoid overflow on CUDA)
+        self.powers_of_2 = torch.zeros(64, dtype=torch.int64, device=device)
+        for i in range(64):
+            if i == 0:
+                self.powers_of_2[i] = 1
+            else:
+                self.powers_of_2[i] = self.powers_of_2[i-1] * 2
+        
+        # Initialize bitmap (1 for occupied, 0 for free)
+        self.occupied_bitmap = torch.zeros(self.total_words, dtype=torch.int64, device=device)
         
         # Initialize bitmaps for special areas
         self.special_area_bitmaps = {
-            'reefer': torch.zeros(self.num_words, dtype=torch.int64, device=device),
-            'dangerous': torch.zeros(self.num_words, dtype=torch.int64, device=device),
-            'trailer': torch.zeros(self.num_words, dtype=torch.int64, device=device),
-            'swap_body': torch.zeros(self.num_words, dtype=torch.int64, device=device)
+            'reefer': torch.zeros(self.total_words, dtype=torch.int64, device=device),
+            'dangerous': torch.zeros(self.total_words, dtype=torch.int64, device=device),
+            'trailer': torch.zeros(self.total_words, dtype=torch.int64, device=device),
+            'swap_body': torch.zeros(self.total_words, dtype=torch.int64, device=device)
         }
         
-        # Container length mapping (in terms of 10ft subslots)
-        self.container_length_subslots = {
-            'TWEU': 2,      # 20ft = 2 subslots
-            'THEU': 3,      # 30ft = 3 subslots 
-            'FEU': 4,       # 40ft = 4 subslots
-            'FFEU': 5,      # 45ft = 5 subslots
-            'Trailer': 4,   # Trailer = 4 subslots
-            'Swap Body': 3, # Swap body = 3 subslots
-            'default': 2    # Default to 20ft (2 subslots)
+        # Initialize container type-specific placement masks
+        self.container_placement_masks = {
+            'TWEU': None,  # 20ft (2 slots) - will be generated per position
+            'THEU': None,  # 30ft (3 slots) - will be generated per position
+            'FEU': None,   # 40ft (4 slots/full bay) - will be generated per position
+            'FFEU': None,  # 45ft (5 slots) - will be generated per position
         }
         
-        # Initialize position mapping with subslots
+        # Initialize position mapping
         self.position_to_bit = {}  # Maps position string to bit index
         self.bit_to_position = {}  # Maps bit index to position string
         self._build_position_mapping()
         
-        # Initialize special area bitmaps with subslot resolution
+        # Initialize special area bitmaps
         self._initialize_special_area_bitmaps()
         
         # Container registry for efficient lookup
-        self.container_registry = {}  # position -> container object
+        self.container_registry = {}  # position -> container
         
-        # Track container occupation with subslot mapping
-        self.container_occupation = {}  # container_id -> list of subslot positions
+        # Pre-compute common masks for operations
+        self._precompute_container_masks()
         
-        # Pre-compute proximity masks for efficient proximity searching
-        self.proximity_masks = {}  # (bit_idx, n) -> proximity mask
-        
-        # Create an "occupied" bitmap that combines all tiers for quick checks
-        self.update_occupied_bitmap()
-        
-        # Generate container placement masks
-        self._generate_container_placement_masks()
+        # Cache for proximity calculations
+        self.proximity_masks = {}
     
     def _build_position_mapping(self):
-        """
-        Build mapping between position strings and bit indices.
-        Positions now include subslot notation: 'A1.1', 'A1.2', etc.
-        """
+        """Build mapping between position strings and bit indices."""
+        bit_idx = 0
+        
         for row_idx, row in enumerate(self.row_names):
-            row_offset = row_idx * self.bits_per_row
             for bay in range(1, self.num_bays + 1):
-                for subslot in range(1, self.subslots_per_bay + 1):
-                    # Position format: 'A1.1', 'A1.2', etc.
-                    position = f"{row}{bay}.{subslot}"
-                    
-                    # Calculate bit index
-                    # Convert from 1-based to 0-based indexing
-                    bay_idx = bay - 1
-                    subslot_idx = subslot - 1
-                    
-                    # Overall subslot index within the row
-                    overall_subslot_idx = bay_idx * self.subslots_per_bay + subslot_idx
-                    
-                    # Skip if it would exceed our bitmap size
-                    if overall_subslot_idx >= self.bits_per_row:
-                        continue
-                    
-                    # Final bit index
-                    bit_idx = row_offset + overall_subslot_idx
-                    
-                    # Skip if it would exceed total bits
-                    if bit_idx >= self.total_bits:
-                        continue
-                    
-                    # Store mappings
-                    self.position_to_bit[position] = bit_idx
-                    self.bit_to_position[bit_idx] = position
+                for slot in range(1, self.slots_per_bay + 1):
+                    for tier in range(1, self.max_tier_height + 1):
+                        position = f"{row}{bay}.{slot}-T{tier}"
+                        self.position_to_bit[position] = bit_idx
+                        self.bit_to_position[bit_idx] = position
+                        bit_idx += 1
     
     def _initialize_special_area_bitmaps(self):
-        """
-        Initialize bitmaps for special areas based on configuration.
-        Handles the conversion from bay-level to subslot-level areas.
-        """
-        # Initialize special area bitmaps
+        """Initialize bitmaps for special areas based on configuration."""
         for area_type, areas in self.special_areas.items():
             bitmap = self.special_area_bitmaps[area_type]
+            
             for area_row, start_bay, end_bay in areas:
                 if area_row in self.row_names:
                     row_idx = self.row_names.index(area_row)
-                    row_offset = row_idx * self.bits_per_row
                     
-                    # Validate and limit bay range if needed
-                    start_bay = max(1, min(start_bay, self.num_bays))
-                    end_bay = max(1, min(end_bay, self.num_bays))
-                    
-                    # Convert bay range to subslot range
-                    start_subslot = (start_bay - 1) * self.subslots_per_bay
-                    end_subslot = (end_bay * self.subslots_per_bay) - 1
-                    
-                    # Ensure we don't exceed the total subslots
-                    end_subslot = min(end_subslot, self.total_subslots - 1)
-                    
-                    for subslot_idx in range(start_subslot, end_subslot + 1):
-                        if 0 <= subslot_idx < self.total_subslots:
-                            bit_idx = row_offset + subslot_idx
-                            
-                            # Ensure we don't exceed the total bits
-                            if bit_idx < self.total_bits:
-                                word_idx = bit_idx // 64
-                                bit_offset = bit_idx % 64
-                                
-                                # Safety check to prevent overflow
-                                if 0 <= bit_offset < 64 and word_idx < len(bitmap):
-                                    bitmap[word_idx] |= (1 << bit_offset)
+                    # For each bay in the special area
+                    for bay in range(start_bay, end_bay + 1):
+                        # For each slot in the bay
+                        for slot in range(1, self.slots_per_bay + 1):
+                            # For each tier (special areas apply to all tiers)
+                            for tier in range(1, self.max_tier_height + 1):
+                                position = f"{area_row}{bay}.{slot}-T{tier}"
+                                if position in self.position_to_bit:
+                                    bit_idx = self.position_to_bit[position]
+                                    word_idx = bit_idx // 64
+                                    bit_offset = bit_idx % 64
+                                    bitmap[word_idx] = bitmap[word_idx] | self.powers_of_2[bit_offset]
     
-    def _generate_container_placement_masks(self):
-        """
-        Generate specialized masks for each container type's valid placement positions.
-        These are precomputed to speed up placement operations.
-        """
-        # Create a mask for each container type
-        self.container_placement_masks = {}
+    def _precompute_container_masks(self):
+        """Pre-compute common masks for container placement operations."""
+        # These are template masks for different container types
+        # Actual masks will be generated for specific positions when needed
         
-        # Get all possible container types from length mapping
-        for container_type, length in self.container_length_subslots.items():
-            # Create an empty mask
-            mask = torch.zeros(self.num_words, dtype=torch.int64, device=self.device)
-            
-            # For each row
-            for row_idx, row in enumerate(self.row_names):
-                row_offset = row_idx * self.bits_per_row
+        # Create temporary dictionaries to store masks for all valid starting positions
+        self.valid_starts = {
+            'TWEU': set(),  # 20ft: positions where a TWEU can start
+            'THEU': set(),  # 30ft: positions where a THEU can start
+            'FEU': set(),   # 40ft: positions where a FEU can start
+            'FFEU': set(),  # 45ft: positions where a FFEU can start
+        }
+        
+        # For each row and bay, compute valid starting positions
+        for row in self.row_names:
+            for bay in range(1, self.num_bays + 1):
+                # For TWEU (20ft): can start at slots 1 or 3
+                for start_slot in [1, 3]:
+                    # Check if both required slots exist
+                    if start_slot + 1 <= self.slots_per_bay:
+                        for tier in range(1, self.max_tier_height + 1):
+                            start_pos = f"{row}{bay}.{start_slot}-T{tier}"
+                            self.valid_starts['TWEU'].add(start_pos)
                 
-                # For each bay
-                for bay_idx in range(self.num_bays):
-                    # For each potential starting subslot position
-                    for start_subslot in range(self.subslots_per_bay):
-                        # Check if there are enough subslots remaining in this bay
-                        remaining_subslots = self.subslots_per_bay - start_subslot
-                        
-                        if length <= remaining_subslots:
-                            # This is a valid starting position for this container type
-                            # Calculate the bit index
-                            subslot_idx = bay_idx * self.subslots_per_bay + start_subslot
-                            bit_idx = row_offset + subslot_idx
-                            
-                            # Skip if out of range
-                            if bit_idx >= self.total_bits:
-                                continue
-                                
-                            word_idx = bit_idx // 64
-                            bit_offset = bit_idx % 64
-                            
-                            # Safety check
-                            if 0 <= bit_offset < 64 and word_idx < self.num_words:
-                                # Set the bit in the mask
-                                mask[word_idx] |= (1 << bit_offset)
-            
-            # Store the mask
-            self.container_placement_masks[container_type] = mask
+                # For THEU (30ft): can only start at slot 1
+                if 3 <= self.slots_per_bay:  # Need 3 slots
+                    for tier in range(1, self.max_tier_height + 1):
+                        start_pos = f"{row}{bay}.1-T{tier}"
+                        self.valid_starts['THEU'].add(start_pos)
+                
+                # For FEU (40ft): always starts at slot 1 (takes whole bay)
+                if self.slots_per_bay == 4:  # Must have all 4 slots
+                    for tier in range(1, self.max_tier_height + 1):
+                        start_pos = f"{row}{bay}.1-T{tier}"
+                        self.valid_starts['FEU'].add(start_pos)
+                
+                # For FFEU (45ft): can only start at slot 1 if next bay exists
+                if bay < self.num_bays:  # Need next bay for 5th slot
+                    for tier in range(1, self.max_tier_height + 1):
+                        start_pos = f"{row}{bay}.1-T{tier}"
+                        self.valid_starts['FFEU'].add(start_pos)
     
-    def update_occupied_bitmap(self):
-        """Update the combined occupied bitmap based on all tiers."""
-        # Create a bitmap that has a 1 wherever any tier has a container
-        self.occupied_bitmap = torch.zeros(self.num_words, dtype=torch.int64, device=self.device)
-        for tier_bitmap in self.tier_bitmaps:
-            self.occupied_bitmap |= tier_bitmap
-    
-    def parse_position(self, position: str) -> Tuple[str, int, int]:
-        """
-        Parse a position string into row, bay, and subslot components.
-        Accepts formats: 'A1' (full bay) or 'A1.1' (specific subslot)
-        
-        Returns:
-            Tuple of (row, bay, subslot) - subslot is None for full bay references
-        """
-        # Pattern for positions with subslot
-        subslot_pattern = r"([A-Za-z])(\d+)\.(\d+)"
-        # Pattern for positions without subslot
-        bay_pattern = r"([A-Za-z])(\d+)"
-        
-        # Try to match with subslot first
-        match = re.match(subslot_pattern, position)
-        if match:
-            row = match.group(1).upper()
-            bay = int(match.group(2))
-            subslot = int(match.group(3))
-            return row, bay, subslot
-        
-        # Try to match without subslot
-        match = re.match(bay_pattern, position)
-        if match:
-            row = match.group(1).upper()
-            bay = int(match.group(2))
-            return row, bay, None
-        
-        raise ValueError(f"Invalid position format: {position}")
-    
-    def encode_position(self, position: str) -> List[int]:
-        """
-        Convert a position string to bit indices.
-        For positions without subslot (e.g., 'A1'), returns all subslot bit indices.
-        For positions with subslot (e.g., 'A1.1'), returns that specific bit index.
-        
-        Returns:
-            List of bit indices
-        """
-        # Check if in direct mapping first
+    def encode_position(self, position: str) -> int:
+        """Convert a position string to a bit index."""
         if position in self.position_to_bit:
-            return [self.position_to_bit[position]]
+            return self.position_to_bit[position]
         
-        # Parse the position
-        try:
-            row, bay, subslot = self.parse_position(position)
-        except ValueError:
-            raise ValueError(f"Invalid position: {position}")
-        
-        # Validate components
-        if row not in self.row_names or bay < 1 or bay > self.num_bays:
-            raise ValueError(f"Invalid position: {position}")
-        
-        # If specific subslot specified, get just that bit index
-        if subslot is not None:
-            if subslot < 1 or subslot > self.subslots_per_bay:
-                raise ValueError(f"Invalid subslot: {subslot}")
+        # Parse position if not in mapping
+        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+        if match:
+            row, bay, slot, tier = match.groups()
+            bay, slot, tier = int(bay), int(slot), int(tier)
             
-            # Look up the specific position
-            position_with_subslot = f"{row}{bay}.{subslot}"
-            if position_with_subslot in self.position_to_bit:
-                return [self.position_to_bit[position_with_subslot]]
-            
-            # Calculate bit index for the specific subslot
-            row_idx = self.row_names.index(row)
-            row_offset = row_idx * self.bits_per_row
-            bay_idx = bay - 1
-            subslot_idx = subslot - 1
-            overall_subslot_idx = bay_idx * self.subslots_per_bay + subslot_idx
-            bit_idx = row_offset + overall_subslot_idx
-            
-            return [bit_idx]
+            if (row in self.row_names and 
+                1 <= bay <= self.num_bays and 
+                1 <= slot <= self.slots_per_bay and 
+                1 <= tier <= self.max_tier_height):
+                
+                row_idx = self.row_names.index(row)
+                bit_idx = (((row_idx * self.num_bays + (bay - 1)) * self.slots_per_bay + (slot - 1)) 
+                          * self.max_tier_height + (tier - 1))
+                return bit_idx
         
-        # If no subslot specified, get all subslot bit indices for the bay
-        bit_indices = []
-        row_idx = self.row_names.index(row)
-        row_offset = row_idx * self.bits_per_row
-        bay_idx = bay - 1
-        
-        for subslot_idx in range(self.subslots_per_bay):
-            overall_subslot_idx = bay_idx * self.subslots_per_bay + subslot_idx
-            bit_idx = row_offset + overall_subslot_idx
-            bit_indices.append(bit_idx)
-        
-        return bit_indices
+        raise ValueError(f"Invalid position: {position}")
     
     def decode_position(self, bit_idx: int) -> str:
-        """Convert a bit index to a position string with subslot (e.g., 'A1.1')."""
+        """Convert a bit index to a position string."""
         if bit_idx in self.bit_to_position:
             return self.bit_to_position[bit_idx]
         
         # Calculate position if not in mapping
-        row_idx = bit_idx // self.bits_per_row
-        relative_idx = bit_idx % self.bits_per_row
-        
-        # Calculate bay and subslot
-        overall_subslot_idx = relative_idx
-        bay_idx = overall_subslot_idx // self.subslots_per_bay
-        subslot_idx = overall_subslot_idx % self.subslots_per_bay
-        
-        # Convert to 1-based indexing
-        bay = bay_idx + 1
-        subslot = subslot_idx + 1
-        
-        if 0 <= row_idx < len(self.row_names) and 1 <= bay <= self.num_bays and 1 <= subslot <= self.subslots_per_bay:
-            return f"{self.row_names[row_idx]}{bay}.{subslot}"
+        if 0 <= bit_idx < self.total_slots:
+            tier = (bit_idx % self.max_tier_height) + 1
+            slot = ((bit_idx // self.max_tier_height) % self.slots_per_bay) + 1
+            bay = (((bit_idx // self.max_tier_height) // self.slots_per_bay) % self.num_bays) + 1
+            row_idx = ((bit_idx // self.max_tier_height) // self.slots_per_bay) // self.num_bays
+            
+            if 0 <= row_idx < len(self.row_names):
+                row = self.row_names[row_idx]
+                return f"{row}{bay}.{slot}-T{tier}"
         
         raise ValueError(f"Invalid bit index: {bit_idx}")
     
-    def is_occupied(self, position: str, tier: int = 1) -> bool:
+    def get_container_mask(self, position: str, container_type: str) -> torch.Tensor:
         """
-        Check if a position at a specific tier is occupied.
+        Generate a bitmap mask for a specific container type at the given position.
         
         Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            tier: Tier level to check
+            position: Starting position string
+            container_type: Type of container (TWEU, THEU, FEU, FFEU)
             
         Returns:
-            Boolean indicating if the position is occupied at the tier
+            Tensor mask with 1s for all slots that would be occupied by this container
         """
+        # Parse the starting position
+        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+        if not match:
+            raise ValueError(f"Invalid position format: {position}")
+            
+        row, bay, slot, tier = match.groups()
+        bay, slot, tier = int(bay), int(slot), int(tier)
+        
+        # Create empty mask
+        mask = torch.zeros(self.total_words, dtype=torch.int64, device=self.device)
+        
+        # Generate mask based on container type
+        slots_to_occupy = []
+        
+        if container_type == 'TWEU':  # 20ft: 2 slots
+            # TWEU must start at slot 1 or 3
+            if slot not in [1, 3]:
+                return mask  # Invalid starting slot
+                
+            # Check if we have enough slots in this bay
+            if slot + 1 > self.slots_per_bay:
+                return mask  # Not enough slots
+                
+            # Occupy 2 consecutive slots
+            slots_to_occupy = [(bay, s, tier) for s in range(slot, slot + 2)]
+            
+        elif container_type == 'THEU':  # 30ft: 3 slots
+            # THEU must start at slot 1
+            if slot != 1:
+                return mask  # Invalid starting slot
+                
+            # Check if we have enough slots in this bay
+            if slot + 2 > self.slots_per_bay:
+                return mask  # Not enough slots
+                
+            # Occupy 3 consecutive slots
+            slots_to_occupy = [(bay, s, tier) for s in range(slot, slot + 3)]
+            
+        elif container_type == 'FEU':  # 40ft: 4 slots (full bay)
+            # FEU must start at slot 1
+            if slot != 1:
+                return mask  # Invalid starting slot
+                
+            # Check if we have enough slots in this bay
+            if self.slots_per_bay != 4:
+                return mask  # Bay must have exactly 4 slots
+                
+            # Occupy all 4 slots in this bay
+            slots_to_occupy = [(bay, s, tier) for s in range(1, 5)]
+            
+        elif container_type == 'FFEU':  # 45ft: 5 slots
+            # FFEU must start at slot 1
+            if slot != 1:
+                return mask  # Invalid starting slot
+                
+            # Check if we have enough slots (need 1 slot in next bay)
+            if bay >= self.num_bays:
+                return mask  # No next bay available
+                
+            # Occupy all 4 slots in this bay and 1 slot in next bay
+            slots_to_occupy = [(bay, s, tier) for s in range(1, 5)]
+            slots_to_occupy.append((bay + 1, 1, tier))
+            
+        else:
+            # Unknown container type
+            return mask
+        
+        # Set bits for all slots to occupy
+        for bay_num, slot_num, tier_num in slots_to_occupy:
+            pos = f"{row}{bay_num}.{slot_num}-T{tier_num}"
+            if pos in self.position_to_bit:
+                bit_idx = self.position_to_bit[pos]
+                word_idx = bit_idx // 64
+                bit_offset = bit_idx % 64
+                mask[word_idx] = mask[word_idx] | self.powers_of_2[bit_offset]
+        
+        return mask
+    
+    def is_position_occupied(self, position: str) -> bool:
+        """Check if a position is occupied."""
         try:
-            # Get bit indices for the position
-            bit_indices = self.encode_position(position)
-            
-            # Check if tier is valid
-            if 1 <= tier <= self.max_tier_height:
-                # Check if any of the subslots are occupied
-                for bit_idx in bit_indices:
-                    word_idx = bit_idx // 64
-                    bit_offset = bit_idx % 64
-                    
-                    if (self.tier_bitmaps[tier-1][word_idx] >> bit_offset) & 1:
-                        return True
-            
-            return False
+            bit_idx = self.encode_position(position)
+            word_idx = bit_idx // 64
+            bit_offset = bit_idx % 64
+            return bool((self.occupied_bitmap[word_idx] & self.powers_of_2[bit_offset]) != 0)
         except ValueError:
             return False
     
     def is_position_in_special_area(self, position: str, area_type: str) -> bool:
-        """
-        Check if a position is in a specific special area.
-        
-        Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            area_type: Special area type (e.g., 'reefer', 'dangerous')
-            
-        Returns:
-            Boolean indicating if the position is in the special area
-        """
+        """Check if a position is in a specific special area."""
         try:
             # Convert area type to lowercase
             area_type = area_type.lower()
@@ -402,697 +341,187 @@ class EnhancedBitmapYard:
             if area_type not in self.special_area_bitmaps:
                 return False
             
-            # Get bit indices for the position
-            bit_indices = self.encode_position(position)
+            # Get bit index
+            bit_idx = self.encode_position(position)
+            word_idx = bit_idx // 64
+            bit_offset = bit_idx % 64
             
-            # Check if any of the subslots are in the special area
-            for bit_idx in bit_indices:
-                word_idx = bit_idx // 64
-                bit_offset = bit_idx % 64
-                
-                if (self.special_area_bitmaps[area_type][word_idx] >> bit_offset) & 1:
-                    return True
-            
-            return False
+            # Check special area bitmap
+            return bool((self.special_area_bitmaps[area_type][word_idx] & self.powers_of_2[bit_offset]) != 0)
         except ValueError:
             return False
     
-    def get_stack_height(self, position: str) -> int:
+    def is_container_placement_valid(self, position: str, container: Any) -> bool:
         """
-        Get the current stack height at a position.
+        Check if a container can be placed at the given position.
         
         Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
+            position: Starting position string
+            container: Container object to check
             
         Returns:
-            Current stack height (0 if empty)
-        """
-        try:
-            # Get bit indices for the position
-            bit_indices = self.encode_position(position)
-            
-            # Find the maximum stack height across all subslots
-            max_height = 0
-            
-            for bit_idx in bit_indices:
-                word_idx = bit_idx // 64
-                bit_offset = bit_idx % 64
-                
-                # Check from top to bottom
-                for tier in range(self.max_tier_height, 0, -1):
-                    if (self.tier_bitmaps[tier-1][word_idx] >> bit_offset) & 1:
-                        max_height = max(max_height, tier)
-                        break
-            
-            return max_height
-        except ValueError:
-            return 0
-    
-    def get_container_length_in_subslots(self, container: Any) -> int:
-        """
-        Get the length of a container in subslots.
-        
-        Args:
-            container: Container object
-            
-        Returns:
-            Number of subslots the container occupies
+            True if the container can be placed, False otherwise
         """
         # Get container type
-        container_type = getattr(container, 'container_type', 'default')
+        if not hasattr(container, 'container_type'):
+            return False
+            
+        container_type = container.container_type
+        goods_type = getattr(container, 'goods_type', 'Regular')
         
-        # Get length in subslots
-        return self.container_length_subslots.get(container_type, self.container_length_subslots['default'])
+        # Check if container type is valid
+        if container_type not in ['TWEU', 'THEU', 'FEU', 'FFEU', 'Trailer', 'Swap Body']:
+            return False
+        
+        # Special handling for trailers and swap bodies
+        if container_type == 'Trailer':
+            # Trailers must be in trailer areas
+            if not self.is_position_in_special_area(position, 'trailer'):
+                return False
+                
+            # Trailers can't be stacked (must be tier 1)
+            if '-T1' not in position:
+                return False
+                
+        elif container_type == 'Swap Body':
+            # Swap bodies must be in swap body areas
+            if not self.is_position_in_special_area(position, 'swap_body'):
+                return False
+        
+        # Check special area constraints for goods type
+        if goods_type == 'Reefer':
+            # Reefer containers must be in reefer areas
+            if not self.is_position_in_special_area(position, 'reefer'):
+                return False
+        elif goods_type == 'Dangerous':
+            # Dangerous goods must be in dangerous areas
+            if not self.is_position_in_special_area(position, 'dangerous'):
+                return False
+        
+        # Check if starting position is valid for this container type
+        if container_type in ['TWEU', 'THEU', 'FEU', 'FFEU']:
+            if position not in self.valid_starts[container_type]:
+                return False
+        
+        # Generate mask for container placement
+        placement_mask = self.get_container_mask(position, container_type)
+        
+        # Check if placement would overlap with existing containers
+        overlap = placement_mask & self.occupied_bitmap
+        
+        if overlap.any():
+            return False  # Overlaps with existing containers
+        
+        # Stacking checks (evaluate stackability for containers above tier 1)
+        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+        if match:
+            row, bay, slot, tier = match.groups()
+            tier = int(tier)
+            
+            # If tier > 1, check container below for stackability
+            if tier > 1:
+                # Check container directly below 
+                position_below = f"{row}{bay}.{slot}-T{tier-1}"
+                
+                # Get container below
+                container_below = self.get_container(position_below)
+                
+                # If no container below, can't stack
+                if container_below is None:
+                    return False
+                    
+                # Check stacking compatibility
+                if (hasattr(container, 'can_stack_with') and 
+                    not container.can_stack_with(container_below)):
+                    return False
+                    
+                # Check if container is stackable
+                if hasattr(container, 'is_stackable') and not container.is_stackable:
+                    return False
+        
+        return True
     
-    def find_contiguous_free_subslots(self, position: str, length: int, tier: int = 1) -> List[str]:
+    def add_container(self, position: str, container: Any) -> bool:
         """
-        Find contiguous free subslots starting from a position.
+        Add a container to the yard.
         
         Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            length: Number of contiguous subslots needed
-            tier: Tier level to check
-            
-        Returns:
-            List of subslot positions that are free (empty if not enough free space)
-        """
-        try:
-            # Parse the position to determine the starting point
-            row, bay, subslot = self.parse_position(position)
-            
-            # If no specific subslot provided, use the first subslot in the bay
-            if subslot is None:
-                subslot = 1
-            
-            # Build the full starting position
-            start_position = f"{row}{bay}.{subslot}"
-            start_bit_indices = self.encode_position(start_position)
-            
-            if not start_bit_indices:
-                return []
-            
-            start_bit_idx = start_bit_indices[0]
-            
-            # Calculate row and bay indices
-            row_idx = self.row_names.index(row)
-            bay_idx = bay - 1
-            subslot_idx = subslot - 1
-            
-            # Start checking from this subslot
-            free_positions = []
-            
-            # Need to check if we have enough space in this bay
-            remaining_in_bay = self.subslots_per_bay - subslot_idx
-            
-            if remaining_in_bay < length:
-                # Not enough space in this bay
-                return []
-            
-            # Check each potential subslot
-            for i in range(length):
-                current_subslot = subslot + i
-                current_position = f"{row}{bay}.{current_subslot}"
-                
-                # Check if this subslot is free
-                if self.is_occupied(current_position, tier):
-                    # Subslot is occupied, can't fit the container
-                    return []
-                
-                free_positions.append(current_position)
-            
-            return free_positions
-        except ValueError:
-            return []
-    
-    def add_container(self, position: str, container: Any, tier: int = None) -> bool:
-        """
-        Add a container to a specific position and tier.
-        
-        Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
+            position: Starting position string
             container: Container object to add
-            tier: Tier level (if None, adds to the top tier + 1)
             
         Returns:
             True if container was added successfully, False otherwise
         """
-        try:
-            # Determine the container's length in subslots
-            container_length = self.get_container_length_in_subslots(container)
-            
-            # Determine tier if not specified
-            if tier is None:
-                tier = self.get_stack_height(position) + 1
-            
-            # Check if tier is valid
-            if tier > self.max_tier_height:
-                return False
-            
-            # Check if container can be accepted at this position
-            if not self.can_accept_container(position, container):
-                return False
-            
-            # Find contiguous free subslots for the container
-            free_subslots = self.find_contiguous_free_subslots(position, container_length, tier)
-            
-            if not free_subslots or len(free_subslots) < container_length:
-                return False
-            
-            # Get bit indices for all subslots
-            all_bit_indices = []
-            for subslot_position in free_subslots:
-                bit_indices = self.encode_position(subslot_position)
-                all_bit_indices.extend(bit_indices)
-            
-            # Mark all subslots as occupied in the tier bitmap
-            for bit_idx in all_bit_indices:
-                word_idx = bit_idx // 64
-                bit_offset = bit_idx % 64
-                
-                self.tier_bitmaps[tier-1][word_idx] |= (1 << bit_offset)
-            
-            # Update container registry
-            # We only store the container once, with the starting position
-            main_position = free_subslots[0]
-            
-            # Register container in the position registry
-            if position not in self.container_registry:
-                self.container_registry[position] = {}
-            
-            self.container_registry[position][tier] = container
-            
-            # Update container occupation tracking
-            if hasattr(container, 'container_id'):
-                self.container_occupation[container.container_id] = {
-                    'position': position,
-                    'tier': tier,
-                    'subslots': free_subslots
-                }
-            
-            # Update occupied bitmap
-            self.update_occupied_bitmap()
-            
-            return True
-        except ValueError:
+        # Check if container can be placed
+        if not self.is_container_placement_valid(position, container):
             return False
+        
+        # Get container type
+        container_type = container.container_type
+        
+        # Get mask for container placement
+        placement_mask = self.get_container_mask(position, container_type)
+        
+        # Update occupied bitmap
+        self.occupied_bitmap |= placement_mask
+        
+        # Add to container registry
+        self.container_registry[position] = container
+        
+        # If container has ID, add to lookup
+        if hasattr(container, 'container_id'):
+            self.container_id_to_position = getattr(self, 'container_id_to_position', {})
+            self.container_id_to_position[container.container_id] = position
+        
+        return True
     
-    def remove_container(self, position: str, tier: int = None) -> Optional[Any]:
+    def remove_container(self, position: str) -> Optional[Any]:
         """
-        Remove a container from a position and tier.
+        Remove a container from the yard.
         
         Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            tier: Tier level (if None, removes the top container)
+            position: Starting position string
             
         Returns:
             The removed container or None if no container was removed
         """
-        try:
-            # Determine tier if not specified
-            if tier is None:
-                tier = self.get_stack_height(position)
-                if tier == 0:
-                    return None
-            
-            # Check if there are containers above this one
-            for t in range(tier + 1, self.max_tier_height + 1):
-                if self.is_occupied(position, t):
-                    return None  # Can't remove with containers on top
-            
-            # Get container before removing
-            container = None
-            if position in self.container_registry and tier in self.container_registry[position]:
-                container = self.container_registry[position][tier]
-            
-            if not container:
-                return None
-            
-            # Get the container's subslots
-            container_id = getattr(container, 'container_id', None)
-            
-            if container_id in self.container_occupation:
-                occupied_subslots = self.container_occupation[container_id]['subslots']
-            else:
-                # Determine container length
-                container_length = self.get_container_length_in_subslots(container)
-                
-                # Find the container's subslots
-                # First, determine if we're specifying a subslot or bay position
-                row, bay, subslot = self.parse_position(position)
-                
-                # If no specific subslot provided, we need to find where the container starts
-                if subslot is None:
-                    # Look through all subslots in the bay to find the container
-                    for s in range(1, self.subslots_per_bay + 1):
-                        test_position = f"{row}{bay}.{s}"
-                        bit_indices = self.encode_position(test_position)
-                        
-                        if bit_indices:
-                            bit_idx = bit_indices[0]
-                            word_idx = bit_idx // 64
-                            bit_offset = bit_idx % 64
-                            
-                            if (self.tier_bitmaps[tier-1][word_idx] >> bit_offset) & 1:
-                                # Found the beginning of the container
-                                occupied_subslots = self.find_contiguous_free_subslots(
-                                    test_position, container_length, tier)
-                                break
-                else:
-                    occupied_subslots = self.find_contiguous_free_subslots(
-                        position, container_length, tier)
-            
-            # Mark all subslots as free in the tier bitmap
-            for subslot_position in occupied_subslots:
-                bit_indices = self.encode_position(subslot_position)
-                
-                for bit_idx in bit_indices:
-                    word_idx = bit_idx // 64
-                    bit_offset = bit_idx % 64
-                    
-                    self.tier_bitmaps[tier-1][word_idx] &= ~(1 << bit_offset)
-            
-            # Update container registry
-            if position in self.container_registry and tier in self.container_registry[position]:
-                del self.container_registry[position][tier]
-                if not self.container_registry[position]:
-                    del self.container_registry[position]
-            
-            # Update container occupation tracking
-            if container_id and container_id in self.container_occupation:
-                del self.container_occupation[container_id]
-            
-            # Update occupied bitmap
-            self.update_occupied_bitmap()
-            
-            return container
-        except ValueError:
+        # Check if position has a container
+        if position not in self.container_registry:
             return None
+        
+        # Get the container and its type
+        container = self.container_registry[position]
+        container_type = container.container_type
+        
+        # Get mask for container placement
+        placement_mask = self.get_container_mask(position, container_type)
+        
+        # Update occupied bitmap (using ~mask to clear bits)
+        self.occupied_bitmap &= ~placement_mask
+        
+        # Remove from container registry
+        del self.container_registry[position]
+        
+        # Remove from ID lookup if exists
+        if hasattr(container, 'container_id') and hasattr(self, 'container_id_to_position'):
+            if container.container_id in self.container_id_to_position:
+                del self.container_id_to_position[container.container_id]
+        
+        return container
     
-    def can_accept_container(self, position: str, container: Any) -> bool:
+    def get_container(self, position: str) -> Optional[Any]:
         """
-        Check if a container can be accepted at a position.
+        Get the container at a position without removing it.
         
         Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            container: Container to check
-            
-        Returns:
-            True if the container can be accepted, False otherwise
-        """
-        try:
-            # Get container type and length
-            container_type = getattr(container, 'container_type', 'default')
-            container_length = self.get_container_length_in_subslots(container)
-            
-            # Check special area constraints
-            if hasattr(container, 'goods_type'):
-                goods_type = container.goods_type
-                
-                if goods_type == 'Reefer':
-                    # Reefer containers must be in reefer areas
-                    if not self.is_position_in_special_area(position, 'reefer'):
-                        return False
-                elif goods_type == 'Dangerous':
-                    # Dangerous containers must be in dangerous goods areas
-                    if not self.is_position_in_special_area(position, 'dangerous'):
-                        return False
-            
-            # Check container type constraints
-            if container_type == 'Trailer':
-                # Trailers must be in trailer areas
-                if not self.is_position_in_special_area(position, 'trailer'):
-                    return False
-                # Trailers can't be stacked
-                if self.get_stack_height(position) > 0:
-                    return False
-            elif container_type == 'Swap Body':
-                # Swap bodies must be in swap body areas
-                if not self.is_position_in_special_area(position, 'swap_body'):
-                    return False
-            
-            # Check height constraints
-            current_height = self.get_stack_height(position)
-            if current_height >= self.max_tier_height:
-                return False
-            
-            # Check if there are enough contiguous free subslots
-            row, bay, subslot = self.parse_position(position)
-            
-            # If no specific subslot provided, check from the beginning of the bay
-            if subslot is None:
-                subslot = 1
-            
-            # Check if there are enough subslots left in the bay
-            remaining_subslots = self.subslots_per_bay - (subslot - 1)
-            if remaining_subslots < container_length:
-                return False
-            
-            # Check if the subslots are free at the next tier
-            next_tier = current_height + 1
-            free_subslots = self.find_contiguous_free_subslots(
-                f"{row}{bay}.{subslot}", container_length, next_tier)
-            
-            if len(free_subslots) < container_length:
-                return False
-            
-            # Check stacking compatibility with container below
-            if current_height > 0:
-                container_below = None
-                for t in range(current_height, 0, -1):
-                    if position in self.container_registry and t in self.container_registry[position]:
-                        container_below = self.container_registry[position][t]
-                        break
-                
-                if container_below and hasattr(container, 'can_stack_with'):
-                    if not container.can_stack_with(container_below):
-                        return False
-            
-            # Check container-specific can_be_stacked rules
-            if hasattr(container, 'is_stackable') and not container.is_stackable and current_height > 0:
-                return False
-            
-            return True
-        except ValueError:
-            return False
-    
-    def get_proximity_mask(self, position: str, n: int, container=None) -> torch.Tensor:
-        """
-        Create a proximity mask for subslots within range n of the original position.
-        
-        Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            n: Number of bays to include in proximity
-            container: Optional container for filtering
-            
-        Returns:
-            Bitmap mask of proximate positions
-        """
-        try:
-            # Parse the position
-            row, bay, subslot = self.parse_position(position)
-            
-            # If no specific subslot provided, use the first subslot in the bay
-            if subslot is None:
-                subslot = 1
-            
-            # Build the full starting position
-            start_position = f"{row}{bay}.{subslot}"
-            start_bit_indices = self.encode_position(start_position)
-            
-            if not start_bit_indices:
-                return torch.zeros(self.num_words, dtype=torch.int64, device=self.device)
-            
-            start_bit_idx = start_bit_indices[0]
-            
-            # Use cache for repeated calculations
-            cache_key = (start_bit_idx, n)
-            if container:
-                container_type = getattr(container, 'container_type', 'default')
-                goods_type = getattr(container, 'goods_type', 'Regular')
-                cache_key = (start_bit_idx, n, container_type, goods_type)
-                
-            if cache_key in self.proximity_masks:
-                return self.proximity_masks[cache_key]
-            
-            # Create an empty proximity mask
-            proximity_mask = torch.zeros(self.num_words, dtype=torch.int64, device=self.device)
-            
-            # Calculate row and bay indices
-            row_idx = self.row_names.index(row)
-            bay_idx = bay - 1
-            
-            # Calculate bay range for proximity
-            min_bay = max(0, bay_idx - n)
-            max_bay = min(self.num_bays - 1, bay_idx + n)
-            
-            # Create a 2D tensor of the yard (rows x total_subslots)
-            yard_tensor = torch.zeros((self.num_rows, self.total_subslots), dtype=torch.bool, device=self.device)
-            
-            # Convert bay range to subslot range
-            min_subslot = min_bay * self.subslots_per_bay
-            max_subslot = (max_bay + 1) * self.subslots_per_bay - 1
-            max_subslot = min(max_subslot, self.total_subslots - 1)  # Ensure we don't exceed dimensions
-            
-            # Set rectangular region to True (all rows, bays within range)
-            yard_tensor[:, min_subslot:max_subslot+1] = True
-            
-            # Set original position to False (exclude it)
-            orig_subslot_idx = bay_idx * self.subslots_per_bay + (subslot - 1)
-            if 0 <= row_idx < self.num_rows and 0 <= orig_subslot_idx < self.total_subslots:
-                yard_tensor[row_idx, orig_subslot_idx] = False
-            
-            # Apply container type filtering
-            if container:
-                container_type = getattr(container, 'container_type', 'default')
-                container_length = self.get_container_length_in_subslots(container)
-                goods_type = getattr(container, 'goods_type', 'Regular')
-                
-                # Create a subslot-level mask based on container constraints
-                valid_positions_mask = torch.zeros_like(yard_tensor)
-                
-                # For each row and subslot
-                for r in range(self.num_rows):
-                    for s in range(self.total_subslots - container_length + 1):
-                        # For container to fit, we need contiguous subslots
-                        # and they need to be in the same bay or adjacent bays
-                        start_bay = s // self.subslots_per_bay
-                        end_bay = (s + container_length - 1) // self.subslots_per_bay
-                        
-                        # Must be contiguous within same bay or adjacent bays
-                        if end_bay > start_bay + 1:
-                            continue
-                        
-                        # Must have correct alignment within bay
-                        start_subslot_in_bay = s % self.subslots_per_bay
-                        end_subslot_in_bay = (s + container_length - 1) % self.subslots_per_bay
-                        
-                        # Check if spans multiple bays
-                        if start_bay != end_bay:
-                            # Can only span to adjacent bay if aligned properly
-                            if start_subslot_in_bay + container_length > self.subslots_per_bay:
-                                valid_positions_mask[r, s] = True
-                        else:
-                            # Within same bay, any position works
-                            valid_positions_mask[r, s] = True
-                
-                # Apply special area constraints
-                if container_type == "Trailer":
-                    # Get trailer area mask
-                    trailer_mask = torch.zeros_like(yard_tensor)
-                    for r in range(self.num_rows):
-                        for s in range(self.total_subslots):
-                            if s < self.total_subslots:  # Safety check
-                                pos = f"{self.row_names[r]}{s // self.subslots_per_bay + 1}.{s % self.subslots_per_bay + 1}"
-                                if self.is_position_in_special_area(pos, 'trailer'):
-                                    trailer_mask[r, s] = True
-                    valid_positions_mask &= trailer_mask
-                elif container_type == "Swap Body":
-                    # Get swap body area mask
-                    swap_body_mask = torch.zeros_like(yard_tensor)
-                    for r in range(self.num_rows):
-                        for s in range(self.total_subslots):
-                            if s < self.total_subslots:  # Safety check
-                                pos = f"{self.row_names[r]}{s // self.subslots_per_bay + 1}.{s % self.subslots_per_bay + 1}"
-                                if self.is_position_in_special_area(pos, 'swap_body'):
-                                    swap_body_mask[r, s] = True
-                    valid_positions_mask &= swap_body_mask
-                elif goods_type == "Reefer":
-                    # Get reefer area mask
-                    reefer_mask = torch.zeros_like(yard_tensor)
-                    for r in range(self.num_rows):
-                        for s in range(self.total_subslots):
-                            if s < self.total_subslots:  # Safety check
-                                pos = f"{self.row_names[r]}{s // self.subslots_per_bay + 1}.{s % self.subslots_per_bay + 1}"
-                                if self.is_position_in_special_area(pos, 'reefer'):
-                                    reefer_mask[r, s] = True
-                    valid_positions_mask &= reefer_mask
-                elif goods_type == "Dangerous":
-                    # Get dangerous area mask
-                    dangerous_mask = torch.zeros_like(yard_tensor)
-                    for r in range(self.num_rows):
-                        for s in range(self.total_subslots):
-                            if s < self.total_subslots:  # Safety check
-                                pos = f"{self.row_names[r]}{s // self.subslots_per_bay + 1}.{s % self.subslots_per_bay + 1}"
-                                if self.is_position_in_special_area(pos, 'dangerous'):
-                                    dangerous_mask[r, s] = True
-                    valid_positions_mask &= dangerous_mask
-                
-                # Only keep positions that satisfy both proximity and container constraints
-                yard_tensor &= valid_positions_mask
-            
-            # Convert to bit indices
-            rows, subslots = torch.where(yard_tensor)
-            bit_indices = rows * self.bits_per_row + subslots
-            
-            # Convert to word indices and bit positions
-            word_indices = bit_indices // 64
-            bit_positions = bit_indices % 64
-            
-            # Set bits in proximity mask
-            unique_words = torch.unique(word_indices)
-            for word_idx in unique_words:
-                word_idx_int = word_idx.item()
-                
-                # Skip if out of range
-                if word_idx_int >= self.num_words:
-                    continue
-                    
-                bits_in_word = bit_positions[word_indices == word_idx]
-                
-                for bit in bits_in_word:
-                    bit_offset = bit.item()
-                    # Safety check
-                    if 0 <= bit_offset < 64:
-                        proximity_mask[word_idx_int] |= (1 << bit_offset)
-            
-            # Cache result
-            self.proximity_masks[cache_key] = proximity_mask
-            return proximity_mask
-            
-        except ValueError:
-            return torch.zeros(self.num_words, dtype=torch.int64, device=self.device)
-    
-    def calc_possible_moves(self, position: str, n: int) -> List[str]:
-        """
-        Calculate all possible positions a container can be moved to within n bays.
-        
-        Args:
-            position: Starting position string (e.g., 'A1' or 'A1.1')
-            n: Number of bays to consider in each direction
-            
-        Returns:
-            List of valid destination bay positions (not subslots)
-        """
-        try:
-            # Check if position has a container to move
-            container = None
-            tier = None
-            
-            # Try direct lookup in registry first
-            if position in self.container_registry:
-                # Get the top container
-                if self.container_registry[position]:
-                    tier = max(self.container_registry[position].keys())
-                    container = self.container_registry[position][tier]
-            
-            # If not found, it might be a subslot position
-            if container is None:
-                row, bay, subslot = self.parse_position(position)
-                
-                # Try to find container in the registry with the bay position
-                bay_position = f"{row}{bay}"
-                if bay_position in self.container_registry:
-                    tier = max(self.container_registry[bay_position].keys())
-                    container = self.container_registry[bay_position][tier]
-            
-            # Still no container found
-            if container is None:
-                return []
-            
-            # Get proximity mask WITH container type filtering
-            proximity_mask = self.get_proximity_mask(position, n, container)
-            
-            # Get the container's length in subslots
-            container_length = self.get_container_length_in_subslots(container)
-            
-            # We need to check each potential position against container rules
-            valid_destinations = []
-            
-            # Get bit indices from mask
-            for word_idx in range(len(proximity_mask)):
-                word = proximity_mask[word_idx].item()
-                if word == 0:
-                    continue
-                
-                # Process each set bit in the word
-                for bit_offset in range(64):
-                    if (word >> bit_offset) & 1:
-                        dest_bit_idx = word_idx * 64 + bit_offset
-                        
-                        # Determine if this bit index is within our yard
-                        if dest_bit_idx < self.total_bits:
-                            try:
-                                # Get the subslot position
-                                dest_subslot_position = self.decode_position(dest_bit_idx)
-                                
-                                # Extract the bay position (remove the subslot suffix)
-                                row, bay, subslot = self.parse_position(dest_subslot_position)
-                                dest_bay_position = f"{row}{bay}"
-                                
-                                # Check if this is a valid starting position for the container
-                                if self.can_accept_container(dest_subslot_position, container):
-                                    # We add the bay position, not the subslot
-                                    if dest_bay_position not in valid_destinations:
-                                        valid_destinations.append(dest_bay_position)
-                            except ValueError:
-                                # Skip invalid positions
-                                continue
-            
-            return valid_destinations
-        except ValueError:
-            return []
-
-    def get_container(self, position: str, tier: int = None) -> Optional[Any]:
-        """
-        Get the container at a specific position and tier.
-        
-        Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            tier: Tier level (if None, gets the top container)
+            position: Position string
             
         Returns:
             Container object or None if no container found
         """
-        try:
-            # Parse the position
-            row, bay, subslot = self.parse_position(position)
-            
-            # Convert to bay position
-            bay_position = f"{row}{bay}"
-            
-            # Default to top container if tier not specified
-            if tier is None:
-                tier = self.get_stack_height(bay_position)
-                if tier == 0:
-                    return None
-            
-            # Check container registry
-            if bay_position in self.container_registry and tier in self.container_registry[bay_position]:
-                return self.container_registry[bay_position][tier]
-            
-            return None
-        except ValueError:
-            return None
+        return self.container_registry.get(position)
     
-    def get_top_container(self, position: str) -> Tuple[Optional[Any], Optional[int]]:
-        """
-        Get the top container at a position and its tier.
-        
-        Args:
-            position: Position string (e.g., 'A1' or 'A1.1')
-            
-        Returns:
-            Tuple of (container, tier) or (None, None) if no container found
-        """
-        try:
-            # Parse the position
-            row, bay, subslot = self.parse_position(position)
-            
-            # Convert to bay position
-            bay_position = f"{row}{bay}"
-            
-            # Get the stack height
-            tier = self.get_stack_height(bay_position)
-            if tier == 0:
-                return None, None
-            
-            # Get the top container
-            container = self.get_container(bay_position, tier)
-            return container, tier
-        except ValueError:
-            return None, None
-    
-    def find_container(self, container_id: str) -> Optional[Tuple[str, int]]:
+    def find_container(self, container_id: str) -> Optional[str]:
         """
         Find a container by ID.
         
@@ -1100,90 +529,182 @@ class EnhancedBitmapYard:
             container_id: ID of the container to find
             
         Returns:
-            Tuple of (position, tier) or None if not found
+            Position string or None if not found
         """
         # Check direct lookup first
-        if container_id in self.container_occupation:
-            return (self.container_occupation[container_id]['position'],
-                    self.container_occupation[container_id]['tier'])
+        if hasattr(self, 'container_id_to_position') and container_id in self.container_id_to_position:
+            return self.container_id_to_position[container_id]
         
-        # Fallback to searching the container registry
-        for position, tiers in self.container_registry.items():
-            for tier, container in tiers.items():
-                if hasattr(container, 'container_id') and container.container_id == container_id:
-                    return position, tier
+        # Fallback to searching all positions
+        for position, container in self.container_registry.items():
+            if hasattr(container, 'container_id') and container.container_id == container_id:
+                return position
         
         return None
     
-    def get_containers_at_position(self, position: str) -> Dict[int, Any]:
+    def get_proximity_mask(self, position: str, n: int, container_type: str = None) -> torch.Tensor:
         """
-        Get all containers at a position.
+        Create a proximity mask for positions within n bays of the specified position.
         
         Args:
-            position: Position string (e.g., 'A1')
+            position: Position string
+            n: Number of bays in each direction
+            container_type: Optional container type for special filtering
             
         Returns:
-            Dictionary mapping tier to container
+            Bitmap mask with 1s for positions within proximity
         """
-        try:
-            # Parse the position
-            row, bay, subslot = self.parse_position(position)
+        # Parse the position
+        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+        if not match:
+            raise ValueError(f"Invalid position format: {position}")
             
-            # Convert to bay position
-            bay_position = f"{row}{bay}"
+        row, bay, slot, tier = match.groups()
+        bay, slot, tier = int(bay), int(slot), int(tier)
+        
+        # Create cache key
+        cache_key = (position, n, container_type)
+        if cache_key in self.proximity_masks:
+            return self.proximity_masks[cache_key]
+        
+        # Create empty mask
+        mask = torch.zeros(self.total_words, dtype=torch.int64, device=self.device)
+        
+        # Calculate bay range
+        min_bay = max(1, bay - n)
+        max_bay = min(self.num_bays, bay + n)
+        
+        # For all positions within range
+        for row_name in self.row_names:
+            for bay_num in range(min_bay, max_bay + 1):
+                for slot_num in range(1, self.slots_per_bay + 1):
+                    # Use same tier as source position
+                    pos = f"{row_name}{bay_num}.{slot_num}-T{tier}"
+                    
+                    # Skip the source position
+                    if pos == position:
+                        continue
+                    
+                    try:
+                        bit_idx = self.encode_position(pos)
+                        word_idx = bit_idx // 64
+                        bit_offset = bit_idx % 64
+                        mask[word_idx] |= mask[word_idx] | self.powers_of_2[bit_offset]
+                    except ValueError:
+                        continue
+        
+        # Apply container type filtering if specified
+        if container_type:
+            valid_positions_mask = torch.zeros_like(mask)
             
-            if bay_position in self.container_registry:
-                return dict(self.container_registry[bay_position])
-            return {}
-        except ValueError:
-            return {}
-    
-    def clear(self):
-        """Clear the entire storage yard."""
-        # Reset all bitmaps
-        for i in range(self.max_tier_height):
-            self.tier_bitmaps[i].zero_()
-        
-        # Clear container registry
-        self.container_registry = {}
-        
-        # Clear container occupation tracking
-        self.container_occupation = {}
-        
-        # Clear proximity mask cache
-        self.proximity_masks = {}
-        
-        # Update occupied bitmap
-        self.update_occupied_bitmap()
-    
-    def get_state_representation(self) -> torch.Tensor:
-        """
-        Get a tensor representation of the yard state.
-        
-        Returns:
-            A 3D tensor of shape (num_rows, num_bays, max_tier_height)
-        """
-        # Create tensor for occupied positions
-        state = torch.zeros((self.num_rows, self.num_bays, self.max_tier_height), 
-                           dtype=torch.int8, device=self.device)
-        
-        # Loop through every bay position
-        for row_idx, row in enumerate(self.row_names):
-            for bay in range(1, self.num_bays + 1):
-                bay_position = f"{row}{bay}"
+            # For each position in the proximity
+            for word_idx in range(len(mask)):
+                word = mask[word_idx].item()
+                if word == 0:
+                    continue
                 
-                # Check if any containers at this position
-                if bay_position in self.container_registry:
-                    # Mark all tiers that have containers
-                    for tier, _ in self.container_registry[bay_position].items():
-                        if 1 <= tier <= self.max_tier_height:
-                            state[row_idx, bay - 1, tier - 1] = 1
+                # Process each set bit
+                for bit_offset in range(64):
+                    if (word & self.powers_of_2[bit_offset].item()) != 0:
+                        bit_idx = word_idx * 64 + bit_offset
+                        if bit_idx < self.total_slots:
+                            try:
+                                pos = self.decode_position(bit_idx)
+                                # Check if container type can be placed here
+                                if pos in self.valid_starts.get(container_type, set()):
+                                    # Set bit in the filtered mask
+                                    valid_positions_mask[word_idx] |= (1 << bit_offset)
+                            except ValueError:
+                                continue
+            
+            # Use the filtered mask
+            mask = valid_positions_mask
+            
+            # Apply additional filtering based on special areas if needed
+            if container_type == "Trailer":
+                mask &= self.special_area_bitmaps['trailer']
+            elif container_type == "Swap Body":
+                mask &= self.special_area_bitmaps['swap_body']
         
-        return state
+        # Cache the result
+        self.proximity_masks[cache_key] = mask
+        
+        return mask
+    
+    def calc_possible_moves(self, position: str, n: int) -> List[str]:
+        """
+        Calculate all possible positions a container can be moved to within n bays.
+        
+        Args:
+            position: Starting position string
+            n: Number of bays to consider in each direction
+            
+        Returns:
+            List of valid destination positions
+        """
+        # Check if position has a container to move
+        container = self.get_container(position)
+        if container is None:
+            return []
+        
+        # Get container type
+        container_type = container.container_type
+        
+        # Get proximity mask
+        proximity_mask = self.get_proximity_mask(position, n, container_type)
+        
+        # Initialize valid destinations list
+        valid_destinations = []
+        
+        # Process each potential destination in the mask
+        for word_idx in range(len(proximity_mask)):
+            word = proximity_mask[word_idx].item()
+            if word == 0:
+                continue
+            
+            # Process each set bit
+            for bit_offset in range(64):
+                if (word >> bit_offset) & 1:
+                    bit_idx = word_idx * 64 + bit_offset
+                    if bit_idx < self.total_slots:
+                        try:
+                            dest_position = self.decode_position(bit_idx)
+                            # Check if this is a valid starting position for this container
+                            if self.is_container_placement_valid(dest_position, container):
+                                valid_destinations.append(dest_position)
+                        except ValueError:
+                            continue
+        
+        return valid_destinations
+    
+    def batch_calc_possible_moves(self, positions: List[str], n: int) -> Dict[str, List[str]]:
+        """
+        Calculate possible moves for multiple containers in parallel.
+        
+        Args:
+            positions: List of position strings to process
+            n: Proximity range to use for all calculations
+            
+        Returns:
+            Dictionary mapping each position to a list of valid destinations
+        """
+        # Filter to only positions with containers
+        valid_positions = [pos for pos in positions if pos in self.container_registry]
+        
+        # Prepare storage for results
+        all_moves = {}
+        
+        # Process each position
+        for position in valid_positions:
+            container = self.container_registry[position]
+            valid_moves = self.calc_possible_moves(position, n)
+            all_moves[position] = valid_moves
+        
+        return all_moves
     
     def visualize_bitmap(self, bitmap, title="Bitmap Visualization"):
         """
-        Visualize a bitmap as a 2D grid using vectorized operations.
+        Visualize a bitmap as a 2D grid.
         
         Args:
             bitmap: The bitmap to visualize
@@ -1191,223 +712,263 @@ class EnhancedBitmapYard:
         """
         import matplotlib.pyplot as plt
         
-        # Create a 2D tensor representation with subslot resolution
-        grid = torch.zeros((self.num_rows, self.total_subslots), dtype=torch.float32, device=self.device)
+        # Create a 3D tensor representation (row, bay, slot+tier)
+        # For each row and bay, we'll show slots*tiers as a block
+        grid = np.zeros((self.num_rows, self.num_bays, self.slots_per_bay * self.max_tier_height), dtype=np.float32)
         
-        # Convert bitmap to 2D grid using vectorized operations
-        bitmap_expanded = bitmap.view(-1, 1)  # Shape (n_words, 1)
-        bits_expanded = torch.arange(64, device=self.device).repeat(len(bitmap), 1)  # Shape (n_words, 64)
+        # Fill the grid from the bitmap
+        for bit_idx in range(self.total_slots):
+            word_idx = bit_idx // 64
+            bit_offset = bit_idx % 64
+            
+            # Check if there's a bit set at this index
+            if word_idx < len(bitmap) and bit_offset < 64:
+                if (bitmap[word_idx] & self.powers_of_2[bit_offset]) != 0:
+                    # Decode the position
+                    pos = self.decode_position(bit_idx)
+                    match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', pos)
+                    if match:
+                        row, bay, slot, tier = match.groups()
+                        row_idx = self.row_names.index(row)
+                        bay_idx = int(bay) - 1
+                        slot_idx = int(slot) - 1
+                        tier_idx = int(tier) - 1
+                        
+                        # Convert to flattened index (slot first, then tier)
+                        flattened_idx = slot_idx * self.max_tier_height + tier_idx
+                        
+                        # Set the grid cell
+                        grid[row_idx, bay_idx, flattened_idx] = 1
         
-        # Generate all bit values
-        bit_values = (bitmap_expanded & (1 << bits_expanded)) != 0  # Shape (n_words, 64)
+        # Create the figure
+        fig = plt.figure(figsize=(15, 8))
+        ax = fig.add_subplot(111)
         
-        # Flatten to 1D array of bits
-        all_bits = bit_values.view(-1)[:self.total_bits]  # Ensure we don't exceed total bits
+        # Visualize as a 2D heatmap (flattening the slots+tiers dimension)
+        occupancy = np.sum(grid, axis=2) / (self.slots_per_bay * self.max_tier_height)
+        plt.imshow(occupancy, cmap='YlOrRd', interpolation='none')
         
-        # Reshape to match our grid layout
-        reshaped_bits = all_bits.view(self.num_rows, self.bits_per_row)
-        
-        # Extract only the valid subslots
-        grid = reshaped_bits[:, :self.total_subslots].float()
-        
-        # Visualize using matplotlib
-        plt.figure(figsize=(15, 6))
-        plt.imshow(grid.cpu().numpy(), cmap='Blues', interpolation='none')
-        plt.title(title)
-        plt.xlabel('Subslot')
+        # Add labels
+        plt.xlabel('Bay')
         plt.ylabel('Row')
+        plt.title(title)
         
         # Add row names on y-axis
         plt.yticks(range(self.num_rows), self.row_names)
         
-        # Add bay dividers
-        for bay in range(1, self.num_bays):
-            plt.axvline(x=bay * self.subslots_per_bay - 0.5, color='red', linestyle='-', linewidth=0.5)
+        # Add bay numbers on x-axis
+        plt.xticks(range(self.num_bays), range(1, self.num_bays + 1))
         
-        # Add grid lines
-        plt.grid(which='both', color='lightgrey', linestyle='-', linewidth=0.5)
+        # Add grid
+        plt.grid(False)
         
-        plt.colorbar(label='Occupied')
+        # Add colorbar
+        plt.colorbar(label='Occupancy Rate')
+        
         plt.tight_layout()
-        plt.show()
+        return fig, ax
     
-    def visualize_3d(self, show_container_types=True, figsize=(30, 20)):
+    def visualize_3d(self, show_container_types=True, figsize=(15, 10)):
         """
-        Create a 3D visualization with proper container orientation.
+        Create a 3D visualization of the container yard.
         
-        Each slot is 40ft long and containers are oriented with:
-        - Their long side along the bay axis
-        - Their short side along the row axis
-        - Their height upward in tiers
+        Args:
+            show_container_types: Whether to color containers by type
+            figsize: Figure size
+            
+        Returns:
+            Figure and axis objects
         """
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
         import numpy as np
         
-        # Create the figure and 3D axis
+        # Create figure and 3D axis
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111, projection='3d')
         
-        # Color mapping
+        # Container type colors
         container_colors = {
-            'TWEU': 'royalblue',
-            'THEU': 'purple',
-            'FEU': 'lightseagreen',
-            'FFEU': 'teal',
-            'Trailer': 'darkred',
-            'Swap Body': 'goldenrod',
-            'default': 'gray'
+            'TWEU': 'royalblue',       # 20ft
+            'THEU': 'purple',          # 30ft
+            'FEU': 'lightseagreen',    # 40ft
+            'FFEU': 'teal',            # 45ft
+            'Trailer': 'darkred',      # Trailer
+            'Swap Body': 'goldenrod',  # Swap Body
+            'default': 'gray'          # Default
         }
         
-        # Edge color mapping
+        # Goods type edge colors
         goods_edge_colors = {
             'Regular': 'black',
             'Reefer': 'blue',
             'Dangerous': 'red'
         }
         
-        # Set up legend elements
-        legend_elements = []
+        # Legend elements
         from matplotlib.patches import Patch
+        legend_elements = []
         
-        # Collect all containers to visualize
-        for position, tiers in self.container_registry.items():
-            try:
-                # Skip anything that's not a bay position
-                if '.' in position:
-                    continue
-                
-                # Parse bay position
-                row, bay, subslot = self.parse_position(position)
-                
+        # Containers to visualize
+        for position, container in self.container_registry.items():
+            # Get container properties
+            container_type = getattr(container, 'container_type', 'default')
+            goods_type = getattr(container, 'goods_type', 'Regular')
+            
+            # Get position coordinates
+            match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+            if match:
+                row, bay, slot, tier = match.groups()
                 row_idx = self.row_names.index(row)
-                bay_idx = bay - 1
+                bay_idx = int(bay) - 1
+                slot_idx = int(slot) - 1
+                tier_idx = int(tier) - 1
                 
-                # Process each tier
-                for tier, container in tiers.items():
-                    if 1 <= tier <= self.max_tier_height:
-                        container_type = getattr(container, 'container_type', 'default')
-                        goods_type = getattr(container, 'goods_type', 'Regular')
-                        
-                        # Get colors
-                        color = container_colors.get(container_type, container_colors['default'])
-                        edge_color = goods_edge_colors.get(goods_type, goods_edge_colors['Regular'])
-                        
-                        # Add to legend if needed
-                        legend_key = f"{container_type} - {goods_type}"
-                        if not any(le.get_label() == legend_key for le in legend_elements):
-                            legend_elements.append(
-                                Patch(facecolor=color, edgecolor=edge_color, label=legend_key)
-                            )
-                        
-                        # Get container length in subslots
-                        container_length = self.get_container_length_in_subslots(container)
-                        
-                        # Determine starting subslot
-                        # If container_id in occupation map, we know exactly where it is
-                        container_id = getattr(container, 'container_id', None)
-                        starting_subslot = 1
-                        
-                        if container_id and container_id in self.container_occupation:
-                            # Get the first subslot position
-                            first_subslot = self.container_occupation[container_id]['subslots'][0]
-                            _, _, starting_subslot = self.parse_position(first_subslot)
-                        
-                        # Calculate position and dimensions in the 3D space
-                        # Map to plot coordinates where 1 bay = 1 unit
-                        
-                        # Calculate x position (bay axis)
-                        # If the container doesn't start at subslot 1, adjust the position
-                        x_start = bay_idx + (starting_subslot - 1) / self.subslots_per_bay
-                        
-                        # Width is container_length / subslots_per_bay of a bay
-                        dx = container_length / self.subslots_per_bay
-                        
-                        # All containers have same width
-                        dy = 0.7  # Slightly less than 1 to see gaps
-                        
-                        # Height is one tier
-                        dz = 0.9  # Slightly less than 1 to see layers
-                        
-                        # Draw the container with proper dimensions and position
-                        ax.bar3d(
-                            x_start, row_idx + 0.15, tier - 1,      # Position (x, y, z)
-                            dx, dy, dz,                           # Dimensions (dx, dy, dz)
-                            color=color,
-                            shade=True,
-                            alpha=0.8,
-                            edgecolor=edge_color,
-                            linewidth=0.5
-                        )
-            except ValueError:
-                continue
+                # Get container dimensions
+                if container_type == 'TWEU':  # 20ft (2 slots)
+                    slots = 2
+                elif container_type == 'THEU':  # 30ft (3 slots)
+                    slots = 3
+                elif container_type == 'FEU':  # 40ft (4 slots)
+                    slots = 4
+                elif container_type == 'FFEU':  # 45ft (5 slots)
+                    slots = 5
+                else:  # Trailer, Swap Body, etc.
+                    slots = 4  # Default to full bay
+                
+                # Get colors
+                color = container_colors.get(container_type, container_colors['default'])
+                edge_color = goods_edge_colors.get(goods_type, goods_edge_colors['Regular'])
+                
+                # Add to legend if not already present
+                legend_key = f"{container_type} - {goods_type}"
+                if not any(le.get_label() == legend_key for le in legend_elements):
+                    legend_elements.append(
+                        Patch(facecolor=color, edgecolor=edge_color, label=legend_key)
+                    )
+                
+                # Draw the container based on its type
+                x = bay_idx
+                y = row_idx
+                z = tier_idx
+                
+                # For 20ft containers (TWEU), place in appropriate half of bay
+                if container_type == 'TWEU':
+                    # Check if slot is 1 or 3
+                    if int(slot) == 1:
+                        x_length = 0.5  # Half bay
+                    elif int(slot) == 3:
+                        x = bay_idx + 0.5  # Second half of bay
+                        x_length = 0.5  # Half bay
+                    else:
+                        continue  # Invalid slot
+                elif container_type == 'THEU':
+                    x_length = 0.75  # 3/4 of a bay
+                elif container_type == 'FEU':
+                    x_length = 1.0  # Full bay
+                elif container_type == 'FFEU':
+                    # FFEU spans into next bay
+                    x_length = 1.25  # 5/4 of a bay
+                else:
+                    x_length = 1.0  # Full bay for other types
+                
+                # Draw as 3D box
+                dx = x_length
+                dy = 0.8  # Slightly less than 1 to see gaps
+                dz = 0.8  # Slightly less than 1 to see gaps
+                
+                # Draw the container
+                ax.bar3d(
+                    x, y, z,          # Position
+                    dx, dy, dz,       # Dimensions
+                    color=color,
+                    shade=True,
+                    alpha=0.8,
+                    edgecolor=edge_color,
+                    linewidth=0.5
+                )
         
-        # Set axis labels and limits
+        # Set labels and limits
         ax.set_xlabel('Bay')
         ax.set_ylabel('Row')
         ax.set_zlabel('Tier')
         
-        # Set row labels to be A, B, C, etc.
+        # Set row labels
         ax.set_yticks(range(self.num_rows))
         ax.set_yticklabels(self.row_names)
         
-        # Set limits
-        ax.set_xlim(0, self.num_bays)
-        ax.set_ylim(0, self.num_rows)
-        ax.set_zlim(0, self.max_tier_height)
+        # Set bay labels
+        ax.set_xticks(range(0, self.num_bays, 2))
+        ax.set_xticklabels(range(1, self.num_bays + 1, 2))
         
-        # Adjust aspect ratio for better visualization
-        ax.set_box_aspect([self.num_bays/3, self.num_rows/6, self.max_tier_height/3])
+        # Set tier labels
+        ax.set_zticks(range(self.max_tier_height))
+        ax.set_zticklabels(range(1, self.max_tier_height + 1))
+        
+        # Set limits
+        ax.set_xlim(-0.5, self.num_bays - 0.5)
+        ax.set_ylim(-0.5, self.num_rows - 0.5)
+        ax.set_zlim(-0.5, self.max_tier_height - 0.5)
         
         # Set title and legend
-        ax.set_title('3D Container Yard Visualization with Subslot Support')
+        ax.set_title('3D Container Yard Visualization')
         if legend_elements:
             ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
         
-        # Set the viewing angle to better see the layout
-        ax.view_init(elev=20, azim=230)
+        # Set view angle
+        ax.view_init(elev=30, azim=225)
         
         plt.tight_layout()
         return fig, ax
     
-    def visualize_container_placement(self, container_type='FEU'):
-        """
-        Visualize valid placement positions for a specific container type.
+    def clear(self):
+        """Clear the entire storage yard."""
+        # Reset bitmap
+        self.occupied_bitmap.zero_()
         
-        Args:
-            container_type: Type of container to visualize placement for
-        """
-        import matplotlib.pyplot as plt
+        # Clear container registry
+        self.container_registry.clear()
         
-        # Get the placement mask for this container type
-        if container_type in self.container_placement_masks:
-            placement_mask = self.container_placement_masks[container_type]
-            self.visualize_bitmap(placement_mask, f"Valid placement positions for {container_type}")
-        else:
-            print(f"No placement mask for container type: {container_type}")
-    
+        # Clear container ID mapping
+        if hasattr(self, 'container_id_to_position'):
+            self.container_id_to_position.clear()
+
     def __str__(self):
         """String representation of the storage yard."""
-        container_count = sum(len(tiers) for tiers in self.container_registry.values())
+        container_count = len(self.container_registry)
         
-        # Get containers per row
+        # Count containers by row
         row_counts = {}
         for position in self.container_registry:
-            if '.' not in position:  # Skip subslot positions
-                row = position[0]
+            match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+            if match:
+                row = match.group(1)
                 if row in row_counts:
-                    row_counts[row] += len(self.container_registry[position])
+                    row_counts[row] += 1
                 else:
-                    row_counts[row] = len(self.container_registry[position])
+                    row_counts[row] = 1
         
         # Format string
         lines = []
-        lines.append(f"Enhanced Bitmap Storage Yard with Subslots:")
-        lines.append(f"- {self.num_rows} rows, {self.num_bays} bays, {self.subslots_per_bay} subslots per bay")
-        lines.append(f"- {container_count} containers")
+        lines.append(f"Slot-Tier Bitmap Yard: {self.num_rows} rows, {self.num_bays} bays, {container_count} containers")
         
         for row in self.row_names:
             count = row_counts.get(row, 0)
             lines.append(f"Row {row}: {count} containers")
         
         return '\n'.join(lines)
+    
+if __name__ == "__main__":
+    yard = SlotTierBitmapYard(
+    num_rows=5,            # 5 rows (A-E)
+    num_bays=58,           # 58 bays per row
+    max_tier_height=5,     # Maximum 5 containers high
+    special_areas={
+        'reefer': [('A', 1, 1), ('B', 1, 1), ('C', 1, 1), ('D', 1, 1), ('E', 1, 1),
+                    ('A', 58, 58), ('B', 58, 58), ('C', 58, 58), ('D', 58, 58), ('E', 58, 58)],
+        'dangerous': [('A', 28, 36), ('B', 28, 36), ('C', 28, 36)],
+        'trailer': [('E', 1, 58)],
+        'swap_body': [('E', 1, 58)]
+    },
+    device='cuda'
+)
