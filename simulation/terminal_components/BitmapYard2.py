@@ -154,7 +154,7 @@ class SlotTierBitmapYard:
         # These are template masks for different container types
         # Actual masks will be generated for specific positions when needed
         
-        # Create temporary dictionaries to store masks for all valid starting positions
+        # Create sets to store valid starting positions
         self.valid_starts = {
             'TWEU': set(),  # 20ft: positions where a TWEU can start
             'THEU': set(),  # 30ft: positions where a THEU can start
@@ -398,10 +398,56 @@ class SlotTierBitmapYard:
             if not self.is_position_in_special_area(position, 'dangerous'):
                 return False
         
-        # Check if starting position is valid for this container type
-        if container_type in ['TWEU', 'THEU', 'FEU', 'FFEU']:
-            if position not in self.valid_starts[container_type]:
+        # Parse the starting position
+        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+        if not match:
+            return False
+            
+        row, bay, slot, tier = match.groups()
+        bay, slot, tier = int(bay), int(slot), int(tier)
+        
+        # Stacking checks (evaluate stackability for containers above tier 1)
+        if tier > 1:
+            # Check container directly below 
+            position_below = f"{row}{bay}.{slot}-T{tier-1}"
+            
+            # Get container below
+            container_below = self.get_container(position_below)
+            
+            # If no container below, can't stack
+            if container_below is None:
                 return False
+                
+            # Check stacking compatibility
+            if (hasattr(container, 'can_stack_with') and 
+                not container.can_stack_with(container_below)):
+                return False
+                
+            # Check if container is stackable
+            if hasattr(container, 'is_stackable') and not container.is_stackable:
+                return False
+        
+        # Check if starting position is valid for this container type
+        # Only needed for containers with specific slot requirements
+        if container_type in ['TWEU', 'THEU', 'FEU', 'FFEU']:
+            # TWEU (20ft): must start at slot 1 or 3
+            if container_type == 'TWEU' and slot not in [1, 3]:
+                return False
+                
+            # THEU (30ft): must start at slot 1
+            elif container_type == 'THEU' and slot != 1:
+                return False
+                
+            # FEU (40ft): must start at slot 1
+            elif container_type == 'FEU' and slot != 1:
+                return False
+                
+            # FFEU (45ft): must start at slot 1 and have next bay available
+            elif container_type == 'FFEU':
+                if slot != 1:
+                    return False
+                if bay >= self.num_bays:  # No next bay available
+                    return False
         
         # Generate mask for container placement
         placement_mask = self.get_container_mask(position, container_type)
@@ -411,33 +457,6 @@ class SlotTierBitmapYard:
         
         if overlap.any():
             return False  # Overlaps with existing containers
-        
-        # Stacking checks (evaluate stackability for containers above tier 1)
-        match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
-        if match:
-            row, bay, slot, tier = match.groups()
-            tier = int(tier)
-            
-            # If tier > 1, check container below for stackability
-            if tier > 1:
-                # Check container directly below 
-                position_below = f"{row}{bay}.{slot}-T{tier-1}"
-                
-                # Get container below
-                container_below = self.get_container(position_below)
-                
-                # If no container below, can't stack
-                if container_below is None:
-                    return False
-                    
-                # Check stacking compatibility
-                if (hasattr(container, 'can_stack_with') and 
-                    not container.can_stack_with(container_below)):
-                    return False
-                    
-                # Check if container is stackable
-                if hasattr(container, 'is_stackable') and not container.is_stackable:
-                    return False
         
         return True
     
@@ -724,7 +743,7 @@ class SlotTierBitmapYard:
             # Check if there's a bit set at this index
             if word_idx < len(bitmap) and bit_offset < 64:
                 if (bitmap[word_idx] & self.powers_of_2[bit_offset]) != 0:
-                    # Decode the position
+                # Decode the position
                     pos = self.decode_position(bit_idx)
                     match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', pos)
                     if match:
@@ -957,18 +976,3 @@ class SlotTierBitmapYard:
             lines.append(f"Row {row}: {count} containers")
         
         return '\n'.join(lines)
-    
-if __name__ == "__main__":
-    yard = SlotTierBitmapYard(
-    num_rows=5,            # 5 rows (A-E)
-    num_bays=58,           # 58 bays per row
-    max_tier_height=5,     # Maximum 5 containers high
-    special_areas={
-        'reefer': [('A', 1, 1), ('B', 1, 1), ('C', 1, 1), ('D', 1, 1), ('E', 1, 1),
-                    ('A', 58, 58), ('B', 58, 58), ('C', 58, 58), ('D', 58, 58), ('E', 58, 58)],
-        'dangerous': [('A', 28, 36), ('B', 28, 36), ('C', 28, 36)],
-        'trailer': [('E', 1, 58)],
-        'swap_body': [('E', 1, 58)]
-    },
-    device='cuda'
-)
