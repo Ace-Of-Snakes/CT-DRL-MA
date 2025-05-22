@@ -156,10 +156,12 @@ class SlotTierBitmapYard:
         
         # Create sets to store valid starting positions
         self.valid_starts = {
-            'TWEU': set(),  # 20ft: positions where a TWEU can start
-            'THEU': set(),  # 30ft: positions where a THEU can start
-            'FEU': set(),   # 40ft: positions where a FEU can start
-            'FFEU': set(),  # 45ft: positions where a FFEU can start
+            'TWEU': set(),      # 20ft: positions where a TWEU can start
+            'THEU': set(),      # 30ft: positions where a THEU can start
+            'FEU': set(),       # 40ft: positions where a FEU can start
+            'FFEU': set(),      # 45ft: positions where a FFEU can start
+            'Trailer': set(),   # Trailer: positions where a Trailer can start
+            'Swap Body': set(), # Swap Body: positions where a Swap Body can start
         }
         
         # For each row and bay, compute valid starting positions
@@ -179,11 +181,13 @@ class SlotTierBitmapYard:
                         start_pos = f"{row}{bay}.1-T{tier}"
                         self.valid_starts['THEU'].add(start_pos)
                 
-                # For FEU (40ft): always starts at slot 1 (takes whole bay)
+                # For FEU, Trailer, Swap Body (40ft): always starts at slot 1 (takes whole bay)
                 if self.slots_per_bay == 4:  # Must have all 4 slots
                     for tier in range(1, self.max_tier_height + 1):
                         start_pos = f"{row}{bay}.1-T{tier}"
                         self.valid_starts['FEU'].add(start_pos)
+                        self.valid_starts['Trailer'].add(start_pos)
+                        self.valid_starts['Swap Body'].add(start_pos)
                 
                 # For FFEU (45ft): can only start at slot 1 if next bay exists
                 if bay < self.num_bays:  # Need next bay for 5th slot
@@ -1026,6 +1030,14 @@ class SlotTierBitmapYard:
             'default': 'gray'          # Default
         }
         
+        # Special area background colors (light tints)
+        special_area_colors = {
+            'reefer': 'lightblue',      # Light blue tint
+            'dangerous': 'lightcoral',   # Light red tint
+            'trailer': 'lightgray',      # Light gray tint
+            'swap_body': 'lightyellow'   # Light yellow tint
+        }
+        
         # Goods type patterns (for hatching)
         goods_patterns = {
             'Regular': '',         # No pattern
@@ -1075,6 +1087,18 @@ class SlotTierBitmapYard:
                         grid[row_idx, b, s, t] = 1
                         container_at_slot[(row_idx, b, s, t)] = (container_type, goods_type)
         
+        # Create special area mapping for visualization
+        special_area_at_slot = {}  # (row_idx, bay_idx, slot_idx) -> area_type
+        for area_type, areas in self.special_areas.items():
+            for area_row, start_bay, end_bay in areas:
+                if area_row in self.row_names:
+                    row_idx = self.row_names.index(area_row)
+                    for bay in range(start_bay, end_bay + 1):
+                        if 1 <= bay <= self.num_bays:
+                            bay_idx = bay - 1
+                            for slot in range(self.slots_per_bay):
+                                special_area_at_slot[(row_idx, bay_idx, slot)] = area_type
+        
         # Create the figure with larger size
         if show_tiers:
             # One subplot per tier
@@ -1088,7 +1112,23 @@ class SlotTierBitmapYard:
                 # Create a grid for this tier
                 tier_grid = np.zeros((self.num_rows, self.num_bays * self.slots_per_bay), dtype=np.int8)
                 
-                # Fill the tier grid and track container info
+                # First, add special area background tinting
+                for row in range(self.num_rows):
+                    for bay in range(self.num_bays):
+                        for slot in range(self.slots_per_bay):
+                            col = bay * self.slots_per_bay + slot
+                            
+                            # Check if this slot is in a special area
+                            if (row, bay, slot) in special_area_at_slot:
+                                area_type = special_area_at_slot[(row, bay, slot)]
+                                color = special_area_colors.get(area_type, 'white')
+                                
+                                # Add background rectangle for special area
+                                bg_rect = patches.Rectangle((col - 0.5, row - 0.5), 1, 1, 
+                                                        linewidth=0, facecolor=color, alpha=0.3)
+                                ax.add_patch(bg_rect)
+                
+                # Fill the tier grid and add container rectangles
                 for row in range(self.num_rows):
                     for bay in range(self.num_bays):
                         for slot in range(self.slots_per_bay):
@@ -1102,14 +1142,11 @@ class SlotTierBitmapYard:
                                     color = container_colors.get(ctype, container_colors['default'])
                                     hatch = goods_patterns.get(gtype, '')
                                     
-                                    # Add colored rectangle
+                                    # Add colored rectangle for container
                                     rect = patches.Rectangle((col - 0.5, row - 0.5), 1, 1, 
                                                             linewidth=1, edgecolor='black',
-                                                            facecolor=color, hatch=hatch, alpha=0.7)
+                                                            facecolor=color, hatch=hatch, alpha=0.8)
                                     ax.add_patch(rect)
-                
-                # Plot the base grid
-                ax.imshow(tier_grid, cmap='binary', interpolation='none', alpha=0.3)
                 
                 # Add grid lines
                 for i in range(self.num_rows + 1):
@@ -1133,8 +1170,24 @@ class SlotTierBitmapYard:
                     ax.set_ylabel('Row', fontsize=10)
         
         else:
-            # Create an integrated view with all tiers
+            # Create an integrated view with all tiers (similar changes for special area tinting)
             fig, ax = plt.subplots(figsize=figsize)
+            
+            # Add special area background tinting first
+            for row in range(self.num_rows):
+                for bay in range(self.num_bays):
+                    for slot in range(self.slots_per_bay):
+                        col = bay * self.slots_per_bay + slot
+                        
+                        # Check if this slot is in a special area
+                        if (row, bay, slot) in special_area_at_slot:
+                            area_type = special_area_at_slot[(row, bay, slot)]
+                            color = special_area_colors.get(area_type, 'white')
+                            
+                            # Add background rectangle for special area
+                            bg_rect = patches.Rectangle((col - 0.5, row - 0.5), 1, 1, 
+                                                    linewidth=0, facecolor=color, alpha=0.3)
+                            ax.add_patch(bg_rect)
             
             # Combine all tiers into one visualization
             combined_grid = np.zeros((self.num_rows, self.num_bays * self.slots_per_bay), dtype=np.int8)
@@ -1147,7 +1200,7 @@ class SlotTierBitmapYard:
                                 combined_grid[row, col] += 1
             
             # Plot heatmap
-            im = ax.imshow(combined_grid, cmap='YlOrRd', interpolation='none')
+            im = ax.imshow(combined_grid, cmap='YlOrRd', interpolation='none', alpha=0.7)
             
             # Add grid lines
             for i in range(self.num_rows + 1):
@@ -1181,28 +1234,34 @@ class SlotTierBitmapYard:
                             ha='center', va='center', fontsize=6,  # Smaller font
                             color='black' if combined_grid[row, col] < 3 else 'white')
         
-        # Add a legend for container types and goods types
+        # Add a comprehensive legend
         handles = []
         labels = []
         
         # Container type legend
         for ctype, color in container_colors.items():
             if ctype != 'default':  # Skip default
-                handle = patches.Patch(facecolor=color, edgecolor='black', label=ctype)
+                handle = patches.Patch(facecolor=color, edgecolor='black', label=f'{ctype} Container')
                 handles.append(handle)
-                labels.append(ctype)
+                labels.append(f'{ctype} Container')
         
         # Goods type legend
         for gtype, pattern in goods_patterns.items():
             if pattern:  # Skip empty pattern
-                handle = patches.Patch(facecolor='white', edgecolor='black', hatch=pattern, label=gtype)
+                handle = patches.Patch(facecolor='white', edgecolor='black', hatch=pattern, label=f'{gtype} Goods')
                 handles.append(handle)
-                labels.append(gtype)
+                labels.append(f'{gtype} Goods')
         
-        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.98, 0.98), fontsize=9)
+        # Special area legend
+        for area_type, color in special_area_colors.items():
+            handle = patches.Patch(facecolor=color, edgecolor='black', alpha=0.3, label=f'{area_type.title()} Area')
+            handles.append(handle)
+            labels.append(f'{area_type.title()} Area')
+        
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.98, 0.98), fontsize=8)
         
         plt.tight_layout()
-        plt.subplots_adjust(right=0.85)  # Make room for the legend
+        plt.subplots_adjust(right=0.82)  # Make more room for the legend
         return fig, axes if show_tiers else ax
 
     def __str__(self):
