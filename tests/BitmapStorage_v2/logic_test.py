@@ -226,7 +226,7 @@ def main():
     # 9. Test proximity calculation
     print("\n----- Testing proximity calculation -----")
     
-    test_positions = ['D13.1-T1', 'A1.1-T1', 'A28.1-T1', 'E5.1-T1']
+    test_positions = ['D13.1-T1', 'A1.1-T1', 'A28.1-T1', 'E5.1-T1', 'E10.1-T1']
     for position in test_positions:
         container = yard.get_container(position)
         if container:
