@@ -538,7 +538,52 @@ class SlotTierBitmapYard:
         Returns:
             Container object or None if no container found
         """
-        return self.container_registry.get(position)
+        # First, check if the position is directly registered
+        if position in self.container_registry:
+            return self.container_registry[position]
+        
+        # If not, check if the position is occupied in the bitmap
+        if self.is_position_occupied(position):
+            # Find the container that occupies this position
+            match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+            if not match:
+                return None
+                
+            row, bay, slot, tier = match.groups()
+            bay, slot, tier = int(bay), int(slot), int(tier)
+            
+            # Search in likely locations based on format of multi-slot containers
+            for reg_position, container in self.container_registry.items():
+                reg_match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', reg_position)
+                if not reg_match:
+                    continue
+                    
+                reg_row, reg_bay, reg_slot, reg_tier = reg_match.groups()
+                reg_bay, reg_slot, reg_tier = int(reg_bay), int(reg_slot), int(reg_tier)
+                
+                if reg_row != row or reg_tier != tier:
+                    continue  # Different row or tier, not relevant
+                    
+                # Check if this container spans multiple slots
+                container_type = container.container_type
+                
+                # Calculate slots this container occupies
+                if container_type == 'TWEU':  # 20ft: 2 slots
+                    if reg_slot in [1, 3] and reg_slot <= slot < reg_slot + 2 and reg_bay == bay:
+                        return container
+                elif container_type == 'THEU':  # 30ft: 3 slots
+                    if reg_slot == 1 and 1 <= slot < 4 and reg_bay == bay:
+                        return container
+                elif container_type == 'FEU':  # 40ft: 4 slots (full bay)
+                    if reg_slot == 1 and 1 <= slot <= 4 and reg_bay == bay:
+                        return container
+                elif container_type == 'FFEU':  # 45ft: 5 slots
+                    if reg_slot == 1 and reg_bay == bay and 1 <= slot <= 4:
+                        return container  # In the same bay
+                    elif reg_slot == 1 and reg_bay + 1 == bay and slot == 1:
+                        return container  # In the next bay, first slot
+        
+        return None
     
     def find_container(self, container_id: str) -> Optional[str]:
         """
@@ -632,7 +677,7 @@ class SlotTierBitmapYard:
                                 # Check if container type can be placed here
                                 if pos in self.valid_starts.get(container_type, set()):
                                     # Set bit in the filtered mask
-                                    valid_positions_mask[word_idx] |= (1 << bit_offset)
+                                    valid_positions_mask[word_idx] |= self.powers_of_2[bit_offset]  # Use powers_of_2 instead of bit shifting
                             except ValueError:
                                 continue
             
@@ -951,6 +996,214 @@ class SlotTierBitmapYard:
         # Clear container ID mapping
         if hasattr(self, 'container_id_to_position'):
             self.container_id_to_position.clear()
+
+    def visualize_detailed_bitmap(self, show_tiers=True, figsize=(25, 12)):
+        """
+        Visualize the bitmap with detailed representation of tiers and slots.
+        
+        Args:
+            show_tiers: If True, creates separate subplots for each tier
+            figsize: Figure size
+            
+        Returns:
+            Figure and axes objects
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+        
+        # Create a detailed grid representation (rows, bays, slots, tiers)
+        grid = np.zeros((self.num_rows, self.num_bays, self.slots_per_bay, self.max_tier_height), dtype=np.int8)
+        
+        # Container type colors
+        container_colors = {
+            'TWEU': 'royalblue',       # 20ft
+            'THEU': 'purple',          # 30ft
+            'FEU': 'lightseagreen',    # 40ft
+            'FFEU': 'teal',            # 45ft
+            'Trailer': 'darkred',      # Trailer
+            'Swap Body': 'goldenrod',  # Swap Body
+            'default': 'gray'          # Default
+        }
+        
+        # Goods type patterns (for hatching)
+        goods_patterns = {
+            'Regular': '',         # No pattern
+            'Reefer': '/',         # Diagonal lines
+            'Dangerous': 'x'       # Cross-hatching
+        }
+        
+        # Fill the grid with container information
+        container_at_slot = {}  # (row_idx, bay_idx, slot_idx, tier_idx) -> (container_type, goods_type)
+        
+        for position, container in self.container_registry.items():
+            # Get container properties
+            container_type = getattr(container, 'container_type', 'default')
+            goods_type = getattr(container, 'goods_type', 'Regular')
+            
+            # Get position coordinates
+            match = re.match(r'([A-Z])(\d+)\.(\d+)-T(\d+)', position)
+            if match:
+                row, bay, slot, tier = match.groups()
+                row_idx = self.row_names.index(row)
+                bay_idx = int(bay) - 1
+                slot_idx = int(slot) - 1
+                tier_idx = int(tier) - 1
+                
+                # Determine which slots this container occupies based on its type
+                slots_to_occupy = []
+                
+                if container_type == 'TWEU':  # 20ft (2 slots)
+                    slots_to_occupy = [(bay_idx, s, tier_idx) for s in range(slot_idx, slot_idx + 2) 
+                                    if s < self.slots_per_bay]
+                elif container_type == 'THEU':  # 30ft (3 slots)
+                    slots_to_occupy = [(bay_idx, s, tier_idx) for s in range(slot_idx, slot_idx + 3) 
+                                    if s < self.slots_per_bay]
+                elif container_type in ['FEU', 'Trailer', 'Swap Body']:  # 40ft (4 slots, full bay)
+                    slots_to_occupy = [(bay_idx, s, tier_idx) for s in range(0, self.slots_per_bay)]
+                elif container_type == 'FFEU':  # 45ft (5 slots)
+                    # 4 slots in current bay
+                    slots_to_occupy = [(bay_idx, s, tier_idx) for s in range(0, self.slots_per_bay)]
+                    # 1 slot in next bay
+                    if bay_idx + 1 < self.num_bays:
+                        slots_to_occupy.append((bay_idx + 1, 0, tier_idx))
+                
+                # Mark all slots this container occupies
+                for b, s, t in slots_to_occupy:
+                    if (0 <= b < self.num_bays and 0 <= s < self.slots_per_bay and 
+                        0 <= t < self.max_tier_height):
+                        grid[row_idx, b, s, t] = 1
+                        container_at_slot[(row_idx, b, s, t)] = (container_type, goods_type)
+        
+        # Create the figure with larger size
+        if show_tiers:
+            # One subplot per tier
+            fig, axes = plt.subplots(1, self.max_tier_height, figsize=figsize)
+            if self.max_tier_height == 1:
+                axes = [axes]  # Make sure axes is a list for single tier
+                
+            for tier in range(self.max_tier_height):
+                ax = axes[tier]
+                
+                # Create a grid for this tier
+                tier_grid = np.zeros((self.num_rows, self.num_bays * self.slots_per_bay), dtype=np.int8)
+                
+                # Fill the tier grid and track container info
+                for row in range(self.num_rows):
+                    for bay in range(self.num_bays):
+                        for slot in range(self.slots_per_bay):
+                            col = bay * self.slots_per_bay + slot
+                            if grid[row, bay, slot, tier] == 1:
+                                tier_grid[row, col] = 1
+                                
+                                # Get container info for this slot
+                                if (row, bay, slot, tier) in container_at_slot:
+                                    ctype, gtype = container_at_slot[(row, bay, slot, tier)]
+                                    color = container_colors.get(ctype, container_colors['default'])
+                                    hatch = goods_patterns.get(gtype, '')
+                                    
+                                    # Add colored rectangle
+                                    rect = patches.Rectangle((col - 0.5, row - 0.5), 1, 1, 
+                                                            linewidth=1, edgecolor='black',
+                                                            facecolor=color, hatch=hatch, alpha=0.7)
+                                    ax.add_patch(rect)
+                
+                # Plot the base grid
+                ax.imshow(tier_grid, cmap='binary', interpolation='none', alpha=0.3)
+                
+                # Add grid lines
+                for i in range(self.num_rows + 1):
+                    ax.axhline(i - 0.5, color='gray', linewidth=0.5)
+                for i in range(self.num_bays * self.slots_per_bay + 1):
+                    ax.axvline(i - 0.5, color='gray', linewidth=0.5)
+                    
+                    # Add thicker lines between bays
+                    if i % self.slots_per_bay == 0:
+                        ax.axvline(i - 0.5, color='black', linewidth=2)
+                
+                # Add labels with smaller font size
+                ax.set_xticks(np.arange(0, self.num_bays * self.slots_per_bay, self.slots_per_bay) + self.slots_per_bay/2 - 0.5)
+                ax.set_xticklabels(range(1, self.num_bays + 1), fontsize=8)  # Smaller font
+                ax.set_yticks(np.arange(self.num_rows))
+                ax.set_yticklabels(self.row_names, fontsize=10)
+                
+                ax.set_title(f'Tier {tier+1}', fontsize=12)
+                ax.set_xlabel('Bay', fontsize=10)
+                if tier == 0:  # Only add ylabel to first subplot
+                    ax.set_ylabel('Row', fontsize=10)
+        
+        else:
+            # Create an integrated view with all tiers
+            fig, ax = plt.subplots(figsize=figsize)
+            
+            # Combine all tiers into one visualization
+            combined_grid = np.zeros((self.num_rows, self.num_bays * self.slots_per_bay), dtype=np.int8)
+            for tier in range(self.max_tier_height):
+                for row in range(self.num_rows):
+                    for bay in range(self.num_bays):
+                        for slot in range(self.slots_per_bay):
+                            col = bay * self.slots_per_bay + slot
+                            if grid[row, bay, slot, tier] == 1:
+                                combined_grid[row, col] += 1
+            
+            # Plot heatmap
+            im = ax.imshow(combined_grid, cmap='YlOrRd', interpolation='none')
+            
+            # Add grid lines
+            for i in range(self.num_rows + 1):
+                ax.axhline(i - 0.5, color='gray', linewidth=0.5)
+            for i in range(self.num_bays * self.slots_per_bay + 1):
+                ax.axvline(i - 0.5, color='gray', linewidth=0.5)
+                
+                # Add thicker lines between bays
+                if i % self.slots_per_bay == 0:
+                    ax.axvline(i - 0.5, color='black', linewidth=2)
+            
+            # Add labels with smaller font
+            ax.set_xticks(np.arange(0, self.num_bays * self.slots_per_bay, self.slots_per_bay) + self.slots_per_bay/2 - 0.5)
+            ax.set_xticklabels(range(1, self.num_bays + 1), fontsize=8)
+            ax.set_yticks(np.arange(self.num_rows))
+            ax.set_yticklabels(self.row_names, fontsize=10)
+            
+            ax.set_title('Container Yard Occupancy (Stack Heights)', fontsize=14)
+            ax.set_xlabel('Bay', fontsize=10)
+            ax.set_ylabel('Row', fontsize=10)
+            
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label('Tier occupancy', fontsize=10)
+            
+            # Add text annotations for stack heights with smaller font
+            for row in range(self.num_rows):
+                for col in range(self.num_bays * self.slots_per_bay):
+                    if combined_grid[row, col] > 0:
+                        ax.text(col, row, str(combined_grid[row, col]), 
+                            ha='center', va='center', fontsize=6,  # Smaller font
+                            color='black' if combined_grid[row, col] < 3 else 'white')
+        
+        # Add a legend for container types and goods types
+        handles = []
+        labels = []
+        
+        # Container type legend
+        for ctype, color in container_colors.items():
+            if ctype != 'default':  # Skip default
+                handle = patches.Patch(facecolor=color, edgecolor='black', label=ctype)
+                handles.append(handle)
+                labels.append(ctype)
+        
+        # Goods type legend
+        for gtype, pattern in goods_patterns.items():
+            if pattern:  # Skip empty pattern
+                handle = patches.Patch(facecolor='white', edgecolor='black', hatch=pattern, label=gtype)
+                handles.append(handle)
+                labels.append(gtype)
+        
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.98, 0.98), fontsize=9)
+        
+        plt.tight_layout()
+        plt.subplots_adjust(right=0.85)  # Make room for the legend
+        return fig, axes if show_tiers else ax
 
     def __str__(self):
         """String representation of the storage yard."""

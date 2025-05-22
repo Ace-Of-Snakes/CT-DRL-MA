@@ -109,7 +109,7 @@ def main():
     # 4. Test stacking (vertical tier placement)
     print("\n----- Testing stacking (vertical tiers) -----")
     
-    stack_position = 'D15.1-T1'
+    stack_position = 'D16.1-T1'
     stack_containers = [
         ContainerFactory.create_container("STACK001", "TWEU", "Import", "Regular", weight=24000),
         ContainerFactory.create_container("STACK002", "TWEU", "Import", "Regular", weight=20000),
@@ -252,7 +252,11 @@ def main():
     all_moves = yard.batch_calc_possible_moves(positions_with_containers, n=5)
     end_time = time.time()
     total_time = end_time - start_time
-    
+    # This should work
+    new_ffeu = ContainerFactory.create_container("FFEU002", "FFEU", "Import", "Regular", weight=28000)
+    success = yard.add_container('D14.1-T2', new_ffeu)
+    print(f"Adding new FFEU container to D14.1-T2: {'Success' if success else 'Failed'}")
+
     num_positions = len(positions_with_containers)
     num_moves = sum(len(moves) for moves in all_moves.values())
     
@@ -271,13 +275,24 @@ def main():
         plt.savefig('slottier_yard_bitmap.png', dpi=150)
         plt.close()
         
+        # Detailed visualization showing tiers and slots
+        print("Generating detailed tier-by-tier visualization...")
+        fig, axes = yard.visualize_detailed_bitmap(show_tiers=True, figsize=(20, 10))
+        plt.savefig('slottier_yard_detailed.png', dpi=150)
+        plt.close()
+
+        # Summary visualization
+        print("Generating summary stack height visualization...")
+        fig, ax = yard.visualize_detailed_bitmap(show_tiers=False, figsize=(15, 8))
+        plt.savefig('slottier_yard_summary.png', dpi=150)
+        plt.close()
         # 3D visualization
         print("Generating 3D visualization...")
         fig, ax = yard.visualize_3d(show_container_types=True, figsize=(15, 10))
         plt.savefig('slottier_yard_3d.png', dpi=150)
         plt.close()
         
-        print("Visualizations saved as 'slottier_yard_bitmap.png' and 'slottier_yard_3d.png'")
+        print("Visualizations saved as PNG files.")
     except Exception as e:
         print(f"Visualization error: {e}")
     
