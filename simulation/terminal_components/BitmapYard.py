@@ -491,10 +491,11 @@ class BitmapStorageYard:
     def calc_possible_moves(self, position: str, n: int) -> List[str]:
         """
         Calculate all possible positions a container can be moved to within n bays.
+        Now properly distinguishes between N=1 (pre-marshalling) and N=5 (transfer).
         
         Args:
             position: Starting position string (e.g., 'A1')
-            n: Number of bays to consider in each direction
+            n: Number of bays to consider (1 for pre-marshalling, 5 for transfers)
             
         Returns:
             List of valid destination positions
@@ -505,10 +506,11 @@ class BitmapStorageYard:
             if container is None:
                 return []
             
-            # Get proximity mask WITH container type filtering
+            # Get proximity mask WITH container type filtering and proper N value
             proximity_mask = self.get_proximity_mask(position, n, container)
             
-            # We need to check each potential position against container rules
+            # For N=1 (pre-marshalling), only return storage positions
+            # For N=5 (transfers), return all valid positions
             valid_destinations = []
             
             # Get bit indices from mask
@@ -522,22 +524,30 @@ class BitmapStorageYard:
                     if (word >> bit_offset) & 1:
                         dest_bit_idx = word_idx * 64 + bit_offset
                         
-                        # Determine if this bit index is within our yard
                         if dest_bit_idx < self.total_bits:
                             try:
                                 dest_position = self.decode_position(dest_bit_idx)
                                 
-                                # Double-check if container can be placed here
-                                # (this includes additional checks beyond just area type)
+                                # Apply N-specific filtering
+                                if n == 1:
+                                    # Pre-marshalling: only storage-to-storage moves
+                                    if not self._is_storage_position_internal(dest_position):
+                                        continue
+                                
+                                # Check if container can be placed here
                                 if self.can_accept_container(dest_position, container):
                                     valid_destinations.append(dest_position)
                             except ValueError:
-                                # Skip invalid positions
                                 continue
             
             return valid_destinations
         except ValueError:
             return []
+
+
+    def _is_storage_position_internal(self, position: str) -> bool:
+        """Internal helper to check if position is storage (for bitmap yard)."""
+        return position and position[0].isalpha() and position[1:].isdigit()
 
     def find_all_moves_gpu(self):
         """

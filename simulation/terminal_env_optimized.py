@@ -955,9 +955,79 @@ class OptimizedTerminalEnvironment(gym.Env):
         
         return observation, reward, terminated, truncated, info
 
-    # Include all other methods from the original TerminalEnvironment class
-    # with minimal modifications for compatibility...
-    
+    def _generate_crane_action_mask_optimized(self, crane_action_mask):
+        """Generate crane action masks using GPU-accelerated proximity calculations with proper N values."""
+        for i, crane in enumerate(self.cranes):
+            # Skip if crane is not available yet
+            if self.current_simulation_time < self.crane_available_times[i].item():
+                continue
+            
+            # Get all storage positions with containers in this crane's operational area
+            crane_positions = []
+            for row_idx, row in enumerate(self.terminal.storage_row_names):
+                for bay in range(crane.start_bay + 1, crane.end_bay + 2):
+                    if bay <= self.terminal.num_storage_slots_per_row:
+                        position = f"{row}{bay}"
+                        container, _ = self.storage_yard.get_top_container(position)
+                        if container is not None:
+                            crane_positions.append(position)
+            
+            # Add truck and train positions within crane area
+            for spot, truck in self.trucks_in_terminal.items():
+                if truck.has_containers():
+                    spot_idx = int(spot.split('_')[1]) - 1
+                    if crane.start_bay <= spot_idx <= crane.end_bay:
+                        crane_positions.append(spot)
+            
+            for track, train in self.trains_in_terminal.items():
+                for j, wagon in enumerate(train.wagons):
+                    if not wagon.is_empty():
+                        slot = f"{track.lower()}_{j+1}"
+                        slot_idx = j
+                        if crane.start_bay <= slot_idx <= crane.end_bay:
+                            crane_positions.append(slot)
+            
+            # Process each position with appropriate N value
+            if crane_positions:
+                for source_pos in crane_positions:
+                    if source_pos in self.position_to_idx:
+                        source_idx = self.position_to_idx[source_pos]
+                        container, _ = self.storage_yard.get_top_container(source_pos)
+                        
+                        if container:
+                            # Determine N value based on move type
+                            if self._is_storage_position(source_pos):
+                                # For storage positions, check what type of moves are possible
+                                
+                                # N=1 for pre-marshalling (storage-to-storage within 1 bay)
+                                premarshalling_moves = self.storage_yard.calc_possible_moves(source_pos, n=1)
+                                for dest_pos in premarshalling_moves:
+                                    if (dest_pos in self.position_to_idx and 
+                                        self._is_storage_position(dest_pos) and
+                                        self._validate_crane_move(source_pos, dest_pos, crane)):
+                                        dest_idx = self.position_to_idx[dest_pos]
+                                        crane_action_mask[i, source_idx, dest_idx] = 1
+                                
+                                # N=5 for moving to trucks/trains (transfer operations)
+                                transfer_moves = self.storage_yard.calc_possible_moves(source_pos, n=5)
+                                for dest_pos in transfer_moves:
+                                    if (dest_pos in self.position_to_idx and 
+                                        not self._is_storage_position(dest_pos) and  # Only trucks/trains
+                                        self._validate_crane_move(source_pos, dest_pos, crane)):
+                                        dest_idx = self.position_to_idx[dest_pos]
+                                        crane_action_mask[i, source_idx, dest_idx] = 1
+                            
+                            else:
+                                # For truck/train positions, use N=5 to reach parallel storage positions
+                                possible_moves = self.storage_yard.calc_possible_moves(source_pos, n=5)
+                                for dest_pos in possible_moves:
+                                    if (dest_pos in self.position_to_idx and
+                                        self._validate_crane_move(source_pos, dest_pos, crane)):
+                                        dest_idx = self.position_to_idx[dest_pos]
+                                        crane_action_mask[i, source_idx, dest_idx] = 1
+
+
+
     def evaluate_need_for_premarshalling(self):
         """Determine if pre-marshalling is needed based on yard state."""
         # Use GPU-accelerated operations to check yard state
