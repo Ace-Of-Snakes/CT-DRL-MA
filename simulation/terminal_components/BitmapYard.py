@@ -583,7 +583,7 @@ class BitmapStorageYard:
         all_moves = self.batch_calc_possible_moves(occupied_positions, n=5)
         
         end_time = time.time()
-        print(f"GPU-accelerated find_all_moves processed {len(occupied_positions)} containers in {end_time - start_time:.4f} seconds")
+        # print(f"GPU-accelerated find_all_moves processed {len(occupied_positions)} containers in {end_time - start_time:.4f} seconds")
         
         return all_moves
 
@@ -666,8 +666,8 @@ class BitmapStorageYard:
         
         # Report timing
         end_time = time.time()
-        print(f"Batch processed {len(valid_positions)} positions in {end_time - start_time:.4f} seconds")
-        print(f"Average time per position: {(end_time - start_time) * 1000 / len(valid_positions):.2f} ms")
+        # print(f"Batch processed {len(valid_positions)} positions in {end_time - start_time:.4f} seconds")
+        # print(f"Average time per position: {(end_time - start_time) * 1000 / len(valid_positions):.2f} ms")
         
         return all_moves
 
@@ -722,7 +722,41 @@ class BitmapStorageYard:
         
         # Update occupied bitmap
         self.update_occupied_bitmap()
+
+    def get_containers_by_type(self, container_type: str) -> List[Tuple[str, int, Any]]:
+        """
+        Get all containers of a specific type using GPU-accelerated search.
+        
+        Args:
+            container_type: Type of container to find
+            
+        Returns:
+            List of tuples (position, tier, container)
+        """
+        results = []
+        
+        # Iterate through all positions in the container registry
+        for position, tiers in self.container_registry.items():
+            for tier, container in tiers.items():
+                # Check if container has the desired type
+                if hasattr(container, 'container_type') and container.container_type == container_type:
+                    results.append((position, tier, container))
+        
+        return results
     
+    def get_container_count(self) -> int:
+        """
+        Get the total number of containers in the storage yard.
+        
+        Returns:
+            Total container count
+        """
+        count = 0
+        for position, tiers in self.container_registry.items():
+            count += len(tiers)
+        
+        return count
+
     def get_state_representation(self) -> torch.Tensor:
         """
         Get a tensor representation of the yard state.
@@ -858,7 +892,7 @@ class BitmapStorageYard:
             all_moves[position] = moves
         
         end_time = time.time()
-        print(f"Found all possible moves in {end_time - start_time:.6f} seconds")
+        # print(f"Found all possible moves in {end_time - start_time:.6f} seconds")
         
         return all_moves
     
