@@ -174,6 +174,61 @@ class OptimizedTerminalAgent(nn.Module):
         # Log the architecture
         self._log_architecture()
 
+    def _extract_transfer_mask(self, action_masks):
+        """Extract mask for transfer actions (not storage-to-storage with N=1)."""
+        if 'crane_movement' not in action_masks:
+            return None
+        
+        crane_mask = action_masks['crane_movement']
+        transfer_mask = np.zeros_like(crane_mask)
+        
+        # For transfer movements, we want:
+        # 1. Any non-storage source to any destination (N=5)
+        # 2. Storage source to non-storage destination (N=5)
+        # 3. Exclude storage-to-storage with N=1 (that's pre-marshalling)
+        
+        for i in range(crane_mask.shape[0]):  # For each crane
+            for j in range(crane_mask.shape[1]):  # For each source
+                for k in range(crane_mask.shape[2]):  # For each destination
+                    # Skip storage-to-storage moves within 1 bay (those are pre-marshalling)
+                    if (j >= self.storage_position_threshold and 
+                        k >= self.storage_position_threshold):
+                        # This is storage-to-storage, check if it's within N=1 distance
+                        # For now, we'll consider all storage-to-storage as pre-marshalling
+                        # and exclude them from transfer mask
+                        continue
+                    
+                    # This is a transfer movement (truck/train involved)
+                    transfer_mask[i, j, k] = crane_mask[i, j, k]
+        
+        return transfer_mask
+
+    def _extract_yard_mask(self, action_masks):
+        """Extract mask for yard optimization actions (storage-to-storage with N=1 only)."""
+        if 'crane_movement' not in action_masks:
+            return None
+        
+        crane_mask = action_masks['crane_movement']
+        yard_mask = np.zeros_like(crane_mask)
+        
+        # For yard optimization, we only want storage-to-storage moves within N=1
+        for i in range(crane_mask.shape[0]):  # For each crane
+            for j in range(crane_mask.shape[1]):  # For each source
+                # Skip if source is not storage
+                if j < self.storage_position_threshold:
+                    continue
+                    
+                for k in range(crane_mask.shape[2]):  # For each destination
+                    # Skip if destination is not storage
+                    if k < self.storage_position_threshold:
+                        continue
+                    
+                    # Both source and destination are storage
+                    # This represents pre-marshalling moves (N=1)
+                    yard_mask[i, j, k] = crane_mask[i, j, k]
+        
+        return yard_mask
+
     def _log_architecture(self):
         """Log the network architecture for debugging."""
         print(f"Initialized OptimizedTerminalAgent with:")
