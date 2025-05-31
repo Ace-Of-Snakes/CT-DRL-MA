@@ -1,6 +1,7 @@
 from typing import Dict, Tuple, List
 from simulation.terminal_components.Container import Container, ContainerFactory
 import numpy as np
+from collections import defaultdict
 
 class BooleanStorageYard:
     def __init__(self, 
@@ -230,13 +231,159 @@ class BooleanStorageYard:
         container = self.remove_container(loc_coordinates)
         self.add_container(container, dest_coordinates)
 
+    def _find_valid_container_placements(self, available_coordinates, container_type: str) -> List[Tuple]:
+        """
+        OPTIMIZED: Find valid starting positions for containers using bit manipulation.
+        Time complexity: O(1) per position group.
+        
+        Args:
+            available_coordinates: NumPy array of (row, bay, split, tier) tuples
+            container_type: Container type to get length for
+            
+        Returns:
+            List of valid starting positions as (row, bay, tier, start_split) tuples
+        """
+        if len(available_coordinates) == 0 or container_type not in self.container_lengths:
+            return []
+        
+        container_length = self.container_lengths[container_type]
+        
+        # Handle cross-bay containers (like FFEU=5 with split_factor=4)
+        if container_length > self.split_factor:
+            return self._find_cross_bay_placements(available_coordinates, container_type)
+        
+        # Group coordinates by (row, bay, tier) and create bitmasks
+        position_groups = defaultdict(int)
+        
+        for coord in available_coordinates:
+            row, bay, split, tier = coord
+            key = (row, bay, tier)  # Group by position
+            position_groups[key] |= (1 << split)  # Set bit at split position
+        
+        valid_placements = []
+        
+        # Create container mask (e.g., length=2 → 0b11, length=4 → 0b1111)
+        container_mask = (1 << container_length) - 1
+        
+        # Check each position group
+        for (row, bay, tier), bitmask in position_groups.items():
+            # Only allow START or END positions, not middle positions
+            valid_start_positions = self._get_valid_start_positions(container_length)
+            
+            for start_split in valid_start_positions:
+                if start_split + container_length <= self.split_factor:  # Safety check
+                    shifted_mask = container_mask << start_split
+                    
+                    # O(1) check: are all required consecutive positions available?
+                    if (bitmask & shifted_mask) == shifted_mask:
+                        valid_placements.append((row, bay, tier, start_split))
+        
+        return valid_placements
+
+    def _get_valid_start_positions(self, container_length: int) -> List[int]:
+        """
+        Get valid starting positions for containers based on START/END placement rule.
+        
+        Args:
+            container_length: Length of container in split positions
+            
+        Returns:
+            List of valid starting split positions (only start=0 or end positions)
+        """
+        if container_length > self.split_factor:
+            # Special case for containers longer than split_factor (like FFEU=5 in split_factor=4)
+            # TODO: Implement cross-bay spanning logic
+            return [0]  # For now, only allow start position
+        
+        elif container_length == self.split_factor:
+            # Container uses full bay (e.g., FEU=4 in split_factor=4)
+            return [0]  # Only start position possible
+        
+        else:
+            # Container fits within bay with room to spare
+            # Allow START (position 0) or END (position that aligns to end of bay)
+            start_position = 0
+            end_position = self.split_factor - container_length
+            
+            if start_position == end_position:
+                # Edge case: only one position possible
+                return [start_position]
+            else:
+                # Both start and end positions available
+                return [start_position, end_position]
+
+    def _find_cross_bay_placements(self, available_coordinates, container_type: str) -> List[Tuple]:
+        """
+        Handle containers that span across multiple bays (like FFEU=5 in split_factor=4).
+        
+        Args:
+            available_coordinates: Available positions
+            container_type: Container type (FFEU, etc.)
+            
+        Returns:
+            List of valid cross-bay placements as (row, start_bay, tier, start_split) tuples
+        """
+        if container_type not in self.container_lengths:
+            return []
+            
+        container_length = self.container_lengths[container_type]
+        
+        if container_length <= self.split_factor:
+            return []  # Not a cross-bay container
+        
+        # Group coordinates by (row, tier) for cross-bay analysis
+        position_groups = defaultdict(lambda: defaultdict(set))
+        
+        for coord in available_coordinates:
+            row, bay, split, tier = coord
+            position_groups[row][tier].add((bay, split))
+        
+        valid_placements = []
+        
+        for row in position_groups:
+            for tier in position_groups[row]:
+                bay_splits = position_groups[row][tier]
+                
+                # Sort by bay, then split
+                sorted_positions = sorted(bay_splits)
+                
+                # Look for consecutive positions across bays
+                # For FFEU (length=5): need 5 consecutive split positions
+                # Could be: bay_n splits [2,3] + bay_(n+1) splits [0,1,2]
+                
+                for i in range(len(sorted_positions) - container_length + 1):
+                    # Check if we have container_length consecutive positions
+                    consecutive_positions = []
+                    
+                    current_bay, current_split = sorted_positions[i]
+                    for j in range(container_length):
+                        expected_bay = current_bay + (current_split + j) // self.split_factor
+                        expected_split = (current_split + j) % self.split_factor
+                        
+                        if (expected_bay, expected_split) in bay_splits:
+                            consecutive_positions.append((expected_bay, expected_split))
+                        else:
+                            break
+                    
+                    if len(consecutive_positions) == container_length:
+                        # Valid cross-bay placement found
+                        start_bay, start_split = consecutive_positions[0]
+                        valid_placements.append((row, start_bay, tier, start_split))
+        
+        return valid_placements
+
     def search_insertion_position(self, bay: int, goods: str, container_type: str, max_proximity: int):
         '''
+        ENHANCED: Now returns valid starting positions for containers based on their length.
+        
         Args:
             - bay : index of bay that is parallel to train_slot
-            - container_type : str in [r,dg,sb_t,reg] to correspond to masks
-            - container_length :  str in self.container_length_masks
+            - goods : str in [r,dg,sb_t,reg] to correspond to masks
+            - container_type : str in container_lengths dict (TWEU, FEU, etc.)
             - max_proximity : int of bays to left or right to be searched
+            
+        Returns:
+            List of valid starting positions as (row, bay, tier, start_split) tuples
         '''
         # Assemble basic mask of available spaces
         match goods:
@@ -245,11 +392,11 @@ class BooleanStorageYard:
             case 'dg':
                 available_places = self.dg_mask & self.dynamic_yard_mask
             case 'sb_t':
-                available_places = self.dg_mask & self.dynamic_yard_mask
+                available_places = self.sb_t_mask & self.dynamic_yard_mask  # Fixed: was using dg_mask
             case 'reg':
                 available_places = self.reg_mask & self.dynamic_yard_mask
             case _:
-                raise Exception('Storage Yard: invalid container_type passed in search_insertion_position()')
+                raise Exception('Storage Yard: invalid goods type passed in search_insertion_position()')
             
         # Assess stacking rules
         for k in self.cldymc:
@@ -258,61 +405,75 @@ class BooleanStorageYard:
 
         # Determine possible bays
         min_bay = bay*self.split_factor - max_proximity*self.split_factor if bay - max_proximity > 0 else 0
-        max_bay = bay*self.split_factor + max_proximity*self.split_factor if bay + max_proximity < self.n_bays else self.n_bays*self.split_factor
-
-        # np.set_printoptions(linewidth=(6*self.n_rows*self.n_tiers*+5))
-        np.set_printoptions(linewidth=600)
-        print(available_places,'\n\n')
+        max_bay = bay*self.split_factor + max_proximity*self.split_factor if bay + max_proximity < self.n_bays*self.split_factor else self.n_bays*self.split_factor
 
         # Block off everything past min and max bay
         available_places[:min_bay, :] = False
         available_places[max_bay:, :] = False
 
-        # TODO: find a way to account for stacking rules i.e. no 20 on 40foot or vice versa
-
-
         # Convert to coordinates
         available_coordinates = self.coordinates[available_places]
 
         if len(available_coordinates) > 0:
-            grouped_coordinates = sorted(available_coordinates, key=lambda x: x[0])
-            print(grouped_coordinates)
-            return grouped_coordinates
+            # OPTIMIZATION: Use bit manipulation to find valid container placements
+            valid_placements = self._find_valid_container_placements(available_coordinates, container_type)
             
-        # With this we have calculated all possible movements for container
-        return available_coordinates
+            # Sort by row for consistent output
+            valid_placements.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+            
+            return valid_placements
+            
+        return []
+
+    def get_container_coordinates_from_placement(self, placement: Tuple[int, int, int, int], container_type: str) -> List[Tuple[int, int, int, int]]:
+        """
+        Convert a placement tuple to full coordinate list for add_container/remove_container.
+        Handles both regular and cross-bay placements.
+        
+        Args:
+            placement: (row, bay, tier, start_split) tuple from search_insertion_position
+            container_type: Container type to get length for
+            
+        Returns:
+            List of (row, bay, split, tier) coordinates for all positions the container occupies
+        """
+        if container_type not in self.container_lengths:
+            return []
+        
+        row, bay, tier, start_split = placement
+        container_length = self.container_lengths[container_type]
+        
+        coordinates = []
+        
+        for i in range(container_length):
+            # Calculate which bay and split this position falls into
+            current_bay = bay + (start_split + i) // self.split_factor
+            current_split = (start_split + i) % self.split_factor
+            
+            # Safety checks
+            if current_bay < self.n_bays and current_split < self.split_factor:
+                coordinates.append((row, current_bay, current_split, tier))
+        
+        return coordinates
 
 
 if __name__ == "__main__":
     import time
-    start= time.time()
+    start = time.time()
     new_yard = BooleanStorageYard(
         n_rows=5,
         n_bays=15,
         n_tiers=3,
         # coordinates are in form (bay, row, type = r,dg,sb_t)
         coordinates=[
-
             # Reefers on both ends
             (1, 1, "r"), (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
             (15, 1, "r"), (15, 2, "r"), (15, 3, "r"), (15, 4, "r"), (15, 5, "r"),
             
             # Row nearest to trucks is for swap bodies and trailers
-            (1, 1, "sb_t"),
-            (2, 1, "sb_t"),
-            (3, 1, "sb_t"),
-            (4, 1, "sb_t"),
-            (5, 1, "sb_t"),
-            (6, 1, "sb_t"),
-            (7, 1, "sb_t"),
-            (8, 1, "sb_t"),
-            (9, 1, "sb_t"),
-            (10, 1, "sb_t"),
-            (11, 1, "sb_t"),
-            (12, 1, "sb_t"),
-            (13, 1, "sb_t"),
-            (14, 1, "sb_t"),
-            (15, 1, "sb_t"),
+            (1, 1, "sb_t"), (2, 1, "sb_t"), (3, 1, "sb_t"), (4, 1, "sb_t"), (5, 1, "sb_t"),
+            (6, 1, "sb_t"), (7, 1, "sb_t"), (8, 1, "sb_t"), (9, 1, "sb_t"), (10, 1, "sb_t"),
+            (11, 1, "sb_t"), (12, 1, "sb_t"), (13, 1, "sb_t"), (14, 1, "sb_t"), (15, 1, "sb_t"),
             
             # Pit in the middle for dangerous goods
             (7, 3, "dg"), (8, 3, "dg"), (9, 3, "dg"),
@@ -320,27 +481,67 @@ if __name__ == "__main__":
             (7, 5, "dg"), (8, 5, "dg"), (9, 5, "dg"),
         ],
         split_factor=4,
-        validate= False
+        validate=False
     )
+    end = time.time()
+    print(f"Initialization time: {end-start:.4f}s")
 
+    # Test the optimized search
+    start = time.time()
+    
+    # Test with TWEU (length 2)
+    print("\n=== Testing TWEU (length 2) placement ===")
+    valid_placements = new_yard.search_insertion_position(6, 'reg', 'TWEU', 3)
+    print(f"Found {len(valid_placements)} valid TWEU placements")
+    if valid_placements:
+        print("First 5 placements:", valid_placements[:5])
+        
+        # Test coordinate conversion
+        first_placement = valid_placements[0]
+        coords = new_yard.get_container_coordinates_from_placement(first_placement, 'TWEU')
+        print(f"Placement {first_placement} converts to coordinates: {coords}")
+        print("Expected: Only start (0,1) or end (2,3) positions allowed")
+    
+    # Test with THEU (length 3)
+    print("\n=== Testing THEU (length 3) placement ===")
+    valid_placements_theu = new_yard.search_insertion_position(6, 'reg', 'THEU', 3)
+    print(f"Found {len(valid_placements_theu)} valid THEU placements")
+    if valid_placements_theu:
+        print("First 5 THEU placements:", valid_placements_theu[:5])
+        print("Expected: Only positions 0 (start) and 1 (end) for each bay")
+    
+    # Test with FEU (length 4)
+    print("\n=== Testing FEU (length 4) placement ===")
+    valid_placements_feu = new_yard.search_insertion_position(6, 'reg', 'FEU', 3)
+    print(f"Found {len(valid_placements_feu)} valid FEU placements")
+    if valid_placements_feu:
+        print("FEU placements:", valid_placements_feu[:5])
+        print("Expected: Only position 0 (full bay) for each bay")
+    
+    # Test with FFEU (length 5) - cross-bay container
+    print("\n=== Testing FFEU (length 5) cross-bay placement ===")
+    valid_placements_ffeu = new_yard.search_insertion_position(6, 'reg', 'FFEU', 3)
+    print(f"Found {len(valid_placements_ffeu)} valid FFEU placements")
+    if valid_placements_ffeu:
+        print("FFEU placements:", valid_placements_ffeu[:3])
+        print("Expected: Cross-bay spanning positions")
+    
+    end = time.time()
+    print(f"\nSearch time: {end-start:.4f}s")
+
+    # Test container operations
+    print("\n=== Testing container add/remove ===")
     new_container = ContainerFactory.create_container("REG001", "TWEU", "Import", "Regular", weight=20000)
-    coordinates =[
-        (1, 1, 0, 0),
-        (1, 1, 1, 0)
-    ]
-    end=time.time()
-    print(end-start)
-
-    start=time.time()
-    new_yard.add_container(new_container, coordinates)
-    new_yard.remove_container(coordinates)
-    end=time.time()
-    print(end-start)
-
-    from datetime import timedelta
-    start=time.time()
-    new_yard.search_insertion_position(6, 'reg', 'xyz', 3)
-    end= time.time()
-    print(end-start)
-
-    # for now both functions are at <1ms
+    
+    start = time.time()
+    if valid_placements:
+        # Use the optimized coordinate conversion
+        placement = valid_placements[0]
+        coordinates = new_yard.get_container_coordinates_from_placement(placement, 'TWEU')
+        
+        new_yard.add_container(new_container, coordinates)
+        removed_container = new_yard.remove_container(coordinates)
+        print(f"Container operations successful: {removed_container.container_id}")
+    
+    end = time.time()
+    print(f"Container add/remove time: {end-start:.4f}s")
