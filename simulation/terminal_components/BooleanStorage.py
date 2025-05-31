@@ -70,7 +70,7 @@ class BooleanStorageYard:
                 for tier in range(self.n_tiers):
                     for split in range(self.split_factor):
                         if tier == 0:
-                            bool_arr[(bay)*self.split_factor+split][(row)*self.n_tiers+tier] = True
+                            bool_arr[row*self.n_tiers*self.split_factor + tier*self.split_factor + split][bay] = True
         
         return bool_arr
 
@@ -81,7 +81,7 @@ class BooleanStorageYard:
                 for tier in range(self.n_tiers):
                     for split in range(self.split_factor):
                         coordinate_format = (row, bay, split, tier)
-                        coordinate_arr[(bay)*self.split_factor+split][(row)*self.n_tiers+tier] = coordinate_format
+                        coordinate_arr[row*self.n_tiers*self.split_factor + tier*self.split_factor + split][bay] = coordinate_format
         
         return coordinate_arr
 
@@ -104,15 +104,15 @@ class BooleanStorageYard:
                 case "r":
                     for i in range(self.n_tiers):
                         for j in range(self.split_factor):
-                            r_mask[(bay-1)*self.split_factor+j][(row-1)*self.n_tiers+i] = True
+                            r_mask[(row-1)*self.n_tiers*self.split_factor + i*self.split_factor + j][bay-1] = True
                 case "dg":
                     for i in range(self.n_tiers):
                         for j in range(self.split_factor):
-                            dg_mask[(bay-1)*self.split_factor+j][(row-1)*self.n_tiers+i] = True
+                            dg_mask[(row-1)*self.n_tiers*self.split_factor + i*self.split_factor + j][bay-1] = True
                 case "sb_t":
                     for i in range(self.n_tiers):
                         for j in range(self.split_factor):
-                            sb_t_mask[(bay-1)*self.split_factor+j][(row-1)*self.n_tiers+i] = True
+                            sb_t_mask[(row-1)*self.n_tiers*self.split_factor + i*self.split_factor + j][bay-1] = True
                 case _:
                     raise Exception("Storage Yard Class: invalid coordinates passed") 
         return (r_mask, dg_mask, sb_t_mask)
@@ -404,12 +404,16 @@ class BooleanStorageYard:
                 available_places = available_places & self.cldymc[k]
 
         # Determine possible bays
-        min_bay = bay*self.split_factor - max_proximity*self.split_factor if bay - max_proximity > 0 else 0
-        max_bay = bay*self.split_factor + max_proximity*self.split_factor if bay + max_proximity < self.n_bays*self.split_factor else self.n_bays*self.split_factor
+        # min_bay = bay*self.split_factor - max_proximity*self.split_factor if bay - max_proximity > 0 else 0
+        # max_bay = bay*self.split_factor + max_proximity*self.split_factor if bay + max_proximity < self.n_bays*self.split_factor else self.n_bays*self.split_factor
+        min_bay = max(0, bay - max_proximity)
+        max_bay = min(self.n_bays, bay + max_proximity + 1)
 
         # Block off everything past min and max bay
-        available_places[:min_bay, :] = False
-        available_places[max_bay:, :] = False
+        # available_places[:min_bay, :] = False
+        # available_places[max_bay:, :] = False
+        available_places[:, :min_bay] = False
+        available_places[:, max_bay:] = False
 
         # Convert to coordinates
         available_coordinates = self.coordinates[available_places]
@@ -461,7 +465,7 @@ if __name__ == "__main__":
     import time
     start = time.time()
     new_yard = BooleanStorageYard(
-        n_rows=5,
+        n_rows=6,
         n_bays=15,
         n_tiers=3,
         # coordinates are in form (bay, row, type = r,dg,sb_t)
