@@ -16,26 +16,74 @@ class ReplayBuffer:
     
     def __init__(self, capacity=50000):
         """Initialize replay buffer with fixed capacity."""
-        self.buffer = deque(maxlen=capacity)
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
         self.state_dim = None
+        
+        # Pre-allocate numpy arrays for faster sampling
+        self._states = None
+        self._next_states = None
+        self._rewards = None
+        self._dones = None
+        self._initialized = False
     
     def add(self, state, action, action_type, reward, next_state, done, action_mask):
         """Add experience to the buffer."""
-        # Only store experiences with consistent state dimensions
-        if self.state_dim is None:
+        # Initialize arrays on first add
+        if not self._initialized and self.state_dim is None:
             self.state_dim = len(state)
-        elif len(state) != self.state_dim:
+            self._states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+            self._next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+            self._rewards = np.zeros(self.capacity, dtype=np.float32)
+            self._dones = np.zeros(self.capacity, dtype=np.bool_)
+            self._actions = [None] * self.capacity
+            self._action_types = np.zeros(self.capacity, dtype=np.int32)
+            self._action_masks = [None] * self.capacity
+            self._initialized = True
+        
+        # Only store experiences with consistent state dimensions
+        if len(state) != self.state_dim:
             return  # Skip adding experiences with inconsistent dimensions
-            
-        experience = Experience(state, action, action_type, reward, next_state, done, action_mask)
-        self.buffer.append(experience)
+        
+        # Store in pre-allocated arrays
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(self.position)
+        
+        self._states[self.position] = state
+        self._next_states[self.position] = next_state
+        self._rewards[self.position] = reward
+        self._dones[self.position] = done
+        self._actions[self.position] = action
+        self._action_types[self.position] = action_type
+        self._action_masks[self.position] = action_mask
+        
+        self.position = (self.position + 1) % self.capacity
     
     def sample(self, batch_size):
-        """Sample a batch of experiences randomly."""
-        if len(self.buffer) < batch_size:
+        """Sample a batch of experiences efficiently."""
+        if len(self.buffer) < batch_size or not self._initialized:
             return None
         
-        return random.sample(self.buffer, batch_size)
+        # Sample indices
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        
+        # Create experience tuples using pre-allocated arrays
+        experiences = []
+        for idx in indices:
+            pos = self.buffer[idx]
+            exp = Experience(
+                self._states[pos].copy(),
+                self._actions[pos],
+                self._action_types[pos],
+                self._rewards[pos],
+                self._next_states[pos].copy(),
+                self._dones[pos],
+                self._action_masks[pos]
+            )
+            experiences.append(exp)
+        
+        return experiences
     
     def __len__(self):
         """Return current buffer size."""
@@ -466,13 +514,18 @@ class OptimizedTerminalAgent(nn.Module):
                 self = OptimizedTerminalAgent(state_dim, self.action_dims, self.device)
                 return  # Skip this update
             
-            # Unpack experiences
-            states = torch.FloatTensor([e.state for e in experiences]).to(self.device)
+            # MOST EFFICIENT: Convert individual states to tensors first, then stack
+            state_tensors = [torch.from_numpy(e.state).to(self.device) for e in experiences]
+            next_state_tensors = [torch.from_numpy(e.next_state).to(self.device) for e in experiences]
+            
+            states = torch.stack(state_tensors)
+            next_states = torch.stack(next_state_tensors)
+            rewards = torch.tensor([e.reward for e in experiences], dtype=torch.float32, device=self.device).unsqueeze(1)
+            dones = torch.tensor([e.done for e in experiences], dtype=torch.float32, device=self.device).unsqueeze(1)
+            
+            # Extract other data
             actions = [e.action for e in experiences]
             action_types = [e.action_type for e in experiences]
-            rewards = torch.FloatTensor([e.reward for e in experiences]).unsqueeze(1).to(self.device)
-            next_states = torch.FloatTensor([e.next_state for e in experiences]).to(self.device)
-            dones = torch.FloatTensor([e.done for e in experiences]).unsqueeze(1).to(self.device)
             
             # Process by action type and compute loss separately for each
             loss = 0
@@ -552,12 +605,13 @@ class OptimizedTerminalAgent(nn.Module):
             target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
     
     def _flatten_state(self, state):
-        """Flatten state dictionary to vector."""
+        """Flatten state dictionary to vector with compact representation."""
         # Extract relevant features and flatten
         crane_positions = state['crane_positions'].flatten()
         crane_available_times = state['crane_available_times'].flatten()
+        terminal_truck_available_times = state['terminal_truck_available_times'].flatten()
         current_time = state['current_time'].flatten()
-        yard_state = state['yard_state'].flatten()
+        compact_yard_state = state['yard_state']  # Already compact
         parking_status = state['parking_status'].flatten()
         rail_status = state['rail_status'].flatten()
         queue_sizes = state['queue_sizes'].flatten()
@@ -565,9 +619,10 @@ class OptimizedTerminalAgent(nn.Module):
         # Concatenate all features
         flat_state = np.concatenate([
             crane_positions, 
-            crane_available_times, 
+            crane_available_times,
+            terminal_truck_available_times,
             current_time, 
-            yard_state, 
+            compact_yard_state,  # Much smaller now
             parking_status, 
             rail_status, 
             queue_sizes
