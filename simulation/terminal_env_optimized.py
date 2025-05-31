@@ -126,6 +126,17 @@ class OptimizedTerminalEnvironment(gym.Env):
         # Initialize simplified rendering flag
         self.simplified_rendering = False
 
+        # Action mask caching
+        self._action_mask_cache = None
+        self._last_action_mask_time = -1
+        self._last_truck_count = 0
+        self._last_train_count = 0
+        self._last_storage_container_count = 0
+        self._action_mask_cache_duration = 300  # 5 minutes cache duration
+        
+        # Pre-compute valid destinations for different container types
+        self._precompute_valid_destinations()
+        
         # Performance monitoring
         self.performance_stats = {
             'action_mask_time': 0.0,
@@ -350,8 +361,8 @@ class OptimizedTerminalEnvironment(gym.Env):
             'yard_state': spaces.Box(
                 low=0,
                 high=1,
-                shape=(self.terminal.num_storage_rows, self.terminal.num_storage_slots_per_row, 5),
-                dtype=np.int32
+                shape=(22,),  # Compact features: 5+5+12 = 22
+                dtype=np.float32
             ),
             'parking_status': spaces.Box(
                 low=0,
@@ -496,58 +507,233 @@ class OptimizedTerminalEnvironment(gym.Env):
             'terminal_truck': terminal_truck_mask
         }
     
+    def _get_compact_yard_features(self):
+        """Get compact yard representation with additional learnable features."""
+        # Basic occupancy by row (much smaller than full 3D tensor)
+        row_occupancy = np.zeros(self.terminal.num_storage_rows, dtype=np.float32)
+        row_heights = np.zeros(self.terminal.num_storage_rows, dtype=np.float32)
+        
+        # Container type distribution
+        container_type_counts = {
+            'regular': 0, 'reefer': 0, 'dangerous': 0, 
+            'trailer': 0, 'swap_body': 0
+        }
+        
+        # Priority and deadline features
+        total_containers = 0
+        high_priority_count = 0
+        overdue_count = 0
+        
+        # Process all containers efficiently
+        for position, tiers in self.storage_yard.container_registry.items():
+            row_idx = self.terminal.storage_row_names.index(position[0])
+            containers_at_pos = len(tiers)
+            
+            row_occupancy[row_idx] += containers_at_pos
+            row_heights[row_idx] = max(row_heights[row_idx], containers_at_pos)
+            
+            for tier, container in tiers.items():
+                total_containers += 1
+                
+                # Count container types
+                if hasattr(container, 'container_type'):
+                    if container.container_type == 'Trailer':
+                        container_type_counts['trailer'] += 1
+                    elif container.container_type == 'Swap Body':
+                        container_type_counts['swap_body'] += 1
+                
+                if hasattr(container, 'goods_type'):
+                    if container.goods_type == 'Reefer':
+                        container_type_counts['reefer'] += 1
+                    elif container.goods_type == 'Dangerous':
+                        container_type_counts['dangerous'] += 1
+                    else:
+                        container_type_counts['regular'] += 1
+                
+                # Priority analysis
+                if hasattr(container, 'priority') and container.priority < 50:
+                    high_priority_count += 1
+                
+                # Deadline analysis
+                if hasattr(container, 'departure_date') and container.departure_date:
+                    if container.departure_date < self.current_simulation_datetime:
+                        overdue_count += 1
+        
+        # Normalize occupancy
+        if self.terminal.num_storage_slots_per_row > 0:
+            row_occupancy = row_occupancy / self.terminal.num_storage_slots_per_row
+            row_heights = row_heights / self.storage_yard.max_tier_height
+        
+        # Yard efficiency metrics
+        total_capacity = self.terminal.num_storage_rows * self.terminal.num_storage_slots_per_row * self.storage_yard.max_tier_height
+        utilization = total_containers / max(1, total_capacity)
+        
+        # Stack quality metric (how well-organized stacks are)
+        stack_quality = self._calculate_stack_quality()
+        
+        # Compile compact features
+        compact_features = np.concatenate([
+            row_occupancy,  # 5 features (one per row)
+            row_heights,    # 5 features (max height per row)
+            [
+                utilization,  # Overall yard utilization
+                stack_quality,  # How well stacks are organized
+                high_priority_count / max(1, total_containers),  # Ratio of high priority
+                overdue_count / max(1, total_containers),  # Ratio of overdue containers
+                container_type_counts['regular'] / max(1, total_containers),
+                container_type_counts['reefer'] / max(1, total_containers),
+                container_type_counts['dangerous'] / max(1, total_containers),
+                container_type_counts['trailer'] / max(1, total_containers),
+                container_type_counts['swap_body'] / max(1, total_containers),
+                # Additional features for learning
+                len(self.trucks_in_terminal) / len(self.parking_spots),  # Parking utilization
+                len(self.trains_in_terminal) / len(self.terminal.track_names),  # Rail utilization
+                self.current_simulation_time / self.max_simulation_time,  # Progress through simulation
+            ]
+        ])
+        
+        return compact_features.astype(np.float32)
+
+    def _calculate_stack_quality(self):
+        """Calculate how well-organized the stacks are (0=bad, 1=perfect)."""
+        total_stacks = 0
+        well_organized_stacks = 0
+        
+        for position, tiers in self.storage_yard.container_registry.items():
+            if len(tiers) > 1:  # Only consider actual stacks
+                total_stacks += 1
+                
+                # Check if priorities are ordered correctly (higher priority on top)
+                sorted_tiers = sorted(tiers.keys())
+                priorities = []
+                for tier in sorted_tiers:
+                    container = tiers[tier]
+                    if hasattr(container, 'priority'):
+                        priorities.append(container.priority)
+                
+                # Check if priorities decrease as we go up (lower number = higher priority)
+                if len(priorities) > 1:
+                    is_well_organized = all(priorities[i] >= priorities[i+1] 
+                                        for i in range(len(priorities)-1))
+                    if is_well_organized:
+                        well_organized_stacks += 1
+        
+        return well_organized_stacks / max(1, total_stacks)
+
+    def _precompute_valid_destinations(self):
+        """Pre-compute valid destination positions for different container types."""
+        self.valid_destinations_cache = {}
+        
+        # Define container type combinations
+        container_combinations = [
+            ('TWEU', 'Regular'), ('TWEU', 'Reefer'), ('TWEU', 'Dangerous'),
+            ('FEU', 'Regular'), ('FEU', 'Reefer'), ('FEU', 'Dangerous'),
+            ('THEU', 'Regular'), ('THEU', 'Reefer'), ('THEU', 'Dangerous'),
+            ('Trailer', 'Regular'), ('Swap Body', 'Regular')
+        ]
+        
+        for container_type, goods_type in container_combinations:
+            valid_positions = []
+            
+            # Check all storage positions
+            for row in self.terminal.storage_row_names:
+                for bay in range(1, self.terminal.num_storage_slots_per_row + 1):
+                    position = f"{row}{bay}"
+                    
+                    # Quick validation based on type
+                    if self._is_position_valid_for_container_type(position, container_type, goods_type):
+                        valid_positions.append(position)
+            
+            # Add truck and train positions for regular containers
+            if container_type not in ['Trailer', 'Swap Body']:
+                valid_positions.extend(self.parking_spots)
+                # Add rail positions
+                for track in self.terminal.track_names:
+                    for slot in range(1, self.terminal.num_railslots_per_track + 1):
+                        valid_positions.append(f"{track.lower()}_{slot}")
+            
+            self.valid_destinations_cache[(container_type, goods_type)] = valid_positions
+
+    def _is_position_valid_for_container_type(self, position, container_type, goods_type):
+        """Fast validation check for container type at position."""
+        # Trailer/Swap Body checks
+        if container_type == 'Trailer':
+            return self.storage_yard.is_position_in_special_area(position, 'trailer')
+        elif container_type == 'Swap Body':
+            return self.storage_yard.is_position_in_special_area(position, 'swap_body')
+        
+        # Goods type checks
+        if goods_type == 'Reefer':
+            return self.storage_yard.is_position_in_special_area(position, 'reefer')
+        elif goods_type == 'Dangerous':
+            return self.storage_yard.is_position_in_special_area(position, 'dangerous')
+        
+        # Regular containers - avoid special areas
+        special_areas = ['reefer', 'dangerous', 'trailer', 'swap_body']
+        return not any(self.storage_yard.is_position_in_special_area(position, area) for area in special_areas)
+
+    def _get_valid_destinations_fast(self, container):
+        """Get valid destinations for a container using pre-computed cache."""
+        container_type = getattr(container, 'container_type', 'TWEU')
+        goods_type = getattr(container, 'goods_type', 'Regular')
+        
+        cache_key = (container_type, goods_type)
+        return self.valid_destinations_cache.get(cache_key, [])
+    
     def _generate_crane_action_mask_optimized(self, crane_action_mask):
-        """Generate crane action masks using GPU-accelerated proximity calculations."""
+        """Generate crane action masks using pre-computed valid destinations."""
         for i, crane in enumerate(self.cranes):
             # Skip if crane is not available yet
             if self.current_simulation_time < self.crane_available_times[i].item():
                 continue
             
-            # Use batch processing to get all possible moves for containers in crane's area
-            crane_positions = []
-            
-            # Get all storage positions with containers in this crane's operational area
+            # Get all containers in crane's operational area
+            crane_containers = []
             for row_idx, row in enumerate(self.terminal.storage_row_names):
-                for bay in range(crane.start_bay + 1, crane.end_bay + 2):  # +1 because bay indexing starts at 1
+                for bay in range(crane.start_bay + 1, crane.end_bay + 2):
                     if bay <= self.terminal.num_storage_slots_per_row:
                         position = f"{row}{bay}"
                         container, _ = self.storage_yard.get_top_container(position)
                         if container is not None:
-                            crane_positions.append(position)
+                            crane_containers.append((position, container))
             
-            # Add truck and train positions within crane area
+            # Add truck and train containers in crane area
             for spot, truck in self.trucks_in_terminal.items():
                 if truck.has_containers():
                     spot_idx = int(spot.split('_')[1]) - 1
                     if crane.start_bay <= spot_idx <= crane.end_bay:
-                        crane_positions.append(spot)
+                        crane_containers.append((spot, truck.containers[0]))
             
-            for track, train in self.trains_in_terminal.items():
-                for j, wagon in enumerate(train.wagons):
-                    if not wagon.is_empty():
-                        slot = f"{track.lower()}_{j+1}"
-                        slot_idx = j
-                        if crane.start_bay <= slot_idx <= crane.end_bay:
-                            crane_positions.append(slot)
-            
-            # Use GPU-accelerated batch calculation for possible moves
-            if crane_positions:
-                start_time = time.perf_counter()
-                possible_moves = self.storage_yard.batch_calc_possible_moves(crane_positions, n=5)
-                self.performance_stats['proximity_calculations'] += time.perf_counter() - start_time
-                
-                # Update action mask based on calculated moves
-                for source_pos, dest_positions in possible_moves.items():
-                    if source_pos in self.position_to_idx:
-                        source_idx = self.position_to_idx[source_pos]
-                        
-                        for dest_pos in dest_positions:
-                            if dest_pos in self.position_to_idx:
+            # Process each container using fast destination lookup
+            for source_pos, container in crane_containers:
+                if source_pos in self.position_to_idx:
+                    source_idx = self.position_to_idx[source_pos]
+                    
+                    # Get valid destinations from cache
+                    valid_destinations = self._get_valid_destinations_fast(container)
+                    
+                    # Filter by proximity and crane area
+                    for dest_pos in valid_destinations:
+                        if (dest_pos in self.position_to_idx and 
+                            self._is_within_crane_reach(source_pos, dest_pos, crane)):
+                            
+                            # Quick height check instead of full can_accept_container
+                            if self._quick_height_check(dest_pos):
                                 dest_idx = self.position_to_idx[dest_pos]
-                                
-                                # Additional validation for crane-specific rules
-                                if self._validate_crane_move(source_pos, dest_pos, crane):
-                                    crane_action_mask[i, source_idx, dest_idx] = 1
+                                crane_action_mask[i, source_idx, dest_idx] = 1
+
+    def _is_within_crane_reach(self, source_pos, dest_pos, crane):
+        """Quick check if destination is within crane's operational reach."""
+        if self._is_storage_position(dest_pos):
+            dest_bay = int(re.findall(r'\d+', dest_pos)[0]) - 1
+            return crane.start_bay <= dest_bay <= crane.end_bay
+        return True  # Trucks/trains are always reachable if in area
+
+    def _quick_height_check(self, position):
+        """Quick height check without full validation."""
+        if self._is_storage_position(position):
+            return self.storage_yard.get_stack_height(position) < self.storage_yard.max_tier_height
+        return True
     
     def _validate_crane_move(self, source_pos, dest_pos, crane):
         """Validate a crane move with additional business rules."""
@@ -597,24 +783,26 @@ class OptimizedTerminalEnvironment(gym.Env):
                                 terminal_truck_mask[truck_idx, source_idx, dest_idx] = 1
 
     def _get_observation(self):
-        """Get the current observation with GPU-accelerated operations."""
-        # Use cached action mask if recent enough
-        if (self._action_mask_cache is not None and 
-            self.current_simulation_time == self._last_action_mask_time):
-            action_mask = self._action_mask_cache
-        else:
+        """Get the current observation with aggressive action mask caching."""
+        # Check if we need to regenerate action masks
+        if self._should_regenerate_action_mask():
             action_mask = self._generate_action_masks_optimized()
-            # Cache for future use
+            # Cache the result
             self._action_mask_cache = action_mask
             self._last_action_mask_time = self.current_simulation_time
+            self._last_truck_count = len(self.trucks_in_terminal)
+            self._last_train_count = len(self.trains_in_terminal)
+            self._last_storage_container_count = self.storage_yard.get_container_count()
+        else:
+            action_mask = self._action_mask_cache
         
-        # Create observation dictionary with GPU tensors where appropriate
+        # Create observation dictionary
         observation = {
             'crane_positions': np.array([crane.current_position for crane in self.cranes], dtype=np.int32),
             'crane_available_times': self.crane_available_times.cpu().numpy().astype(np.float32),
             'terminal_truck_available_times': self.terminal_truck_available_times.cpu().numpy().astype(np.float32),
             'current_time': np.array([self.current_simulation_time], dtype=np.float32),
-            'yard_state': self._get_yard_state_optimized(),
+            'yard_state': self._get_compact_yard_features(),  # New compact representation
             'parking_status': self._generate_parking_status(),
             'rail_status': self._generate_rail_status(),
             'queue_sizes': np.array([self.truck_queue.size(), self.train_queue.size()], dtype=np.int32),
@@ -622,6 +810,21 @@ class OptimizedTerminalEnvironment(gym.Env):
         }
         
         return observation
+
+    def _should_regenerate_action_mask(self):
+        """Check if action masks need to be regenerated based on state changes."""
+        if self._action_mask_cache is None:
+            return True
+        
+        # Time-based cache expiry
+        time_expired = (self.current_simulation_time - self._last_action_mask_time) > self._action_mask_cache_duration
+        
+        # State-based cache invalidation
+        truck_count_changed = len(self.trucks_in_terminal) != self._last_truck_count
+        train_count_changed = len(self.trains_in_terminal) != self._last_train_count
+        storage_changed = self.storage_yard.get_container_count() != self._last_storage_container_count
+        
+        return time_expired or truck_count_changed or train_count_changed or storage_changed
     
     def _get_yard_state_optimized(self):
         """Get yard state using GPU-accelerated tensor operations."""
