@@ -1,0 +1,698 @@
+STANDARD BOOLEAN STORAGE IMPLEMENTATION
+
+PS C:\Users\franj\CT-DRL-MA> python -m tests.BooleanStorage.stress_test
+Starting Container Placement Performance Tests...
+
+🚀 Quick Stress Test
+🚛 Starting Container Placement Stress Test 🚛
+============================================================
+Yard Configuration: {'n_rows': 5, 'n_bays': 15, 'n_tiers': 3, 'split_factor': 4}
+Test Sizes: [100, 500, 1000]
+============================================================
+
+📦 Testing with 100 containers...
+Results for 100 containers:
+  ✅ Successfully placed: 100/100 (100.0%)
+  ⏱️  Average search time: 0.269 ms
+  ⏱️  Max search time: 1.764 ms
+  🔍 Search operations/sec: 3712.5
+  💾 Memory usage: 0.2 MB (peak: 0.2 MB)
+  📊 Yard utilization: 44.4%
+  🕐 Total test time: 0.05 seconds
+
+📦 Testing with 500 containers...
+  Processed 100/500 containers...
+  Processed 200/500 containers...
+  Processed 300/500 containers...
+  Processed 400/500 containers...
+Results for 500 containers:
+  ✅ Successfully placed: 488/500 (97.6%)
+  ⏱️  Average search time: 0.191 ms
+  ⏱️  Max search time: 1.662 ms
+  🔍 Search operations/sec: 5229.6
+  💾 Memory usage: 0.3 MB (peak: 0.3 MB)
+  📊 Yard utilization: 216.9%
+  🕐 Total test time: 0.17 seconds
+
+📦 Testing with 1000 containers...
+  Processed 100/1000 containers...
+  Processed 200/1000 containers...
+  Processed 300/1000 containers...
+  Processed 400/1000 containers...
+  Processed 500/1000 containers...
+  Processed 600/1000 containers...
+  Processed 700/1000 containers...
+  Processed 800/1000 containers...
+  Processed 900/1000 containers...
+Results for 1000 containers:
+  ✅ Successfully placed: 982/1000 (98.2%)
+  ⏱️  Average search time: 0.151 ms
+  ⏱️  Max search time: 0.802 ms
+  🔍 Search operations/sec: 6629.9
+  💾 Memory usage: 0.5 MB (peak: 0.5 MB)
+  📊 Yard utilization: 436.4%
+  🕐 Total test time: 0.27 seconds
+
+============================================================
+📊 STRESS TEST SUMMARY
+============================================================
+Containers   Success%   Avg Search(ms)  Ops/sec    Memory(MB)   Time(s)
+---------------------------------------------------------------------------
+100          100.0      0.269           3712.5     0.2          0.05
+500          97.6       0.191           5229.6     0.3          0.17
+1000         98.2       0.151           6629.9     0.5          0.27
+
+🔬 Performance Scaling Analysis:
+  Base case (100 containers): 0.269 ms avg search
+  500 containers: 0.191 ms (0.71x vs 5.0x linear)
+  1000 containers: 0.151 ms (0.56x vs 10.0x linear)
+
+💡 Recommendations:
+  ⚠️  Maximum search time: 1.764 ms - consider batching for large operations
+  ✅ Performance is excellent - no batching needed
+  ✅ Memory usage is reasonable: 0.5 MB peak
+
+================================================================================
+
+✅ Quick test performance is good - proceeding with full test...
+🏭 Full Scale Stress Test
+🚛 Starting Container Placement Stress Test 🚛
+============================================================
+Yard Configuration: {'n_rows': 8, 'n_bays': 40, 'n_tiers': 5, 'split_factor': 4}
+Test Sizes: [100, 500, 1000, 5000]
+============================================================
+
+📦 Testing with 100 containers...
+Results for 100 containers:
+  ✅ Successfully placed: 98/100 (98.0%)
+  ⏱️  Average search time: 0.300 ms
+  ⏱️  Max search time: 1.309 ms
+  🔍 Search operations/sec: 3331.7
+  💾 Memory usage: 1.0 MB (peak: 1.0 MB)
+  📊 Yard utilization: 6.1%
+  🕐 Total test time: 0.12 seconds
+
+📦 Testing with 500 containers...
+  Processed 100/500 containers...
+  Processed 200/500 containers...
+  Processed 300/500 containers...
+  Processed 400/500 containers...
+Results for 500 containers:
+  ✅ Successfully placed: 496/500 (99.2%)
+  ⏱️  Average search time: 0.363 ms
+  ⏱️  Max search time: 3.970 ms
+  🔍 Search operations/sec: 2756.5
+  💾 Memory usage: 1.2 MB (peak: 1.2 MB)
+  📊 Yard utilization: 31.0%
+  🕐 Total test time: 0.32 seconds
+
+📦 Testing with 1000 containers...
+  Processed 100/1000 containers...
+  Processed 200/1000 containers...
+  Processed 300/1000 containers...
+  Processed 400/1000 containers...
+  Processed 500/1000 containers...
+  Processed 600/1000 containers...
+  Processed 700/1000 containers...
+  Processed 800/1000 containers...
+  Processed 900/1000 containers...
+Results for 1000 containers:
+  ✅ Successfully placed: 990/1000 (99.0%)
+  ⏱️  Average search time: 0.317 ms
+  ⏱️  Max search time: 2.774 ms
+  🔍 Search operations/sec: 3151.9
+  💾 Memory usage: 1.3 MB (peak: 1.3 MB)
+  📊 Yard utilization: 61.9%
+  🕐 Total test time: 0.49 seconds
+
+📦 Testing with 5000 containers...
+  Processed 100/5000 containers...
+  Processed 200/5000 containers...
+  Processed 300/5000 containers...
+  Processed 400/5000 containers...
+  Processed 500/5000 containers...
+  Processed 600/5000 containers...
+  Processed 700/5000 containers...
+  Processed 800/5000 containers...
+  Processed 900/5000 containers...
+  Processed 1000/5000 containers...
+  Processed 1100/5000 containers...
+  Processed 1200/5000 containers...
+  Processed 1300/5000 containers...
+  Processed 1400/5000 containers...
+  Processed 1500/5000 containers...
+  Processed 1600/5000 containers...
+  Processed 1700/5000 containers...
+  Processed 1800/5000 containers...
+  Processed 1900/5000 containers...
+  Processed 2000/5000 containers...
+  Processed 2100/5000 containers...
+  Processed 2200/5000 containers...
+  Processed 2300/5000 containers...
+  Processed 2400/5000 containers...
+  Processed 2500/5000 containers...
+  Processed 2600/5000 containers...
+  Processed 2700/5000 containers...
+  Processed 2800/5000 containers...
+  Processed 2900/5000 containers...
+  Processed 3000/5000 containers...
+  Processed 3100/5000 containers...
+  Processed 3200/5000 containers...
+  Processed 3300/5000 containers...
+  Processed 3400/5000 containers...
+  Processed 3500/5000 containers...
+  Processed 3600/5000 containers...
+  Processed 3700/5000 containers...
+  Processed 3800/5000 containers...
+  Processed 3900/5000 containers...
+  Processed 4000/5000 containers...
+  Processed 4100/5000 containers...
+  Processed 4200/5000 containers...
+  Processed 4300/5000 containers...
+  Processed 4400/5000 containers...
+  Processed 4500/5000 containers...
+  Processed 4600/5000 containers...
+  Processed 4700/5000 containers...
+  Processed 4800/5000 containers...
+  Processed 4900/5000 containers...
+Results for 5000 containers:
+  ✅ Successfully placed: 4940/5000 (98.8%)
+  ⏱️  Average search time: 0.297 ms
+  ⏱️  Max search time: 2.293 ms
+  🔍 Search operations/sec: 3367.3
+  💾 Memory usage: 2.7 MB (peak: 2.8 MB)
+  📊 Yard utilization: 308.8%
+  🕐 Total test time: 2.09 seconds
+
+============================================================
+📊 STRESS TEST SUMMARY
+============================================================
+Containers   Success%   Avg Search(ms)  Ops/sec    Memory(MB)   Time(s)
+---------------------------------------------------------------------------
+100          98.0       0.300           3331.7     1.0          0.12
+500          99.2       0.363           2756.5     1.2          0.32
+1000         99.0       0.317           3151.9     1.3          0.49
+5000         98.8       0.297           3367.3     2.7          2.09
+
+🔬 Performance Scaling Analysis:
+  Base case (100 containers): 0.300 ms avg search
+  500 containers: 0.363 ms (1.21x vs 5.0x linear)
+  1000 containers: 0.317 ms (1.06x vs 10.0x linear)
+  5000 containers: 0.297 ms (0.99x vs 50.0x linear)
+
+💡 Recommendations:
+  ⚠️  Maximum search time: 3.970 ms - consider batching for large operations
+  ✅ Performance is excellent - no batching needed
+  ✅ Memory usage is reasonable: 2.8 MB peak
+
+
+NUMBA BOOLEAN STORAGE SEARCH RESULTS
+
+PS C:\Users\franj\CT-DRL-MA> python -m tests.BooleanStorage.stress_test
+Starting Container Placement Performance Tests...
+
+🚀 Quick Stress Test
+🚛 Starting Container Placement Stress Test 🚛
+============================================================
+Yard Configuration: {'n_rows': 5, 'n_bays': 15, 'n_tiers': 3, 'split_factor': 4}
+Test Sizes: [100, 500, 1000]
+============================================================
+
+📦 Testing with 100 containers...
+Results for 100 containers:
+  ✅ Successfully placed: 94/100 (94.0%)
+  ⏱️  Average search time: 43.843 ms
+  ⏱️  Max search time: 4379.815 ms
+  🔍 Search operations/sec: 22.8
+  💾 Memory usage: 25.5 MB (peak: 25.8 MB)
+  📊 Yard utilization: 41.8%
+  🕐 Total test time: 4.40 seconds
+
+📦 Testing with 500 containers...
+  Processed 100/500 containers...
+  Processed 200/500 containers...
+  Processed 300/500 containers...
+  Processed 400/500 containers...
+Results for 500 containers:
+  ✅ Successfully placed: 463/500 (92.6%)
+  ⏱️  Average search time: 0.034 ms
+  ⏱️  Max search time: 0.110 ms
+  🔍 Search operations/sec: 29159.4
+  💾 Memory usage: 0.3 MB (peak: 0.3 MB)
+  📊 Yard utilization: 205.8%
+  🕐 Total test time: 0.08 seconds
+
+📦 Testing with 1000 containers...
+  Processed 100/1000 containers...
+  Processed 200/1000 containers...
+  Processed 300/1000 containers...
+  Processed 400/1000 containers...
+  Processed 500/1000 containers...
+  Processed 600/1000 containers...
+  Processed 700/1000 containers...
+  Processed 800/1000 containers...
+  Processed 900/1000 containers...
+Results for 1000 containers:
+  ✅ Successfully placed: 912/1000 (91.2%)
+  ⏱️  Average search time: 0.035 ms
+  ⏱️  Max search time: 0.135 ms
+  🔍 Search operations/sec: 28322.0
+  💾 Memory usage: 0.4 MB (peak: 0.5 MB)
+  📊 Yard utilization: 405.3%
+  🕐 Total test time: 0.14 seconds
+
+============================================================
+📊 STRESS TEST SUMMARY
+============================================================
+Containers   Success%   Avg Search(ms)  Ops/sec    Memory(MB)   Time(s)
+---------------------------------------------------------------------------
+100          94.0       43.843          22.8       25.5         4.40
+500          92.6       0.034           29159.4    0.3          0.08
+1000         91.2       0.035           28322.0    0.4          0.14
+
+🔬 Performance Scaling Analysis:
+  Base case (100 containers): 43.843 ms avg search
+  500 containers: 0.034 ms (0.00x vs 5.0x linear)
+  1000 containers: 0.035 ms (0.00x vs 10.0x linear)
+
+💡 Recommendations:
+  ⚠️  Maximum search time: 4379.815 ms - consider batching for large operations
+  ✅ Performance is excellent - no batching needed
+  ✅ Memory usage is reasonable: 25.8 MB peak
+
+================================================================================
+
+⚠️  Quick test shows search times up to 4379.8ms
+Consider optimization before running full scale test
+
+
+VECTORIZED NUMPY APPROACH BOOLEAN STORAGE
+
+PS C:\Users\franj\CT-DRL-MA> python -m tests.BooleanStorage.stress_test
+Starting Container Placement Performance Tests...
+
+🚀 Quick Stress Test
+🚛 Starting Container Placement Stress Test 🚛
+============================================================
+Yard Configuration: {'n_rows': 5, 'n_bays': 15, 'n_tiers': 3, 'split_factor': 4}
+Test Sizes: [100, 500, 1000]
+============================================================
+
+📦 Testing with 100 containers...
+Results for 100 containers:
+  ✅ Successfully placed: 95/100 (95.0%)
+  ⏱️  Average search time: 2.257 ms
+  ⏱️  Max search time: 4.403 ms
+  🔍 Search operations/sec: 443.0
+  💾 Memory usage: 0.2 MB (peak: 0.2 MB)
+  📊 Yard utilization: 42.2%
+  🕐 Total test time: 0.25 seconds
+
+📦 Testing with 500 containers...
+  Processed 100/500 containers...
+  Processed 200/500 containers...
+  Processed 300/500 containers...
+  Processed 400/500 containers...
+Results for 500 containers:
+  ✅ Successfully placed: 457/500 (91.4%)
+  ⏱️  Average search time: 2.443 ms
+  ⏱️  Max search time: 8.524 ms
+  🔍 Search operations/sec: 409.3
+  💾 Memory usage: 0.3 MB (peak: 0.3 MB)
+  📊 Yard utilization: 203.1%
+  🕐 Total test time: 1.31 seconds
+
+📦 Testing with 1000 containers...
+  Processed 100/1000 containers...
+  Processed 200/1000 containers...
+  Processed 300/1000 containers...
+  Processed 400/1000 containers...
+  Processed 500/1000 containers...
+  Processed 600/1000 containers...
+  Processed 700/1000 containers...
+  Processed 800/1000 containers...
+  Processed 900/1000 containers...
+Results for 1000 containers:
+  ✅ Successfully placed: 936/1000 (93.6%)
+  ⏱️  Average search time: 2.451 ms
+  ⏱️  Max search time: 7.590 ms
+  🔍 Search operations/sec: 408.0
+  💾 Memory usage: 0.4 MB (peak: 0.5 MB)
+  📊 Yard utilization: 416.0%
+  🕐 Total test time: 2.62 seconds
+
+============================================================
+📊 STRESS TEST SUMMARY
+============================================================
+Containers   Success%   Avg Search(ms)  Ops/sec    Memory(MB)   Time(s)
+---------------------------------------------------------------------------
+100          95.0       2.257           443.0      0.2          0.25
+500          91.4       2.443           409.3      0.3          1.31
+1000         93.6       2.451           408.0      0.4          2.62
+
+🔬 Performance Scaling Analysis:
+  Base case (100 containers): 2.257 ms avg search
+  500 containers: 2.443 ms (1.08x vs 5.0x linear)
+  1000 containers: 2.451 ms (1.09x vs 10.0x linear)
+
+💡 Recommendations:
+  ⚠️  Maximum search time: 8.524 ms - consider batching for large operations
+  ⚠️  Average search time: 2.451 ms - may need optimization for real-time use
+  ✅ Memory usage is reasonable: 0.5 MB peak
+
+================================================================================
+
+✅ Quick test performance is good - proceeding with full test...
+🏭 Full Scale Stress Test
+🚛 Starting Container Placement Stress Test 🚛
+============================================================
+Yard Configuration: {'n_rows': 8, 'n_bays': 40, 'n_tiers': 5, 'split_factor': 4}
+Test Sizes: [100, 500, 1000, 5000]
+============================================================
+
+📦 Testing with 100 containers...
+Results for 100 containers:
+  ✅ Successfully placed: 96/100 (96.0%)
+  ⏱️  Average search time: 5.026 ms
+  ⏱️  Max search time: 10.995 ms
+  🔍 Search operations/sec: 199.0
+  💾 Memory usage: 1.0 MB (peak: 1.0 MB)
+  📊 Yard utilization: 6.0%
+  🕐 Total test time: 0.58 seconds
+
+📦 Testing with 500 containers...
+  Processed 100/500 containers...
+  Processed 200/500 containers...
+  Processed 300/500 containers...
+  Processed 400/500 containers...
+Results for 500 containers:
+  ✅ Successfully placed: 476/500 (95.2%)
+  ⏱️  Average search time: 5.451 ms
+  ⏱️  Max search time: 13.290 ms
+  🔍 Search operations/sec: 183.4
+  💾 Memory usage: 1.2 MB (peak: 1.2 MB)
+  📊 Yard utilization: 29.8%
+  🕐 Total test time: 2.89 seconds
+
+📦 Testing with 1000 containers...
+  Processed 100/1000 containers...
+  Processed 200/1000 containers...
+  Processed 300/1000 containers...
+  Processed 400/1000 containers...
+  Processed 500/1000 containers...
+  Processed 600/1000 containers...
+  Processed 700/1000 containers...
+  Processed 800/1000 containers...
+  Processed 900/1000 containers...
+Results for 1000 containers:
+  ✅ Successfully placed: 941/1000 (94.1%)
+  ⏱️  Average search time: 5.186 ms
+  ⏱️  Max search time: 12.345 ms
+  🔍 Search operations/sec: 192.8
+  💾 Memory usage: 1.3 MB (peak: 1.3 MB)
+  📊 Yard utilization: 58.8%
+  🕐 Total test time: 5.42 seconds
+
+📦 Testing with 5000 containers...
+  Processed 100/5000 containers...
+  Processed 200/5000 containers...
+  Processed 300/5000 containers...
+  Processed 400/5000 containers...
+  Processed 500/5000 containers...
+  Processed 600/5000 containers...
+  Processed 700/5000 containers...
+  Processed 800/5000 containers...
+  Processed 900/5000 containers...
+  Processed 1000/5000 containers...
+  Processed 1100/5000 containers...
+  Processed 1200/5000 containers...
+  Processed 1300/5000 containers...
+  Processed 1400/5000 containers...
+  Processed 1500/5000 containers...
+  Processed 1600/5000 containers...
+  Processed 1700/5000 containers...
+  Processed 1800/5000 containers...
+  Processed 1900/5000 containers...
+  Processed 2000/5000 containers...
+  Processed 2100/5000 containers...
+  Processed 2200/5000 containers...
+  Processed 2300/5000 containers...
+  Processed 2400/5000 containers...
+  Processed 2500/5000 containers...
+  Processed 2600/5000 containers...
+  Processed 2700/5000 containers...
+  Processed 2800/5000 containers...
+  Processed 2900/5000 containers...
+  Processed 3000/5000 containers...
+  Processed 3100/5000 containers...
+  Processed 3200/5000 containers...
+  Processed 3300/5000 containers...
+  Processed 3400/5000 containers...
+  Processed 3500/5000 containers...
+  Processed 3600/5000 containers...
+  Processed 3700/5000 containers...
+  Processed 3800/5000 containers...
+  Processed 3900/5000 containers...
+  Processed 4000/5000 containers...
+  Processed 4100/5000 containers...
+  Processed 4200/5000 containers...
+  Processed 4300/5000 containers...
+  Processed 4400/5000 containers...
+  Processed 4500/5000 containers...
+  Processed 4600/5000 containers...
+  Processed 4700/5000 containers...
+  Processed 4800/5000 containers...
+  Processed 4900/5000 containers...
+Results for 5000 containers:
+  ✅ Successfully placed: 4732/5000 (94.6%)
+  ⏱️  Average search time: 5.117 ms
+  ⏱️  Max search time: 17.339 ms
+  🔍 Search operations/sec: 195.4
+  💾 Memory usage: 2.7 MB (peak: 2.8 MB)
+  📊 Yard utilization: 295.8%
+  🕐 Total test time: 26.49 seconds
+
+============================================================
+📊 STRESS TEST SUMMARY
+============================================================
+Containers   Success%   Avg Search(ms)  Ops/sec    Memory(MB)   Time(s)
+---------------------------------------------------------------------------
+100          96.0       5.026           199.0      1.0          0.58
+500          95.2       5.451           183.4      1.2          2.89
+1000         94.1       5.186           192.8      1.3          5.42
+5000         94.6       5.117           195.4      2.7          26.49
+
+🔬 Performance Scaling Analysis:
+  Base case (100 containers): 5.026 ms avg search
+  500 containers: 5.451 ms (1.08x vs 5.0x linear)
+  1000 containers: 5.186 ms (1.03x vs 10.0x linear)
+  5000 containers: 5.117 ms (1.02x vs 50.0x linear)
+
+💡 Recommendations:
+  ⚠️  Maximum search time: 17.339 ms - consider batching for large operations
+  ⚠️  Average search time: 5.117 ms - may need optimization for real-time use
+  ✅ Memory usage is reasonable: 2.8 MB peak
+
+
+RESULTS WITH NORMAL BOOL STORAGE SEARCH AND CACHING
+
+NO NOTICEABLE DIFFERENCE
+
+
+CODE ADDED TO BOOLEAN STORAGE
+
+    
+    def optimize_memory_layout(self):
+        """
+        Convert masks to more cache-friendly format.
+        Call this once after initialization.
+        """
+        # Convert to C-contiguous arrays
+        self.dynamic_yard_mask = np.ascontiguousarray(self.dynamic_yard_mask)
+        self.r_mask = np.ascontiguousarray(self.r_mask)
+        self.dg_mask = np.ascontiguousarray(self.dg_mask)
+        self.sb_t_mask = np.ascontiguousarray(self.sb_t_mask)
+        self.reg_mask = np.ascontiguousarray(self.reg_mask)
+        
+        # Pre-compute commonly used masks
+        self._goods_masks = {
+            'r': self.r_mask,
+            'dg': self.dg_mask, 
+            'sb_t': self.sb_t_mask,
+            'reg': self.reg_mask
+        }
+# VECTORIZED NUMPY APPROACH
+
+    def search_insertion_position_vectorized(self, bay: int, goods: str, container_type: str, max_proximity: int):
+        """
+        Pure numpy vectorized version. Faster than loops but not as fast as Numba.
+        """
+        if container_type not in self.container_lengths:
+            return []
+        
+        container_length = self.container_lengths[container_type]
+        
+        # Get base mask
+        goods_masks = {'r': self.r_mask, 'dg': self.dg_mask, 'sb_t': self.sb_t_mask}
+        goods_mask = goods_masks.get(goods, self.reg_mask)
+        
+        available_mask = goods_mask & self.dynamic_yard_mask
+        for k in self.cldymc:
+            if k != container_type:
+                available_mask = available_mask & self.cldymc[k]
+        
+        # Vectorized bay filtering
+        min_bay = max(0, bay - max_proximity)
+        max_bay = min(self.n_bays, bay + max_proximity + 1)
+        bay_filter = np.zeros(self.n_bays, dtype=bool)
+        bay_filter[min_bay:max_bay] = True
+        
+        # Apply bay filter to entire mask at once
+        filtered_mask = available_mask & bay_filter[np.newaxis, :]
+        
+        # Find all true positions using numpy operations
+        row_indices, bay_indices = np.where(filtered_mask)
+        
+        if len(row_indices) == 0:
+            return []
+        
+        # Convert to coordinates and group by position
+        valid_placements = []
+        container_mask = (1 << container_length) - 1
+        
+        # Get valid start positions
+        if container_length >= self.split_factor:
+            valid_starts = [0]
+        else:
+            valid_starts = [0, self.split_factor - container_length] if container_length < self.split_factor else [0]
+            valid_starts = list(set(valid_starts))  # Remove duplicates
+        
+        # Group by (row, bay, tier) using numpy
+        coords = np.column_stack([
+            row_indices // (self.n_tiers * self.split_factor),  # row
+            bay_indices,                                        # bay  
+            (row_indices % (self.n_tiers * self.split_factor)) // self.split_factor,  # tier
+            row_indices % self.split_factor                     # split
+        ])
+        
+        # Use numpy unique to group positions
+        unique_positions = np.unique(coords[:, :3], axis=0)
+        
+        for pos in unique_positions:
+            row, bay_idx, tier = pos
+            # Get all splits for this position
+            position_mask = ((coords[:, 0] == row) & 
+                            (coords[:, 1] == bay_idx) & 
+                            (coords[:, 2] == tier))
+            splits = coords[position_mask, 3]
+            
+            # Create bitmask
+            bitmask = np.sum(1 << splits)
+            
+            # Check valid start positions
+            for start_split in valid_starts:
+                if start_split + container_length <= self.split_factor:
+                    shifted_mask = container_mask << start_split
+                    if (bitmask & shifted_mask) == shifted_mask:
+                        valid_placements.append((row, bay_idx, tier, start_split))
+        
+        return valid_placements
+
+
+
+
+# NUMBA SPEEDUP
+
+    # Add this optimized method to your BooleanStorageYard class:
+    def search_insertion_position_numba(self, bay: int, goods: str, container_type: str, max_proximity: int):
+        """
+        Numba-optimized version of search_insertion_position.
+        Should be 5-20x faster than the original.
+        """
+        if container_type not in self.container_lengths:
+            return []
+        
+        container_length = self.container_lengths[container_type]
+        
+        # Get the appropriate masks
+        if goods == 'r':
+            goods_mask = self.r_mask
+        elif goods == 'dg':
+            goods_mask = self.dg_mask
+        elif goods == 'sb_t':
+            goods_mask = self.sb_t_mask
+        else:
+            goods_mask = self.reg_mask
+        
+        # Combine masks
+        available_mask = goods_mask & self.dynamic_yard_mask
+        
+        # Apply stacking rules
+        for k in self.cldymc:
+            if k != container_type:
+                available_mask = available_mask & self.cldymc[k]
+        
+        # Call the JIT-compiled function
+        valid_placements = _fast_proximity_search_numba(
+            self.dynamic_yard_mask.astype(np.bool_),
+            available_mask.astype(np.bool_),
+            bay, max_proximity,
+            self.n_rows, self.n_bays, self.n_tiers, self.split_factor,
+            container_length
+        )
+        
+        return valid_placements
+
+@njit(cache=True)
+def _fast_proximity_search_numba(dynamic_mask, special_mask, bay, max_proximity, 
+                                n_rows, n_bays, n_tiers, split_factor, container_length):
+    """
+    JIT-compiled proximity search. Compiles to machine code.
+    Add this as a module-level function in BooleanStorage.py
+    """
+    # Pre-calculate bay bounds
+    min_bay = max(0, bay - max_proximity)
+    max_bay = min(n_bays, bay + max_proximity + 1)
+    
+    valid_positions = []
+    container_mask = (1 << container_length) - 1
+    
+    # Get valid start positions
+    if container_length > split_factor:
+        valid_starts = [0]
+    elif container_length == split_factor:
+        valid_starts = [0]
+    else:
+        start_pos = 0
+        end_pos = split_factor - container_length
+        valid_starts = [start_pos] if start_pos == end_pos else [start_pos, end_pos]
+    
+    # Fast loop through positions
+    for row in range(n_rows):
+        for tier in range(n_tiers):
+            for target_bay in range(min_bay, max_bay):
+                # Check if this position group has enough consecutive slots
+                bitmask = 0
+                base_idx = row * n_tiers * split_factor + tier * split_factor
+                
+                for split in range(split_factor):
+                    idx = base_idx + split
+                    if (dynamic_mask[idx, target_bay] and 
+                        special_mask[idx, target_bay]):
+                        bitmask |= (1 << split)
+                
+                # Check each valid start position
+                for start_split in valid_starts:
+                    if start_split + container_length <= split_factor:
+                        shifted_mask = container_mask << start_split
+                        if (bitmask & shifted_mask) == shifted_mask:
+                            valid_positions.append((row, target_bay, tier, start_split))
+    
+    return valid_positions
+
+import numba
+from numba import jit, njit
+
+CODE ADDED TO STRESS_TEST.py
+
+NONE
