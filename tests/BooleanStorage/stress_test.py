@@ -568,59 +568,282 @@ def run_comprehensive_optimization_test():
     
     return all_results
 
-# if __name__ == "__main__":
-#     # Run both quick and full tests
-#     print("Starting Container Placement Performance Tests...\n")
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+import random
+from simulation.terminal_components.Container import Container, ContainerFactory
+
+def stress_test_ultra_optimized():
+    """
+    Comprehensive stress test for the ultra_optimized yard moves function.
+    Tests performance, correctness, and scalability.
+    """
     
-#     # Quick test first
-#     quick_results = run_quick_stress_test()
+    print("=" * 60)
+    print("STRESS TEST: Ultra Optimized Yard Moves Function")
+    print("=" * 60)
     
-#     print("\n" + "="*80 + "\n")
+    # Test configurations with increasing complexity
+    test_configs = [
+        {"name": "Small", "rows": 3, "bays": 10, "tiers": 3, "containers": 20},
+        {"name": "Medium", "rows": 5, "bays": 20, "tiers": 4, "containers": 100},
+        {"name": "Large", "rows": 8, "bays": 30, "tiers": 5, "containers": 300},
+        {"name": "Extra Large", "rows": 10, "bays": 40, "tiers": 6, "containers": 600},
+        {"name": "Massive", "rows": 15, "bays": 50, "tiers": 6, "containers": 1000},
+    ]
     
-#     # Full test if quick test performs well
-#     max_search_time = max(quick_results[count]['max_search_time'] for count in quick_results.keys())
+    results = []
     
-#     if max_search_time < 0.01:  # Less than 10ms max search time
-#         print("✅ Quick test performance is good - proceeding with full test...")
-#         full_results = run_full_stress_test()
-#     else:
-#         print(f"⚠️  Quick test shows search times up to {max_search_time*1000:.1f}ms")
-#         print("Consider optimization before running full scale test")
+    for config in test_configs:
+        print(f"\n--- Testing {config['name']} Configuration ---")
+        print(f"Yard: {config['rows']}x{config['bays']}x{config['tiers']}, "
+              f"Containers: {config['containers']}")
+        
+        # Create yard
+        yard = create_test_yard(config)
+        
+        # Add containers to yard
+        containers_added = populate_yard_with_containers(yard, config['containers'])
+        print(f"Successfully added {containers_added} containers")
+        
+        # Performance test
+        performance_results = run_performance_test(yard, config)
+        results.append({
+            'config': config,
+            'performance': performance_results,
+            'containers_added': containers_added
+        })
+        
+        # Memory usage test
+        memory_usage = estimate_memory_usage(yard)
+        print(f"Estimated memory usage: {memory_usage:.2f} MB")
+        
+        print(f"Performance: {performance_results['avg_time']:.4f}s per call")
+        print(f"Found moves: {performance_results['avg_moves']:.1f} containers with moves")
+        print(f"Total destinations: {performance_results['avg_destinations']:.1f} total destinations")
+    
+    # Generate performance plots
+    plot_performance_results(results)
+    
+    # Detailed analysis on largest configuration
+    if results:
+        print(f"\n--- Detailed Analysis on {test_configs[-1]['name']} Configuration ---")
+        detailed_analysis(results[-1])
+    
+    return results
+
+def create_test_yard(config):
+    """Create a test yard with the given configuration."""
+    from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+    
+    rows, bays, tiers = config['rows'], config['bays'], config['tiers']
+    
+    # Generate coordinate configuration for special areas
+    coordinates = []
+    
+    # Reefers on both ends
+    for row in range(1, rows + 1):
+        coordinates.append((1, row, "r"))  # First bay
+        coordinates.append((bays, row, "r"))  # Last bay
+    
+    # Dangerous goods in middle
+    mid_bay = bays // 2
+    for row in range(2, min(rows, 4) + 1):  # Rows 2-4 or available
+        for bay_offset in [-1, 0, 1]:
+            if 1 <= mid_bay + bay_offset <= bays:
+                coordinates.append((mid_bay + bay_offset, row, "dg"))
+    
+    # Swap bodies and trailers in first row
+    for bay in range(2, min(bays, 10)):  # Bays 2-9 or available
+        coordinates.append((bay, 1, "sb_t"))
+    
+    return BooleanStorageYard(
+        n_rows=rows,
+        n_bays=bays,
+        n_tiers=tiers,
+        coordinates=coordinates,
+        split_factor=4,
+        validate=False  # Skip validation for speed
+    )
+
+def populate_yard_with_containers(yard, target_container_count):
+    """Populate the yard with random containers."""
+    containers_added = 0
+    attempts = 0
+    max_attempts = target_container_count * 3
+    
+    # Container type distribution
+    container_types = ["TWEU", "FEU", "THEU", "Trailer", "Swap Body"]
+    container_weights = [0.4, 0.3, 0.15, 0.1, 0.05]
+    
+    goods_types = ["Regular", "Reefer", "Dangerous"]
+    goods_weights = [0.85, 0.1, 0.05]
+    
+    while containers_added < target_container_count and attempts < max_attempts:
+        attempts += 1
+        
+        # Create random container
+        container_type = np.random.choice(container_types, p=container_weights)
+        goods_type = np.random.choice(goods_types, p=goods_weights)
+        
+        container = ContainerFactory.create_container(
+            f"TEST{containers_added:04d}",
+            container_type,
+            "Import",
+            goods_type
+        )
+        
+        # Find a random valid placement
+        row = random.randint(0, yard.n_rows - 1)
+        bay = random.randint(0, yard.n_bays - 1)
+        
+        # Determine goods parameter
+        if goods_type == 'Reefer':
+            goods_param = 'r'
+        elif goods_type == 'Dangerous':
+            goods_param = 'dg'
+        elif container_type in ('Swap Body', 'Trailer'):
+            goods_param = 'sb_t'
+        else:
+            goods_param = 'reg'
+        
+        # Try to place container
+        try:
+            valid_placements = yard.search_insertion_position(bay, goods_param, container_type, 5)
+            
+            if valid_placements:
+                # Choose random placement
+                placement = random.choice(valid_placements)
+                coordinates = yard.get_container_coordinates_from_placement(placement, container_type)
+                
+                if coordinates:
+                    yard.add_container(container, coordinates)
+                    containers_added += 1
+        except Exception as e:
+            # Skip problematic containers
+            continue
+    
+    return containers_added
+
+def run_performance_test(yard, config, num_runs=10):
+    """Run performance test on the yard."""
+    times = []
+    move_counts = []
+    destination_counts = []
+    
+    for run in range(num_runs):
+        start_time = time.perf_counter()
+        
+        # Run the ultra optimized function
+        possible_moves = yard.return_possible_yard_moves(max_proximity=5)
+        
+        end_time = time.perf_counter()
+        
+        # Collect metrics
+        times.append(end_time - start_time)
+        move_counts.append(len(possible_moves))
+        
+        total_destinations = sum(len(data['destinations']) for data in possible_moves.values())
+        destination_counts.append(total_destinations)
+    
+    return {
+        'times': times,
+        'avg_time': np.mean(times),
+        'std_time': np.std(times),
+        'min_time': np.min(times),
+        'max_time': np.max(times),
+        'avg_moves': np.mean(move_counts),
+        'avg_destinations': np.mean(destination_counts)
+    }
+
+def estimate_memory_usage(yard):
+    """Estimate memory usage of the yard in MB."""
+    # Rough estimation
+    mask_size = yard.dynamic_yard_mask.nbytes
+    coordinate_size = yard.coordinates.nbytes if hasattr(yard.coordinates, 'nbytes') else 0
+    containers_size = len(yard.containers) * 1000  # Rough estimate per container
+    
+    total_bytes = mask_size + coordinate_size + containers_size
+    return total_bytes / (1024 * 1024)  # Convert to MB
+
+def plot_performance_results(results):
+    """Generate performance plots."""
+    if not results:
+        return
+    
+    # Extract data for plotting
+    config_names = [r['config']['name'] for r in results]
+    avg_times = [r['performance']['avg_time'] for r in results]
+    containers_counts = [r['containers_added'] for r in results]
+    yard_sizes = [r['config']['rows'] * r['config']['bays'] * r['config']['tiers'] for r in results]
+    move_counts = [r['performance']['avg_moves'] for r in results]
+    
+    # Create subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Plot 1: Execution time vs configuration
+    ax1.bar(config_names, avg_times, color='skyblue', alpha=0.7)
+    ax1.set_title('Execution Time by Configuration')
+    ax1.set_ylabel('Time (seconds)')
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Plot 2: Time vs yard size
+    ax2.scatter(yard_sizes, avg_times, color='red', alpha=0.7)
+    ax2.set_title('Execution Time vs Yard Size')
+    ax2.set_xlabel('Yard Size (positions)')
+    ax2.set_ylabel('Time (seconds)')
+    
+    # Plot 3: Time vs number of containers
+    ax3.scatter(containers_counts, avg_times, color='green', alpha=0.7)
+    ax3.set_title('Execution Time vs Container Count')
+    ax3.set_xlabel('Number of Containers')
+    ax3.set_ylabel('Time (seconds)')
+    
+    # Plot 4: Containers with moves vs total containers
+    ax4.scatter(containers_counts, move_counts, color='purple', alpha=0.7)
+    ax4.set_title('Movable Containers vs Total Containers')
+    ax4.set_xlabel('Total Containers')
+    ax4.set_ylabel('Containers with Valid Moves')
+    
+    plt.tight_layout()
+    plt.savefig('ultra_optimized_performance.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def detailed_analysis(result):
+    """Perform detailed analysis on a specific result."""
+    config = result['config']
+    perf = result['performance']
+    
+    print(f"Configuration: {config['name']}")
+    print(f"  Yard dimensions: {config['rows']}x{config['bays']}x{config['tiers']}")
+    print(f"  Total positions: {config['rows'] * config['bays'] * config['tiers']}")
+    print(f"  Containers added: {result['containers_added']}")
+    print(f"  Fill rate: {result['containers_added'] / (config['rows'] * config['bays'] * config['tiers']):.1%}")
+    
+    print(f"\nPerformance Metrics:")
+    print(f"  Average time: {perf['avg_time']:.4f}s")
+    print(f"  Standard deviation: {perf['std_time']:.4f}s")
+    print(f"  Min time: {perf['min_time']:.4f}s")
+    print(f"  Max time: {perf['max_time']:.4f}s")
+    print(f"  Average containers with moves: {perf['avg_moves']:.1f}")
+    print(f"  Average total destinations: {perf['avg_destinations']:.1f}")
+    
+    # Calculate efficiency metrics
+    containers_per_second = result['containers_added'] / perf['avg_time']
+    moves_per_second = perf['avg_moves'] / perf['avg_time']
+    
+    print(f"\nEfficiency Metrics:")
+    print(f"  Containers processed per second: {containers_per_second:.1f}")
+    print(f"  Moves calculated per second: {moves_per_second:.1f}")
 
 if __name__ == "__main__":
-    print("🚀 ENHANCED CONTAINER PLACEMENT PERFORMANCE TESTS")
-    print("=" * 80)
+    # Run the stress test
+    results = stress_test_ultra_optimized()
     
-    # Run optimization benchmark first
-    run_optimization_benchmark()
-    
-    print("\n" + "="*80)
-    
-    # Run comprehensive optimization test
-    optimization_results = run_comprehensive_optimization_test()
-    
-    print(f"\n💡 FINAL RECOMMENDATIONS:")
-    
-    # Analyze results and provide recommendations
-    all_times = []
-    for yard_data in optimization_results.values():
-        for methods in yard_data.values():
-            all_times.extend(methods.values())
-    
-    if all_times:
-        min_time = min(all_times)
-        max_time = max(all_times)
-        avg_time = np.mean(all_times)
-        
-        print(f"  ⏱️  Optimized performance range: {min_time*1000:.2f} - {max_time*1000:.2f}ms")
-        print(f"  📊 Average optimized time: {avg_time*1000:.2f}ms")
-        
-        if avg_time < 0.005:  # < 5ms
-            print(f"  🎉 EXCELLENT: Suitable for real-time interactive applications")
-        elif avg_time < 0.020:  # < 20ms  
-            print(f"  ✅ GOOD: Suitable for most terminal operations")
-        else:
-            print(f"  ⚠️  MODERATE: Consider further optimization for high-frequency use")
-    
-    print(f"  🚀 Use 'Ultra-Optimized' method for best performance")
-    print(f"  📝 Consider proximity <= 8 for optimal speed/quality balance")
+    print(f"\n" + "=" * 60)
+    print("STRESS TEST COMPLETED")
+    print("=" * 60)
+    print(f"Tested {len(results)} configurations")
+    print("Performance plots saved as 'ultra_optimized_performance.png'")
