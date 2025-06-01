@@ -364,21 +364,263 @@ def run_full_stress_test():
     
     return results
 
+# Add this to your stress_test.py fil
+
+def run_optimization_benchmark():
+    """Run a benchmark comparing original vs optimized methods."""
+    
+    print("🚀 OPTIMIZATION BENCHMARK")
+    print("=" * 60)
+    
+    # Add methods to class
+    # add_optimized_methods_to_yard()
+    
+    # Test configuration
+    test_config = {
+        'n_rows': 6,
+        'n_bays': 30,
+        'n_tiers': 4,
+        'split_factor': 4
+    }
+    
+    container_counts = [100, 300, 500, 1000, 2000, 5000]
+    proximities = [1, 3, 5, 8]
+    
+    for count in container_counts:
+        print(f"\n📦 Benchmarking {count} containers:")
+        
+        for proximity in proximities:
+            print(f"  🎯 Proximity {proximity}:")
+            
+            # Create tester
+            tester = ContainerPlacementStressTest(test_config)
+            
+            # Create and populate yard
+            yard = tester.create_test_yard()
+            containers = tester.generate_random_containers(count)
+            placement_stats = tester.place_containers_in_yard(yard, containers)
+            
+            actual_placed = placement_stats['placed_containers']
+            print(f"    📍 Placed {actual_placed} containers")
+            
+            if actual_placed < 10:
+                print("    ⚠️  Too few containers, skipping")
+                continue
+            
+            # Benchmark methods
+            methods = [
+                ('Original', 'return_possible_yard_moves'),
+                ('Optimized', 'return_possible_yard_moves_optimized'), 
+                ('Ultra-Opt', 'return_possible_yard_moves_ultra_optimized')
+            ]
+            
+            results = {}
+            iterations = 3
+            
+            for method_name, method_attr in methods:
+                if not hasattr(yard, method_attr):
+                    continue
+                
+                method = getattr(yard, method_attr)
+                times = []
+                moves_counts = []
+                
+                for i in range(iterations):
+                    start_time = time.perf_counter()
+                    
+                    try:
+                        moves = method(max_proximity=proximity)
+                        end_time = time.perf_counter()
+                        
+                        execution_time = end_time - start_time
+                        times.append(execution_time)
+                        
+                        total_moves = sum(len(m['destinations']) for m in moves.values())
+                        moves_counts.append(total_moves)
+                        
+                    except Exception as e:
+                        print(f"    ❌ {method_name} failed: {e}")
+                        times.append(float('inf'))
+                        moves_counts.append(0)
+                
+                if times and any(t != float('inf') for t in times):
+                    valid_times = [t for t in times if t != float('inf')]
+                    results[method_name] = {
+                        'avg_time': np.mean(valid_times),
+                        'avg_moves': np.mean(moves_counts)
+                    }
+            
+            # Print comparison
+            if 'Original' in results:
+                baseline_time = results['Original']['avg_time']
+                baseline_moves = results['Original']['avg_moves']
+                
+                for method_name, stats in results.items():
+                    speedup = baseline_time / stats['avg_time'] if stats['avg_time'] > 0 else 0
+                    moves_match = abs(stats['avg_moves'] - baseline_moves) < 1
+                    
+                    status = "✅" if moves_match else "⚠️ "
+                    print(f"    {status} {method_name:12}: {stats['avg_time']*1000:7.2f}ms "
+                          f"({speedup:5.1f}x) - {stats['avg_moves']:.0f} moves")
+            else:
+                for method_name, stats in results.items():
+                    print(f"    📊 {method_name:12}: {stats['avg_time']*1000:7.2f}ms - {stats['avg_moves']:.0f} moves")
+
+def run_comprehensive_optimization_test():
+    """Run comprehensive test of the optimized methods."""
+    
+    print("\n🔬 COMPREHENSIVE OPTIMIZATION TEST")
+    print("=" * 80)
+    
+    # Add methods first
+    # add_optimized_methods_to_yard()
+    
+    # Different yard sizes
+    configs = [
+        {
+            'name': 'Small Yard',
+            'config': {'n_rows': 4, 'n_bays': 20, 'n_tiers': 3, 'split_factor': 4},
+            'containers': [50, 150, 300]
+        },
+        {
+            'name': 'Medium Yard', 
+            'config': {'n_rows': 6, 'n_bays': 30, 'n_tiers': 4, 'split_factor': 4},
+            'containers': [100, 300, 600]
+        },
+        {
+            'name': 'Large Yard',
+            'config': {'n_rows': 8, 'n_bays': 50, 'n_tiers': 5, 'split_factor': 4},
+            'containers': [200, 500, 1000]
+        }
+    ]
+    
+    all_results = {}
+    
+    for config in configs:
+        print(f"\n🏭 Testing {config['name']}: {config['config']}")
+        
+        yard_results = {}
+        
+        for container_count in config['containers']:
+            print(f"  📦 {container_count} containers:")
+            
+            # Create tester and yard
+            tester = ContainerPlacementStressTest(config['config'])
+            yard = tester.create_test_yard()
+            containers = tester.generate_random_containers(container_count)
+            placement_stats = tester.place_containers_in_yard(yard, containers)
+            
+            actual_placed = placement_stats['placed_containers']
+            if actual_placed < 10:
+                continue
+            
+            # Test with proximity=5 for consistency
+            proximity = 5
+            iterations = 5
+            
+            # Test both optimized methods
+            test_methods = [
+                ('Optimized', 'return_possible_yard_moves_optimized'),
+                ('Ultra-Opt', 'return_possible_yard_moves_ultra_optimized')
+            ]
+            
+            method_results = {}
+            
+            for method_name, method_attr in test_methods:
+                if not hasattr(yard, method_attr):
+                    continue
+                
+                method = getattr(yard, method_attr)
+                times = []
+                
+                for i in range(iterations):
+                    start_time = time.perf_counter()
+                    
+                    try:
+                        moves = method(max_proximity=proximity)
+                        end_time = time.perf_counter()
+                        times.append(end_time - start_time)
+                        
+                    except Exception as e:
+                        print(f"    ❌ {method_name} failed: {e}")
+                        continue
+                
+                if times:
+                    avg_time = np.mean(times)
+                    method_results[method_name] = avg_time
+                    print(f"    ✅ {method_name}: {avg_time*1000:.2f}ms avg")
+            
+            yard_results[container_count] = method_results
+        
+        all_results[config['name']] = yard_results
+    
+    # Summary
+    print(f"\n📊 OPTIMIZATION SUMMARY")
+    print("=" * 50)
+    
+    for yard_name, yard_data in all_results.items():
+        print(f"\n{yard_name}:")
+        for container_count, methods in yard_data.items():
+            print(f"  {container_count} containers:")
+            for method_name, avg_time in methods.items():
+                rating = "🟢" if avg_time < 0.005 else "🟡" if avg_time < 0.020 else "🔴"
+                print(f"    {rating} {method_name}: {avg_time*1000:.2f}ms")
+    
+    return all_results
+
+# if __name__ == "__main__":
+#     # Run both quick and full tests
+#     print("Starting Container Placement Performance Tests...\n")
+    
+#     # Quick test first
+#     quick_results = run_quick_stress_test()
+    
+#     print("\n" + "="*80 + "\n")
+    
+#     # Full test if quick test performs well
+#     max_search_time = max(quick_results[count]['max_search_time'] for count in quick_results.keys())
+    
+#     if max_search_time < 0.01:  # Less than 10ms max search time
+#         print("✅ Quick test performance is good - proceeding with full test...")
+#         full_results = run_full_stress_test()
+#     else:
+#         print(f"⚠️  Quick test shows search times up to {max_search_time*1000:.1f}ms")
+#         print("Consider optimization before running full scale test")
+
 if __name__ == "__main__":
-    # Run both quick and full tests
-    print("Starting Container Placement Performance Tests...\n")
+    print("🚀 ENHANCED CONTAINER PLACEMENT PERFORMANCE TESTS")
+    print("=" * 80)
     
-    # Quick test first
-    quick_results = run_quick_stress_test()
+    # Run optimization benchmark first
+    run_optimization_benchmark()
     
-    print("\n" + "="*80 + "\n")
+    print("\n" + "="*80)
     
-    # Full test if quick test performs well
-    max_search_time = max(quick_results[count]['max_search_time'] for count in quick_results.keys())
+    # Run comprehensive optimization test
+    optimization_results = run_comprehensive_optimization_test()
     
-    if max_search_time < 0.01:  # Less than 10ms max search time
-        print("✅ Quick test performance is good - proceeding with full test...")
-        full_results = run_full_stress_test()
-    else:
-        print(f"⚠️  Quick test shows search times up to {max_search_time*1000:.1f}ms")
-        print("Consider optimization before running full scale test")
+    print(f"\n💡 FINAL RECOMMENDATIONS:")
+    
+    # Analyze results and provide recommendations
+    all_times = []
+    for yard_data in optimization_results.values():
+        for methods in yard_data.values():
+            all_times.extend(methods.values())
+    
+    if all_times:
+        min_time = min(all_times)
+        max_time = max(all_times)
+        avg_time = np.mean(all_times)
+        
+        print(f"  ⏱️  Optimized performance range: {min_time*1000:.2f} - {max_time*1000:.2f}ms")
+        print(f"  📊 Average optimized time: {avg_time*1000:.2f}ms")
+        
+        if avg_time < 0.005:  # < 5ms
+            print(f"  🎉 EXCELLENT: Suitable for real-time interactive applications")
+        elif avg_time < 0.020:  # < 20ms  
+            print(f"  ✅ GOOD: Suitable for most terminal operations")
+        else:
+            print(f"  ⚠️  MODERATE: Consider further optimization for high-frequency use")
+    
+    print(f"  🚀 Use 'Ultra-Optimized' method for best performance")
+    print(f"  📝 Consider proximity <= 8 for optimal speed/quality balance")
