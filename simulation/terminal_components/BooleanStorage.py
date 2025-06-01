@@ -112,15 +112,15 @@ class BooleanStorageYard:
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
                             # print((row, split),(bay, tier)) DEBUGGING PRINT STATEMENT
-                            r_mask[row*self.split_factor+split][bay*self.n_tiers+tier] = True
+                            r_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
                 case "dg":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
-                            dg_mask[row*self.split_factor+split][bay*self.n_tiers+tier] = True
+                            dg_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
                 case "sb_t":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
-                            sb_t_mask[row*self.split_factor+split][bay*self.n_tiers+tier] = True
+                            sb_t_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
                 case _:
                     raise Exception("Storage Yard Class: invalid coordinates passed") 
         return (r_mask, dg_mask, sb_t_mask)
@@ -186,15 +186,15 @@ class BooleanStorageYard:
 
             # place container-piecewise
             self.containers[f"R{row}B{bay}.{split}T{tier}"] = container
-            self.dynamic_yard_mask[row*self.split_factor+split][bay*self.n_tiers+tier] = False
+            self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = False
             
             # lock stack for that container type
             # [(row-1)*self.n_tiers*self.split_factor + i*self.split_factor + j][bay-1]
-            self.cldymc[container.container_type][row*self.split_factor+split][(bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = False
+            self.cldymc[container.container_type][row*self.split_factor+split, (bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = False
 
             # unlock the next tier
             if tier < self.n_tiers - 1:
-                self.dynamic_yard_mask[row*self.split_factor+split][bay*self.n_tiers+tier+1] = True
+                self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier+1] = True
 
     def remove_container(self, coordinates: List[Tuple[int, int, int, int]]) -> Container:
         '''
@@ -220,15 +220,15 @@ class BooleanStorageYard:
 
             # remove container from yard
             self.containers[f"R{row}B{bay}.{split}T{tier}"] = None
-            self.dynamic_yard_mask[row*self.split_factor+split][bay*self.n_tiers+tier] = True
+            self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
 
             # unlock the stack for all container types if the removal opens a stack
             if tier == 0:
-                self.cldymc[container.container_type][row*self.split_factor+split][(bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = True
+                self.cldymc[container.container_type][row*self.split_factor+split, (bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = True
 
             # if not max height, lock tier above
             if tier < self.n_tiers - 1:
-                self.dynamic_yard_mask[row*self.split_factor+split][bay*self.n_tiers+tier+1] = False
+                self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier+1] = False
 
         return container
     
@@ -389,7 +389,7 @@ class BooleanStorageYard:
         
         return valid_placements
 
-    def search_insertion_position(self, bay: int, goods: str, container_type: str, max_proximity: int):
+    def search_insertion_position(self, bay: int, goods: str, container_type: str, max_proximity: int, coords = None)-> List:
         '''
         ENHANCED: Now returns valid starting positions for containers based on their length.
         
@@ -432,8 +432,14 @@ class BooleanStorageYard:
         available_places[:, :min_bay*self.n_tiers] = False
         available_places[:, max_bay*self.n_tiers:] = False
         # print(available_places)
+        if coords != None:
+            for coord in coords:
+                r, b, s, t = coord
+                available_places[r*self.split_factor+s, b*self.n_tiers+t+1] = False
+
         # Convert to coordinates
         available_coordinates = self.coordinates[available_places]
+
 
         if len(available_coordinates) > 0:
             # OPTIMIZATION: Use bit manipulation to find valid container placements
@@ -477,242 +483,53 @@ class BooleanStorageYard:
         
         return coordinates
 
-    def return_possible_yard_moves_optimized(self, max_proximity: int = 5) -> Dict[str, Dict[str, List[List[Tuple]]]]:
-        """
-        OPTIMIZED: Calculate all possible moves using direct mask operations.
+    def return_possible_yard_moves(self, max_proximity: int = 5) -> Dict[str, Dict[str, List[List[Tuple]]]]:
         
-        Args:
-            max_proximity: Maximum bay distance to search for destinations
+        target_coordinates = self.coordinates[self.dynamic_yard_mask]
+        target_containers: Dict[Container, Dict[str, List]]  = {}
+        for coordinate in target_coordinates:
+            row, bay, split, tier = coordinate
             
-        Returns:
-            Dict mapping container_id -> {
-                'source_coords': List of (row, bay, split, tier) tuples for removal,
-                'destinations': List of possible destination coordinate lists for addition
-            }
-            
-        Runtime: O(mask_operations) - dramatically faster than iterative approach
-        """
-        possible_moves = {}
-        
-        # Step 1: Find all movable containers using mask operations
-        # Occupied positions are where dynamic_yard_mask is False
-        occupied_mask = ~self.dynamic_yard_mask
-        
-        # Get coordinates of all occupied positions - O(1) numpy operation
-        occupied_coords = self.coordinates[occupied_mask]
-        
-        if len(occupied_coords) == 0:
-            return possible_moves
-        
-        # Step 2: Identify top-tier containers (movable ones)
-        movable_positions = []
-        
-        for coord in occupied_coords:
-            row, bay, split, tier = coord
-            
-            # Check if this is a top container (no container above it)
-            is_top = True
-            if tier < self.n_tiers - 1:  # Not already at max tier
-                # Check if tier above is empty
-                above_tier = tier + 1
-                above_idx = row * self.n_tiers * self.split_factor + above_tier * self.split_factor + split
-                if above_idx < self.dynamic_yard_mask.shape[0] and bay < self.dynamic_yard_mask.shape[1]:
-                    is_top = self.dynamic_yard_mask[above_idx, bay]  # True = empty = this is top
-            
-            if is_top:
-                movable_positions.append((row, bay, split, tier))
-        
-        # Step 3: For each movable container, find destinations using mask operations
-        for row, bay, split, tier in movable_positions:
-            # Get container from position - O(1) lookup
-            position_key = f"R{row}B{bay}.{split}T{tier}"
-            container = self.containers.get(position_key)
-            
-            if container is None:
+            # if tier equals 0, then it is an empty slot
+            if tier == 0:
                 continue
-            
-            # Determine appropriate mask based on container type - O(1)
-            if hasattr(container, 'goods_type') and container.goods_type == 'Reefer':
-                available_mask = self.r_mask & self.dynamic_yard_mask
-            elif hasattr(container, 'goods_type') and container.goods_type == 'Dangerous':
-                available_mask = self.dg_mask & self.dynamic_yard_mask
-            elif hasattr(container, 'container_type') and container.container_type in ('Swap Body', 'Trailer'):
-                available_mask = self.sb_t_mask & self.dynamic_yard_mask
+            # else the container is in the tear bellow according to our logic
             else:
-                available_mask = self.reg_mask & self.dynamic_yard_mask
-            
-            # Apply stacking rules for container type - O(1) mask operation
-            container_length = self.container_lengths.get(container.container_type, 1)
-            for other_type, other_mask in self.cldymc.items():
-                if other_type != container.container_type:
-                    available_mask = available_mask & other_mask
-            
-            # Apply proximity constraint - O(1) mask operation
-            min_bay = max(0, bay - max_proximity)
-            max_bay = min(self.n_bays, bay + max_proximity + 1)
-            
-            # Create proximity mask
-            proximity_mask = np.zeros_like(available_mask)
-            proximity_mask[:, min_bay:max_bay] = True
-            available_mask = available_mask & proximity_mask
-            
-            # Get available coordinates - O(1) numpy operation
-            available_coords = self.coordinates[available_mask]
-            
-            if len(available_coords) == 0:
-                continue
-            
-            # Calculate source coordinates for this container
-            source_coords = []
-            for i in range(container_length):
-                current_bay = bay + (split + i) // self.split_factor
-                current_split = (split + i) % self.split_factor
-                if current_bay < self.n_bays and current_split < self.split_factor:
-                    source_coords.append((row, current_bay, current_split, tier))
-            
-            # Convert available coordinates to valid placements using optimized method
-            valid_placements = self._find_valid_container_placements(available_coords, container.container_type)
-            
-            # Convert placements to destination coordinates
-            destinations = []
-            for placement in valid_placements:
-                dest_coords = self.get_container_coordinates_from_placement(placement, container.container_type)
-                # Don't include current position as destination
-                if dest_coords != source_coords:
-                    destinations.append(dest_coords)
-            
-            # Store results only if destinations exist
-            if destinations:
-                possible_moves[container.container_id] = {
-                    'source_coords': source_coords,
-                    'destinations': destinations
-                }
+                input_format = f"R{row}B{bay}.{split}T{tier-1}"
+                # print(input_format)
+                container = self.containers[input_format]
+                print(container)
+                if container not in target_containers.keys():
+                    target_containers[container] = {
+                        "source_coords": [],
+                        "destinations" : []
+                    }
+                # Always add the coordinate (for both first encounter and subsequent ones)
+                target_containers[container]["source_coords"].append((row, bay, split, tier-1))
         
-        # np.set_printoptions(linewidth=(6*self.n_rows*self.n_tiers*+5))
-        # print(self.dynamic_yard_mask)
-        return possible_moves
+        for container in target_containers.keys():
+            # get bay from first coordinate
+            bay = target_containers[container]["source_coords"][0][1]
+            
+            # get mask applicability
+            if container.goods_type == 'Reefer':
+                applicable_mask = 'r'
+            elif container.goods_type == 'Dangerous':
+                applicable_mask = 'dg'
+            elif container.goods_type == 'Regular':
+                applicable_mask = 'reg'
+            elif container.container_type == "Trailer" or container.container_type ==  "Swap Body":
+                applicable_mask = 'sb_t'
 
-    def return_possible_yard_moves_ultra_optimized(self, max_proximity: int = 5) -> Dict[str, Dict[str, List[List[Tuple]]]]:
-        """
-        ULTRA OPTIMIZED: Calculate moves using pure numpy operations where possible.
-        
-        This version minimizes Python loops and maximizes numpy vectorization.
-        """
-        possible_moves = {}
-        
-        # Step 1: Vectorized identification of movable containers
-        occupied_mask = ~self.dynamic_yard_mask
-        
-        # Get all occupied indices using numpy.where - much faster than coordinate iteration
-        occupied_rows, occupied_cols = np.where(occupied_mask)
-        
-        if len(occupied_rows) == 0:
-            return possible_moves
-        
-        # Step 2: Vectorized top-container detection
-        movable_mask = np.zeros_like(self.dynamic_yard_mask, dtype=bool)
-        
-        for i in range(len(occupied_rows)):
-            row_idx, col_idx = occupied_rows[i], occupied_cols[i]
-            
-            # Extract coordinates from the coordinate mapping
-            coord = self.coordinates[row_idx, col_idx]
-            row, bay, split, tier = coord
-            
-            # Check if top container
-            if tier == self.n_tiers - 1:  # Already at top tier
-                movable_mask[row_idx, col_idx] = True
-            else:
-                # Check tier above
-                above_tier = tier + 1
-                above_idx = row * self.n_tiers * self.split_factor + above_tier * self.split_factor + split
-                if above_idx < self.dynamic_yard_mask.shape[0]:
-                    if self.dynamic_yard_mask[above_idx, bay]:  # Empty above
-                        movable_mask[row_idx, col_idx] = True
-        
-        # Get movable coordinates
-        movable_coords = self.coordinates[movable_mask]
-        
-        # Step 3: Process each movable container
-        for coord in movable_coords:
-            row, bay, split, tier = coord
-            
-            # Direct container lookup
-            position_key = f"R{row}B{bay}.{split}T{tier}"
-            container = self.containers.get(position_key)
-            
-            if container is None:
-                continue
-            
-            # Fast mask selection using dictionary lookup
-            mask_selector = {
-                ('Reefer',): self.r_mask,
-                ('Dangerous',): self.dg_mask,
-                ('Swap Body', 'Trailer'): self.sb_t_mask
-            }
-            
-            selected_mask = self.reg_mask  # default
-            goods_type = getattr(container, 'goods_type', None)
-            container_type = getattr(container, 'container_type', None)
-            
-            for key, mask in mask_selector.items():
-                if goods_type in key or container_type in key:
-                    selected_mask = mask
-                    break
-            
-            # Vectorized available positions calculation
-            available_mask = selected_mask & self.dynamic_yard_mask
-            
-            # Apply stacking rules - vectorized
-            container_type = getattr(container, 'container_type', 'TWEU')
-            if container_type in self.cldymc:
-                for other_type, other_mask in self.cldymc.items():
-                    if other_type != container_type:
-                        available_mask = available_mask & other_mask
-            
-            # Apply proximity constraint using array slicing
-            min_bay = max(0, bay - max_proximity)
-            max_bay = min(self.n_bays, bay + max_proximity + 1)
-            
-            # Zero out everything outside proximity range
-            proximity_constrained = np.zeros_like(available_mask)
-            proximity_constrained[:, min_bay:max_bay] = available_mask[:, min_bay:max_bay]
-            
-            # Get available coordinates
-            available_coords = self.coordinates[proximity_constrained]
-            
-            if len(available_coords) == 0:
-                continue
-            
-            # Use existing optimized placement finding
-            container_length = self.container_lengths.get(container_type, 1)
-            valid_placements = self._find_valid_container_placements(available_coords, container_type)
-            
-            if not valid_placements:
-                continue
-            
-            # Calculate source coordinates
-            source_coords = []
-            for i in range(container_length):
-                current_bay = bay + (split + i) // self.split_factor
-                current_split = (split + i) % self.split_factor
-                if current_bay < self.n_bays and current_split < self.split_factor:
-                    source_coords.append((row, current_bay, current_split, tier))
-            
-            # Convert to destinations
-            destinations = []
-            for placement in valid_placements:
-                dest_coords = self.get_container_coordinates_from_placement(placement, container_type)
-                if dest_coords != source_coords:
-                    destinations.append(dest_coords)
-            
-            if destinations:
-                possible_moves[container.container_id] = {
-                    'source_coords': source_coords,
-                    'destinations': destinations
-                }
-        
-        return possible_moves
+            # get valid destinations
+            # print(bay, applicable_mask, container.container_type)
+            target_containers[container]["destinations"] = self.search_insertion_position(bay, 
+                                                                                          applicable_mask, 
+                                                                                          container.container_type, 
+                                                                                          5, 
+                                                                                          target_containers[container]["source_coords"])
+
+        return target_containers
 
 if __name__ == "__main__":
     import time
@@ -724,7 +541,7 @@ if __name__ == "__main__":
         # coordinates are in form (bay, row, type = r,dg,sb_t)
         coordinates=[
             # Reefers on both ends
-            (1, 1, "r"), (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
+            (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
             (15, 1, "r"), (15, 2, "r"), (15, 3, "r"), (15, 4, "r"), (15, 5, "r"),
             
             # Row nearest to trucks is for swap bodies and trailers
@@ -801,5 +618,5 @@ if __name__ == "__main__":
         end = time.time()
         print(f"Container add/remove time: {end-start:.4f}s")
         removed_container = new_yard.remove_container(coordinates)
-        # print(new_yard.dynamic_yard_mask)
-        # print(f"Container operations successful: {removed_container.container_id}")
+        print(new_yard.dynamic_yard_mask)
+        print(f"Container operations successful: {removed_container.container_id}")
