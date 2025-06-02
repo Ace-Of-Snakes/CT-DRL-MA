@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 import time
 
-from warp_training import WarpCurriculumTrainer
+from simulation.deprecated_components.warp_training import WarpCurriculumTrainer
 
 def parse_args():
     """Parse command line arguments for Warp-accelerated training."""

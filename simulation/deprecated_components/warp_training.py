@@ -10,7 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
 
-from WarpTerminalEnvFixed import WarpTerminalEnvironment
+from simulation.deprecated_components.WarpTerminalEnvFixed import WarpTerminalEnvironment
 
 class WarpTrainingLogger:
     """Logger for training with file output and console display."""
@@ -524,7 +524,7 @@ class WarpCurriculumTrainer:
         
         # Create agent with the specified device
         # Import here to avoid circular imports
-        from simulation.agents.WarpTerminalAgent import WarpTerminalAgent
+        from simulation.deprecated_components.WarpTerminalAgent import WarpTerminalAgent
         
         agent = WarpTerminalAgent(
             state_dim, 
