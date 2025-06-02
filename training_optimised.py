@@ -22,7 +22,7 @@ if project_root not in sys.path:
 # Import our modules
 from simulation.agents.dual_head_q import OptimizedTerminalAgent
 from simulation.terminal_env_optimized import OptimizedTerminalEnvironment  # Updated import
-from simulation.config import TerminalConfig
+from simulation import TerminalConfig
 
 class OptimizedTrainingLogger:
     """Enhanced logger for GPU-accelerated training with performance monitoring."""
