@@ -1,6 +1,7 @@
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 from simulation.terminal_components.Container import Container, ContainerFactory
 import numpy as np
+import torch
 from collections import defaultdict
 
 class BooleanStorageYard:
@@ -10,7 +11,8 @@ class BooleanStorageYard:
                  n_tiers: int,
                  coordinates: List[Tuple[int, int, str]],
                  split_factor: int = 4,
-                 validate: bool = False):
+                 validate: bool = False,
+                 device: str = 'cpu'):
 
         # Type assertion to check for wrong input        
         assert type(n_rows) == int
@@ -24,6 +26,15 @@ class BooleanStorageYard:
         self.n_bays = n_bays
         self.n_tiers = n_tiers
         self.split_factor = split_factor
+        self.device = device
+
+        # OPTIMIZED: Replace dictionary with 4D numpy array for O(1) access
+        # Shape: (n_rows, n_bays, n_tiers, split_factor)
+        self.containers = np.full((n_rows, n_bays, n_tiers, split_factor), 
+                                  None, dtype=object)
+        
+        # Create container property arrays for fast tensor conversion
+        self._init_property_arrays()
 
         # Declaring base placeability of containers
         self.dynamic_yard_mask = self.create_dynamic_yard_mask()
@@ -43,11 +54,6 @@ class BooleanStorageYard:
         if validate:
             self.print_masks()
 
-        self.containers: Dict[str, Container] = self.create_container_mapping()
-
-        # Test of AND between bool mask and yard coordinates
-        # self.setup_coordinate_container_lookup()
-
         # Define container lengths
         self.container_lengths: dict = {
             "TWEU": 2,
@@ -63,6 +69,24 @@ class BooleanStorageYard:
             k:self.dynamic_yard_mask for k in self.container_lengths
         }
         '''Container-Lengths-Dynamic-Yard-Mask-Copy for each different container length'''
+
+        # Create mappings for fast tensor conversion
+        self.container_type_to_id = {
+            None: 0, "TWEU": 1, "THEU": 2, "FEU": 3, "FFEU": 4, 
+            "Swap Body": 5, "Trailer": 6
+        }
+        self.goods_type_to_id = {
+            None: 0, "Regular": 1, "Reefer": 2, "Dangerous": 3
+        }
+
+    def _init_property_arrays(self):
+        """Initialize arrays to store container properties for fast tensor conversion."""
+        # Arrays to store extracted properties for tensor conversion
+        self.container_type_ids = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=np.int8)
+        self.goods_type_ids = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=np.int8)
+        self.container_weights = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=np.float32)
+        self.container_priorities = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=np.float32)
+        self.occupied_mask = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=bool)
 
     def create_dynamic_yard_mask(self)->np.ndarray:
         bool_arr = np.zeros((self.n_rows*self.split_factor, self.n_bays*self.n_tiers), dtype=bool)
@@ -150,25 +174,31 @@ class BooleanStorageYard:
         print("Mask for regular Containers")
         print(self.reg_mask)
 
-        # print("Coordinate Mapping")
-        # print(self.coordinates)
-
         print("Dinamic Yard at init")
         print(self.dynamic_yard_mask)
         print(self.dynamic_yard_mask.shape)
 
-    def create_container_mapping(self):
-        containers = {}
-        for row in range(self.n_rows):
-            for bay in range(self.n_bays):
-                for tier in range(self.n_tiers):
-                    for split in range(self.split_factor):
-                        key_format = f"R{row}B{bay}.{split}T{tier}"
-                        containers[key_format] = None
-        return containers
+    def _update_property_arrays(self, row: int, bay: int, tier: int, split: int, container: Optional[Container]):
+        """Update property arrays when containers are added/removed."""
+        if container is not None:
+            # Container added
+            self.container_type_ids[row, bay, tier, split] = self.container_type_to_id.get(container.container_type, 0)
+            self.goods_type_ids[row, bay, tier, split] = self.goods_type_to_id.get(container.goods_type, 0)
+            self.container_weights[row, bay, tier, split] = getattr(container, 'weight', 0.0)
+            self.container_priorities[row, bay, tier, split] = getattr(container, 'priority', 0.0)
+            self.occupied_mask[row, bay, tier, split] = True
+        else:
+            # Container removed
+            self.container_type_ids[row, bay, tier, split] = 0
+            self.goods_type_ids[row, bay, tier, split] = 0
+            self.container_weights[row, bay, tier, split] = 0.0
+            self.container_priorities[row, bay, tier, split] = 0.0
+            self.occupied_mask[row, bay, tier, split] = False
 
     def add_container(self, container: Container, coordinates: List[Tuple[int, int, int, int]]):
         '''
+        OPTIMIZED: Direct array access instead of string-based dictionary.
+        
         Args:
             - container: Object of Container class that is suposed to be placed into yard
             - coordinates: List[row, bay, sub-bay, tier] 
@@ -185,12 +215,15 @@ class BooleanStorageYard:
             # unpack coordinate
             row, bay, split, tier = coordinate
 
-            # place container-piecewise
-            self.containers[f"R{row}B{bay}.{split}T{tier}"] = container
+            # OPTIMIZED: Direct array indexing instead of string key lookup
+            self.containers[row, bay, tier, split] = container
+            
+            # Update property arrays for tensor conversion
+            self._update_property_arrays(row, bay, tier, split, container)
+            
             self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = False
             
             # lock stack for that container type
-            # [(row-1)*self.n_tiers*self.split_factor + i*self.split_factor + j][bay-1]
             self.cldymc[container.container_type][row*self.split_factor+split, (bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = False
 
             # unlock the next tier
@@ -199,8 +232,9 @@ class BooleanStorageYard:
 
     def remove_container(self, coordinates: List[Tuple[int, int, int, int]]) -> Container:
         '''
+        OPTIMIZED: Direct array access instead of string-based dictionary.
+        
         Args:
-            - container: Object of Container class that is suposed to be placed into yard
             - coordinates: List[Tuple(row, bay, sub-bay, tier)]
             -> 
             row, bay(s) - possible use of subdivision of yard places for
@@ -215,12 +249,16 @@ class BooleanStorageYard:
             row, bay, split, tier = coordinate
             
             if not container_saved:
-                # save container
-                container = self.containers[f"R{row}B{bay}.{split}T{tier}"]
+                # OPTIMIZED: Direct array access instead of string key lookup
+                container = self.containers[row, bay, tier, split]
                 container_saved = True
 
             # remove container from yard
-            self.containers[f"R{row}B{bay}.{split}T{tier}"] = None
+            self.containers[row, bay, tier, split] = None
+            
+            # Update property arrays for tensor conversion
+            self._update_property_arrays(row, bay, tier, split, None)
+            
             self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
 
             # unlock the stack for all container types if the removal opens a stack
@@ -248,6 +286,129 @@ class BooleanStorageYard:
         '''
         container = self.remove_container(loc_coordinates)
         self.add_container(container, dest_coordinates)
+
+    # ==================== TENSOR CONVERSION FUNCTIONS ====================
+    
+    def get_occupied_tensor(self, as_tensor: bool = True) -> torch.Tensor:
+        """
+        Get tensor representing which positions are occupied.
+        
+        Returns:
+            Boolean tensor of shape (n_rows, n_bays, n_tiers, split_factor)
+        """
+        if as_tensor:
+            return torch.from_numpy(self.occupied_mask).to(self.device)
+        return self.occupied_mask
+    
+    def get_container_type_tensor(self, as_tensor: bool = True) -> torch.Tensor:
+        """
+        Get tensor of container type IDs.
+        
+        Returns:
+            Integer tensor of shape (n_rows, n_bays, n_tiers, split_factor)
+            Values: 0=empty, 1=TWEU, 2=THEU, 3=FEU, 4=FFEU, 5=SwapBody, 6=Trailer
+        """
+        if as_tensor:
+            return torch.from_numpy(self.container_type_ids).to(self.device)
+        return self.container_type_ids
+    
+    def get_goods_type_tensor(self, as_tensor: bool = True) -> torch.Tensor:
+        """
+        Get tensor of goods type IDs.
+        
+        Returns:
+            Integer tensor of shape (n_rows, n_bays, n_tiers, split_factor)
+            Values: 0=empty, 1=Regular, 2=Reefer, 3=Dangerous
+        """
+        if as_tensor:
+            return torch.from_numpy(self.goods_type_ids).to(self.device)
+        return self.goods_type_ids
+    
+    def get_weights_tensor(self, as_tensor: bool = True) -> torch.Tensor:
+        """
+        Get tensor of container weights.
+        
+        Returns:
+            Float tensor of shape (n_rows, n_bays, n_tiers, split_factor)
+        """
+        if as_tensor:
+            return torch.from_numpy(self.container_weights).to(self.device)
+        return self.container_weights
+    
+    def get_priorities_tensor(self, as_tensor: bool = True) -> torch.Tensor:
+        """
+        Get tensor of container priorities.
+        
+        Returns:
+            Float tensor of shape (n_rows, n_bays, n_tiers, split_factor)
+        """
+        if as_tensor:
+            return torch.from_numpy(self.container_priorities).to(self.device)
+        return self.container_priorities
+    
+    def get_full_state_tensor(self, flatten: bool = False) -> torch.Tensor:
+        """
+        Get complete state representation as a single tensor.
+        
+        Args:
+            flatten: If True, flatten spatial dimensions for MLP input
+            
+        Returns:
+            Tensor of shape (5, n_rows, n_bays, n_tiers, split_factor) or flattened
+            Channels: [occupied, container_type, goods_type, weight, priority]
+        """
+        occupied = torch.from_numpy(self.occupied_mask.astype(np.float32)).to(self.device)
+        container_types = torch.from_numpy(self.container_type_ids.astype(np.float32)).to(self.device)
+        goods_types = torch.from_numpy(self.goods_type_ids.astype(np.float32)).to(self.device)
+        weights = torch.from_numpy(self.container_weights).to(self.device)
+        priorities = torch.from_numpy(self.container_priorities).to(self.device)
+        
+        # Stack all channels
+        state = torch.stack([occupied, container_types, goods_types, weights, priorities], dim=0)
+        
+        if flatten:
+            # Flatten for MLP: (5 * n_rows * n_bays * n_tiers * split_factor,)
+            state = state.flatten()
+        
+        return state
+    
+    def get_compact_state_tensor(self) -> torch.Tensor:
+        """
+        Get compact state representation for efficient DRL training.
+        
+        Returns:
+            Tensor with aggregated features per row/bay for fast processing
+        """
+        # Aggregate by row and bay
+        occupied_by_row_bay = torch.from_numpy(
+            self.occupied_mask.sum(axis=(2, 3)).astype(np.float32)
+        ).to(self.device)
+        
+        weights_by_row_bay = torch.from_numpy(
+            self.container_weights.sum(axis=(2, 3))
+        ).to(self.device)
+        
+        # Stack aggregated features
+        compact_state = torch.stack([occupied_by_row_bay, weights_by_row_bay], dim=0)
+        
+        return compact_state.flatten()
+
+    # ==================== OPTIMIZED LOOKUP FUNCTIONS ====================
+    
+    def get_container_at(self, row: int, bay: int, tier: int, split: int) -> Optional[Container]:
+        """OPTIMIZED: Direct array access for container lookup."""
+        return self.containers[row, bay, tier, split]
+    
+    def set_container_at(self, row: int, bay: int, tier: int, split: int, container: Optional[Container]):
+        """OPTIMIZED: Direct array access for container setting."""
+        self.containers[row, bay, tier, split] = container
+        self._update_property_arrays(row, bay, tier, split, container)
+    
+    def is_position_occupied(self, row: int, bay: int, tier: int, split: int) -> bool:
+        """OPTIMIZED: Direct mask access for occupancy check."""
+        return self.occupied_mask[row, bay, tier, split]
+
+    # ==================== REMAINING METHODS (UNCHANGED) ====================
 
     def _find_valid_container_placements(self, available_coordinates, container_type: str) -> List[Tuple]:
         """
@@ -363,7 +524,6 @@ class BooleanStorageYard:
         
         valid_placements = []
         
-        # Only 2 nested loops instead of 5
         for row, tier in row_tier_combinations:
             for start_split in valid_start_positions:
                 actual_start_split = start_split if start_split >= 0 else self.split_factor + start_split
@@ -436,7 +596,6 @@ class BooleanStorageYard:
         # Convert to coordinates
         available_coordinates = self.coordinates[available_places]
 
-
         if len(available_coordinates) > 0:
             # OPTIMIZATION: Use bit manipulation to find valid container placements
             valid_placements = self._find_valid_container_placements(available_coordinates, container_type)
@@ -481,32 +640,24 @@ class BooleanStorageYard:
 
     def return_possible_yard_moves(self, max_proximity: int = 1) -> Dict[str, Dict[str, List[List[Tuple]]]]:
         """
-        SIMPLE OPTIMIZATION: Target the main bottlenecks in your existing working code.
-        
-        Main optimizations:
-        1. Eliminate repeated string formatting 
-        2. Use defaultdict to avoid membership testing
-        3. Cache container attribute lookups
-        4. Pre-filter coordinates by tier
+        OPTIMIZED: Use direct array access instead of string operations.
         """
-        
         # Get all target coordinates
         target_coordinates = self.coordinates[self.dynamic_yard_mask]
         
         if len(target_coordinates) == 0:
             return {}
         
-        # OPTIMIZATION 1: Pre-filter coordinates by tier to avoid checking tier == 0 in loop
+        # Pre-filter coordinates by tier to avoid checking tier == 0 in loop
         valid_coordinates = [coord for coord in target_coordinates if coord[3] > 0]
         
         if not valid_coordinates:
             return {}
         
-        # OPTIMIZATION 2: Use defaultdict to eliminate membership testing
-        from collections import defaultdict
+        # Use defaultdict to eliminate membership testing
         target_containers: Dict[Container, Dict[str, List[int]]] = defaultdict(lambda: {"source_coords": [], "destinations": []})
         
-        # OPTIMIZATION 3: Cache for container attribute -> mask mapping
+        # Cache for container attribute -> mask mapping
         container_mask_cache = {}
         
         # Process each valid coordinate
@@ -514,15 +665,14 @@ class BooleanStorageYard:
             row, bay, split, tier = coordinate
             container_tier = tier - 1
             
-            # OPTIMIZATION 4: Reduce string operations - build key once
-            container_key = f"R{row}B{bay}.{split}T{container_tier}"
-            container = self.containers.get(container_key)  # Use .get() to avoid KeyError
+            # OPTIMIZED: Direct array access instead of string operations
+            container = self.containers[row, bay, container_tier, split]
             
             if container is not None:
                 # Add coordinate (defaultdict eliminates need for existence check)
                 target_containers[container]["source_coords"].append((row, bay, split, container_tier))
                 
-                # OPTIMIZATION 5: Cache container mask mapping to avoid repeated attribute access
+                # Cache container mask mapping to avoid repeated attribute access
                 if container not in container_mask_cache:
                     if container.goods_type == 'Reefer':
                         container_mask_cache[container] = 'r'
@@ -562,14 +712,16 @@ class BooleanStorageYard:
         
         return result
 
+
+# Example usage and testing
 if __name__ == "__main__":
     import time
+    
     start = time.time()
-    new_yard = BooleanStorageYard(
+    yard = BooleanStorageYard(
         n_rows=5,
         n_bays=15,
         n_tiers=3,
-        # coordinates are in form (bay, row, type = r,dg,sb_t)
         coordinates=[
             # Reefers on both ends
             (1, 1, "r"), (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
@@ -586,6 +738,7 @@ if __name__ == "__main__":
             (7, 5, "dg"), (8, 5, "dg"), (9, 5, "dg"),
         ],
         split_factor=4,
+        device='cuda',  # or 'cuda' if available
         validate=True
     )
     end = time.time()
@@ -596,20 +749,20 @@ if __name__ == "__main__":
     
     # Test with TWEU (length 2)
     print("\n=== Testing TWEU (length 2) placement ===")
-    valid_placements = new_yard.search_insertion_position(6, 'reg', 'TWEU', 3)
+    valid_placements = yard.search_insertion_position(6, 'reg', 'TWEU', 3)
     print(f"Found {len(valid_placements)} valid TWEU placements")
     if valid_placements:
         print("First 5 placements:", valid_placements[:5])
         
         # Test coordinate conversion
         first_placement = valid_placements[0]
-        coords = new_yard.get_container_coordinates_from_placement(first_placement, 'TWEU')
+        coords = yard.get_container_coordinates_from_placement(first_placement, 'TWEU')
         print(f"Placement {first_placement} converts to coordinates: {coords}")
         print("Expected: Only start (0,1) or end (2,3) positions allowed")
     
     # Test with THEU (length 3)
     print("\n=== Testing THEU (length 3) placement ===")
-    valid_placements_theu = new_yard.search_insertion_position(6, 'reg', 'THEU', 3)
+    valid_placements_theu = yard.search_insertion_position(6, 'reg', 'THEU', 3)
     print(f"Found {len(valid_placements_theu)} valid THEU placements")
     if valid_placements_theu:
         print("First 5 THEU placements:", valid_placements_theu[:5])
@@ -617,7 +770,7 @@ if __name__ == "__main__":
     
     # Test with FEU (length 4)
     print("\n=== Testing FEU (length 4) placement ===")
-    valid_placements_feu = new_yard.search_insertion_position(6, 'reg', 'FEU', 3)
+    valid_placements_feu = yard.search_insertion_position(6, 'reg', 'FEU', 3)
     print(f"Found {len(valid_placements_feu)} valid FEU placements")
     if valid_placements_feu:
         print("FEU placements:", valid_placements_feu[:5])
@@ -625,7 +778,7 @@ if __name__ == "__main__":
     
     # Test with FFEU (length 5) - cross-bay container
     print("\n=== Testing FFEU (length 5) cross-bay placement ===")
-    valid_placements_ffeu = new_yard.search_insertion_position(6, 'reg', 'FFEU', 3)
+    valid_placements_ffeu = yard.search_insertion_position(6, 'reg', 'FFEU', 3)
     print(f"Found {len(valid_placements_ffeu)} valid FFEU placements")
     if valid_placements_ffeu:
         print("FFEU placements:", valid_placements_ffeu[:5])
@@ -642,12 +795,43 @@ if __name__ == "__main__":
     if valid_placements:
         # Use the optimized coordinate conversion
         placement = valid_placements[0]
-        coordinates = new_yard.get_container_coordinates_from_placement(placement, 'TWEU')
+        coordinates = yard.get_container_coordinates_from_placement(placement, 'TWEU')
         print(coordinates)
-        new_yard.add_container(new_container, coordinates)
-        print(new_yard.return_possible_yard_moves())    
+        yard.add_container(new_container, coordinates)
+        print(yard.return_possible_yard_moves())    
         end = time.time()
         print(f"Container add/remove time: {end-start:.4f}s")
-        removed_container = new_yard.remove_container(coordinates)
-        print(new_yard.dynamic_yard_mask)
+        removed_container = yard.remove_container(coordinates)
+        print(yard.dynamic_yard_mask)
         print(f"Container operations successful: {removed_container.container_id}")
+    # Test container operations
+    container = ContainerFactory.create_container("TEST001", "TWEU", "Import", "Regular", weight=20000)
+    placement = (0, 5, 0, 0)  # row=0, bay=5, tier=0, start_split=0
+    coords = yard.get_container_coordinates_from_placement(placement, 'TWEU')
+    
+    # Add container
+    start = time.time()
+    yard.add_container(container, coords)
+    end = time.time()
+    print(f"Container add time: {end-start:.6f}s")
+    
+    # Test tensor conversion
+    start = time.time()
+    occupied_tensor = yard.get_occupied_tensor()
+    type_tensor = yard.get_container_type_tensor()
+    full_state = yard.get_full_state_tensor()
+    compact_state = yard.get_compact_state_tensor()
+    end = time.time()
+    print(f"Tensor conversion time: {end-start:.6f}s")
+    
+    print(f"Occupied tensor shape: {occupied_tensor.shape}")
+    print(f"Type tensor shape: {type_tensor.shape}")
+    print(f"Full state shape: {full_state.shape}")
+    print(f"Compact state shape: {compact_state.shape}")
+    
+    # Test possible moves
+    start = time.time()
+    moves = yard.return_possible_yard_moves()
+    end = time.time()
+    print(f"Possible moves calculation time: {end-start:.6f}s")
+    print(f"Found {len(moves)} containers with possible moves")
