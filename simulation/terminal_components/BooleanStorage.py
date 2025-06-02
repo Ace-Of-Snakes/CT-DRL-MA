@@ -26,7 +26,6 @@ class BooleanStorageYard:
         self.split_factor = split_factor
 
         # Declaring base placeability of containers
-        # self.dynamic_yard_mask = ~np.zeros((n_rows*n_tiers*split_factor, n_bays), dtype=bool)
         self.dynamic_yard_mask = self.create_dynamic_yard_mask()
         '''boolean mask for whole yard, where False means that a place is occupied'''
 
@@ -39,7 +38,7 @@ class BooleanStorageYard:
 
         # AND product results in mask of available spots for regular containers
         self.reg_mask = ~np.zeros_like(self.dynamic_yard_mask, dtype=bool)
-        self.reg_mask = self.reg_mask & ~self.r_mask & ~self.dg_mask & ~self.sb_t_mask
+        self.reg_mask = self.reg_mask & ~self.r_mask & ~self.dg_mask #& ~self.sb_t_mask not this because they share stacking space.
  
         if validate:
             self.print_masks()
@@ -120,7 +119,9 @@ class BooleanStorageYard:
                 case "sb_t":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
-                            sb_t_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
+                            # non-stackable
+                            if tier == 0:
+                                sb_t_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
                 case _:
                     raise Exception("Storage Yard Class: invalid coordinates passed") 
         return (r_mask, dg_mask, sb_t_mask)
@@ -421,17 +422,13 @@ class BooleanStorageYard:
                 available_places = available_places & self.cldymc[k]
 
         # Determine possible bays
-        # min_bay = bay*self.split_factor - max_proximity*self.split_factor if bay - max_proximity > 0 else 0
-        # max_bay = bay*self.split_factor + max_proximity*self.split_factor if bay + max_proximity < self.n_bays*self.split_factor else self.n_bays*self.split_factor
         min_bay = max(0, bay - max_proximity)
         max_bay = min(self.n_bays, bay + max_proximity + 1)
 
         # Block off everything past min and max bay
-        # available_places[:min_bay, :] = False
-        # available_places[max_bay:, :] = False
         available_places[:, :min_bay*self.n_tiers] = False
         available_places[:, max_bay*self.n_tiers:] = False
-        # print(available_places)
+
         if coords != None:
             for coord in coords:
                 r, b, s, t = coord
@@ -508,7 +505,7 @@ class BooleanStorageYard:
         
         # OPTIMIZATION 2: Use defaultdict to eliminate membership testing
         from collections import defaultdict
-        target_containers = defaultdict(lambda: {"source_coords": [], "destinations": []})
+        target_containers: Dict[Container, Dict[str, List[int]]] = defaultdict(lambda: {"source_coords": [], "destinations": []})
         
         # OPTIMIZATION 3: Cache for container attribute -> mask mapping
         container_mask_cache = {}
@@ -576,7 +573,7 @@ if __name__ == "__main__":
         # coordinates are in form (bay, row, type = r,dg,sb_t)
         coordinates=[
             # Reefers on both ends
-            (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
+            (1, 1, "r"), (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
             (15, 1, "r"), (15, 2, "r"), (15, 3, "r"), (15, 4, "r"), (15, 5, "r"),
             
             # Row nearest to trucks is for swap bodies and trailers
