@@ -59,6 +59,14 @@ class BooleanLogistics:
         self.pickup_to_train = {}     # container_id -> (track_id, wagon_idx)  
         self.pickup_to_truck = {}     # container_id -> truck_position
         
+        # OPTIMIZATION: Fast container location index for yard
+        self.yard_container_index = {}  # container_id -> (row, bay, tier, split)
+        self.yard_container_set = set()  # Fast membership testing
+        
+        # OPTIMIZATION: Cached yard positions for different container types
+        self.cached_yard_positions = {}  # (goods_type, container_type) -> list of positions
+        self.yard_cache_dirty = True  # Flag to rebuild cache when needed
+        
         # Move mappings for efficiency
         self.train_to_truck_moves = defaultdict(list)
         self.truck_to_train_moves = defaultdict(list)
@@ -70,6 +78,9 @@ class BooleanLogistics:
         
         # Performance tracking arrays for tensor conversion
         self._init_property_arrays()
+        
+        # OPTIMIZATION: Build initial yard index
+        self._rebuild_yard_container_index()
         
         if self.validate:
             self._print_validation_info()
@@ -359,7 +370,273 @@ class BooleanLogistics:
         
         return dict(assignments)
 
-    def find_moves(self) -> Dict[str, Dict[str, Any]]:
+    def _rebuild_yard_container_index(self):
+        """OPTIMIZATION: Build fast O(1) lookup index for all containers in yard."""
+        self.yard_container_index.clear()
+        self.yard_container_set.clear()
+        
+        # Single pass through yard to build index
+        for row in range(self.yard.n_rows):
+            for bay in range(self.yard.n_bays):
+                for tier in range(self.yard.n_tiers):
+                    for split in range(self.yard.split_factor):
+                        container = self.yard.get_container_at(row, bay, tier, split)
+                        if container is not None:
+                            self.yard_container_index[container.container_id] = (row, bay, tier, split)
+                            self.yard_container_set.add(container.container_id)
+    
+    def _update_yard_container_index(self, container_id: str, position: Tuple = None):
+        """OPTIMIZATION: Update yard index when container is added/removed."""
+        if position is None:
+            # Container removed
+            self.yard_container_index.pop(container_id, None)
+            self.yard_container_set.discard(container_id)
+        else:
+            # Container added
+            self.yard_container_index[container_id] = position
+            self.yard_container_set.add(container_id)
+        
+        # Mark cache as dirty
+        self.yard_cache_dirty = True
+    
+    def _get_cached_yard_positions(self, goods_type: str, container_type: str) -> List[Tuple]:
+        """OPTIMIZATION: Get cached available positions for container type."""
+        cache_key = (goods_type, container_type)
+        
+        # Rebuild cache if dirty or key missing
+        if self.yard_cache_dirty or cache_key not in self.cached_yard_positions:
+            # Find positions for this container type
+            center_bay = self.yard.n_bays // 2
+            try:
+                positions = self.yard.search_insertion_position(
+                    center_bay, goods_type, container_type, max_proximity=5
+                )
+                self.cached_yard_positions[cache_key] = positions[:10]  # Cache top 10
+            except Exception:
+                self.cached_yard_positions[cache_key] = []
+        
+        return self.cached_yard_positions[cache_key]
+    
+    def _find_container_in_yard_fast(self, container_id: str) -> Optional[Tuple]:
+        """OPTIMIZATION: O(1) container lookup in yard using index."""
+        return self.yard_container_index.get(container_id)
+    
+    def sync_yard_index(self):
+        """Synchronize yard container index with current yard state."""
+        self._rebuild_yard_container_index()
+        self.yard_cache_dirty = True
+    
+    def add_container_to_yard(self, container: 'Container', coordinates: List[Tuple]) -> bool:
+        """
+        OPTIMIZED: Add container to yard and update index.
+        
+        Args:
+            container: Container to add
+            coordinates: List of (row, bay, split, tier) coordinates
+            
+        Returns:
+            bool: Success of operation
+        """
+        try:
+            # Add to yard
+            self.yard.add_container(container, coordinates)
+            
+            # Update index with first coordinate (main position)
+            if coordinates:
+                main_pos = coordinates[0]
+                self._update_yard_container_index(container.container_id, main_pos)
+            
+            return True
+        except Exception:
+            return False
+    
+    def remove_container_from_yard(self, coordinates: List[Tuple]) -> Optional['Container']:
+        """
+        OPTIMIZED: Remove container from yard and update index.
+        
+        Args:
+            coordinates: List of (row, bay, split, tier) coordinates
+            
+        Returns:
+            Removed container or None
+        """
+        try:
+            # Remove from yard
+            container = self.yard.remove_container(coordinates)
+            
+            # Update index
+            if container:
+                self._update_yard_container_index(container.container_id, None)
+            
+            return container
+        except Exception:
+            return None
+    
+    def find_moves_optimized(self) -> Dict[str, Dict[str, Any]]:
+        """
+        OPTIMIZED: Find all possible moves using vectorized operations and caching.
+        
+        Returns:
+            Dict mapping move_id -> move_details
+        """
+        all_moves = {}
+        move_counter = 0
+        
+        if self.validate:
+            print(f"DEBUG: Finding moves (optimized)...")
+            print(f"  Active trains: {len(self.active_trains)}")
+            print(f"  Active trucks: {len(self.active_trucks)}")
+            print(f"  Yard containers: {len(self.yard_container_index)}")
+        
+        # OPTIMIZATION 1: Collect all vehicle containers in single pass
+        train_containers = []  # (container, railtrack_id, wagon_idx)
+        truck_containers = []  # (container, truck_pos)
+        
+        for railtrack_id, train in self.active_trains.items():
+            for wagon_idx, wagon in enumerate(train.wagons):
+                for container in wagon.containers:
+                    train_containers.append((container, railtrack_id, wagon_idx))
+        
+        for truck_pos, truck in self.active_trucks.items():
+            for container in truck.containers:
+                truck_containers.append((container, truck_pos))
+        
+        # OPTIMIZATION 2: Vectorized pickup request processing
+        pickup_requests = set()
+        pickup_requests.update(self.pickup_to_train.keys())
+        pickup_requests.update(self.pickup_to_truck.keys())
+        
+        # Fast intersection with yard containers
+        yard_pickup_containers = pickup_requests & self.yard_container_set
+        
+        if self.validate:
+            print(f"  Train containers: {len(train_containers)}")
+            print(f"  Truck containers: {len(truck_containers)}")
+            print(f"  Pickup requests in yard: {len(yard_pickup_containers)}")
+        
+        # OPTIMIZATION 3: Process moves by type with minimal loops
+        
+        # 1. Train -> Truck moves
+        for container, railtrack_id, wagon_idx in train_containers:
+            if container.container_id in self.pickup_to_truck:
+                truck_pos = self.pickup_to_truck[container.container_id]
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container.container_id,
+                    'source_type': 'train',
+                    'source_pos': (railtrack_id, wagon_idx),
+                    'dest_type': 'truck',
+                    'dest_pos': truck_pos,
+                    'move_type': 'train_to_truck',
+                    'priority': 10.0
+                }
+                move_counter += 1
+        
+        # 2. Truck -> Train moves
+        for container, truck_pos in truck_containers:
+            if container.container_id in self.pickup_to_train:
+                railtrack_id, wagon_idx = self.pickup_to_train[container.container_id]
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container.container_id,
+                    'source_type': 'truck',
+                    'source_pos': truck_pos,
+                    'dest_type': 'train',
+                    'dest_pos': (railtrack_id, wagon_idx),
+                    'move_type': 'truck_to_train',
+                    'priority': 10.0
+                }
+                move_counter += 1
+        
+        # 3. Yard -> Vehicle moves (using fast lookup)
+        for container_id in yard_pickup_containers:
+            container_pos = self.yard_container_index[container_id]
+            
+            # Check train pickups
+            if container_id in self.pickup_to_train:
+                railtrack_id, wagon_idx = self.pickup_to_train[container_id]
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container_id,
+                    'source_type': 'yard',
+                    'source_pos': container_pos,
+                    'dest_type': 'train',
+                    'dest_pos': (railtrack_id, wagon_idx),
+                    'move_type': 'from_yard',
+                    'priority': 9.0
+                }
+                move_counter += 1
+            
+            # Check truck pickups
+            if container_id in self.pickup_to_truck:
+                truck_pos = self.pickup_to_truck[container_id]
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container_id,
+                    'source_type': 'yard',
+                    'source_pos': container_pos,
+                    'dest_type': 'truck',
+                    'dest_pos': truck_pos,
+                    'move_type': 'from_yard',
+                    'priority': 9.0
+                }
+                move_counter += 1
+        
+        # 4. Vehicle -> Yard moves (using cached positions)
+        import_containers = []
+        
+        # Collect import containers from vehicles
+        for container, railtrack_id, wagon_idx in train_containers:
+            if hasattr(container, 'direction') and container.direction == 'Import':
+                import_containers.append((container, 'train', (railtrack_id, wagon_idx)))
+        
+        for container, truck_pos in truck_containers:
+            if hasattr(container, 'direction') and container.direction == 'Import':
+                import_containers.append((container, 'truck', truck_pos))
+        
+        # Process import containers with cached positions
+        processed_types = set()
+        for container, source_type, source_pos in import_containers:
+            # Determine goods type
+            if container.goods_type == 'Reefer':
+                goods_type = 'r'
+            elif container.goods_type == 'Dangerous':
+                goods_type = 'dg'
+            elif container.container_type in ['Swap Body', 'Trailer']:
+                goods_type = 'sb_t'
+            else:
+                goods_type = 'reg'
+            
+            # Use cached positions
+            cache_key = (goods_type, container.container_type)
+            if cache_key not in processed_types:
+                # Get cached positions for this type
+                cached_positions = self._get_cached_yard_positions(goods_type, container.container_type)
+                processed_types.add(cache_key)
+            else:
+                cached_positions = self.cached_yard_positions.get(cache_key, [])
+            
+            # Add moves for available positions (limit to 2 per container)
+            for position in cached_positions[:2]:
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container.container_id,
+                    'source_type': source_type,
+                    'source_pos': source_pos,
+                    'dest_type': 'yard',
+                    'dest_pos': position,
+                    'move_type': 'to_yard',
+                    'priority': 8.0
+                }
+                move_counter += 1
+        
+        if self.validate:
+            print(f"  Total moves found: {len(all_moves)}")
+        
+        # Mark cache as clean after successful move finding
+        self.yard_cache_dirty = False
+        
+        return all_moves
         """
         Find all possible moves: train->truck, truck->train, and yard insertions.
         
@@ -575,7 +852,7 @@ class BooleanLogistics:
         self.process_current_trucks()
         
         # Update move cache
-        self.available_moves_cache = self.find_moves()
+        self.available_moves_cache = self.find_moves_optimized()
         
         return np.array([trains_departed_early, trains_departed_late, trucks_departed])
 
@@ -796,37 +1073,75 @@ class BooleanLogistics:
         # This would require queue modification - for now just pass
         pass
     
-    def _find_yard_positions_for_container(self, container: Container) -> List[Tuple]:
-        """Find available positions in yard for container storage."""
+    def _find_yard_positions_for_container(self, container: 'Container') -> List[Tuple]:
+        """OPTIMIZED: Find available positions in yard using cached results."""
         # Determine goods type for mask selection
         if container.goods_type == 'Reefer':
-            goods_mask = 'r'
+            goods_type = 'r'
         elif container.goods_type == 'Dangerous':
-            goods_mask = 'dg'
+            goods_type = 'dg'
         elif container.container_type in ['Trailer', 'Swap Body']:
-            goods_mask = 'sb_t'
+            goods_type = 'sb_t'
         else:
-            goods_mask = 'reg'
+            goods_type = 'reg'
         
-        # Use yard's search function
-        center_bay = self.yard.n_bays // 2
-        positions = self.yard.search_insertion_position(
-            center_bay, goods_mask, container.container_type, max_proximity=5
-        )
-        
-        return positions
+        # Use cached positions
+        return self._get_cached_yard_positions(goods_type, container.container_type)
     
     def _find_container_in_yard(self, container_id: str) -> Optional[Tuple]:
-        """Find container position in yard by ID."""
-        # Search through yard for container
-        for row in range(self.yard.n_rows):
-            for bay in range(self.yard.n_bays):
-                for tier in range(self.yard.n_tiers):
-                    for split in range(self.yard.split_factor):
-                        container = self.yard.get_container_at(row, bay, tier, split)
-                        if container and container.container_id == container_id:
-                            return (row, bay, tier, split)
-        return None
+        """Find container position in yard by ID using optimized lookup."""
+        return self._find_container_in_yard_fast(container_id)
+    
+    def sync_yard_index(self):
+        """Synchronize yard container index with current yard state."""
+        self._rebuild_yard_container_index()
+        self.yard_cache_dirty = True
+    
+    def add_container_to_yard(self, container: 'Container', coordinates: List[Tuple]) -> bool:
+        """
+        OPTIMIZED: Add container to yard and update index.
+        
+        Args:
+            container: Container to add
+            coordinates: List of (row, bay, split, tier) coordinates
+            
+        Returns:
+            bool: Success of operation
+        """
+        try:
+            # Add to yard
+            self.yard.add_container(container, coordinates)
+            
+            # Update index with first coordinate (main position)
+            if coordinates:
+                main_pos = coordinates[0]
+                self._update_yard_container_index(container.container_id, main_pos)
+            
+            return True
+        except Exception:
+            return False
+    
+    def remove_container_from_yard(self, coordinates: List[Tuple]) -> Optional['Container']:
+        """
+        OPTIMIZED: Remove container from yard and update index.
+        
+        Args:
+            coordinates: List of (row, bay, split, tier) coordinates
+            
+        Returns:
+            Removed container or None
+        """
+        try:
+            # Remove from yard
+            container = self.yard.remove_container(coordinates)
+            
+            # Update index
+            if container:
+                self._update_yard_container_index(container.container_id, None)
+            
+            return container
+        except Exception:
+            return None
     
     def _print_validation_info(self):
         """Print validation information if validate=True."""
@@ -917,7 +1232,7 @@ if __name__ == '__main__':
     print(f"Trucks placed: {trucks_placed}")
     
     # Find moves
-    moves = logistics.find_moves()
+    moves = logistics.find_moves_optimized()
     print(f"Found {len(moves)} possible moves")
     
     # Show move details
