@@ -1211,6 +1211,10 @@ if __name__ == '__main__':
         test_yard.add_container(pickup_container_2, coords_2)
         print(f"Added {pickup_container_2.container_id} to yard at {coords_2}")
     
+    # CRITICAL: Sync the logistics yard index after manually adding containers
+    logistics.sync_yard_index()
+    print(f"Synced yard index: {len(logistics.yard_container_index)} containers indexed")
+    
     # Create test train with pickup requests
     test_train = Train("TEST_TRAIN_001", num_wagons=5)
     test_train.wagons[0].add_pickup_container("PICKUP_001")  # Wants container in yard
