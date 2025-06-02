@@ -310,8 +310,12 @@ class BooleanStorageYard:
         """
         if container_length > self.split_factor:
             # Special case for containers longer than split_factor (like FFEU=5 in split_factor=4)
-            # TODO: Implement cross-bay spanning logic
-            return [0]  # For now, only allow start position
+            # Maximum allowed length is split_factor * 2
+            assert container_length < self.split_factor*2, 'Container is not allowed to span more than 2 full bays'
+
+            start_position = 0
+            end_position = -(container_length - self.split_factor)
+            return [start_position, end_position]
         
         elif container_length == self.split_factor:
             # Container uses full bay (e.g., FEU=4 in split_factor=4)
@@ -332,7 +336,7 @@ class BooleanStorageYard:
 
     def _find_cross_bay_placements(self, available_coordinates, container_type: str) -> List[Tuple]:
         """
-        Handle containers that span across multiple bays (like FFEU=5 in split_factor=4).
+        OPTIMIZED: Handle cross-bay containers with minimal loops.
         
         Args:
             available_coordinates: Available positions
@@ -346,47 +350,42 @@ class BooleanStorageYard:
             
         container_length = self.container_lengths[container_type]
         
-        if container_length <= self.split_factor:
-            return []  # Not a cross-bay container
+        if container_length <= self.split_factor or container_length > self.split_factor * 2:
+            return []
         
-        # Group coordinates by (row, tier) for cross-bay analysis
-        position_groups = defaultdict(lambda: defaultdict(set))
+        valid_start_positions = self._get_valid_start_positions(container_length)
         
-        for coord in available_coordinates:
-            row, bay, split, tier = coord
-            position_groups[row][tier].add((bay, split))
+        # Convert to set for O(1) lookups
+        position_set = {(row, bay, split, tier) for row, bay, split, tier in available_coordinates}
+        
+        # Get unique (row, tier) combinations
+        row_tier_combinations = {(row, tier) for row, bay, split, tier in available_coordinates}
         
         valid_placements = []
         
-        for row in position_groups:
-            for tier in position_groups[row]:
-                bay_splits = position_groups[row][tier]
+        # Only 2 nested loops instead of 5
+        for row, tier in row_tier_combinations:
+            for start_split in valid_start_positions:
+                actual_start_split = start_split if start_split >= 0 else self.split_factor + start_split
                 
-                # Sort by bay, then split
-                sorted_positions = sorted(bay_splits)
+                # Find starting bays that have the required start split available
+                starting_bays = {bay for row_check, bay, split, tier_check in position_set 
+                            if row_check == row and tier_check == tier and split == actual_start_split}
                 
-                # Look for consecutive positions across bays
-                # For FFEU (length=5): need 5 consecutive split positions
-                # Could be: bay_n splits [2,3] + bay_(n+1) splits [0,1,2]
-                
-                for i in range(len(sorted_positions) - container_length + 1):
-                    # Check if we have container_length consecutive positions
-                    consecutive_positions = []
-                    
-                    current_bay, current_split = sorted_positions[i]
+                # Check each potential starting bay
+                for start_bay in starting_bays:
+                    # Single loop to validate consecutive positions
+                    valid = True
                     for j in range(container_length):
-                        expected_bay = current_bay + (current_split + j) // self.split_factor
-                        expected_split = (current_split + j) % self.split_factor
+                        expected_bay = start_bay + (actual_start_split + j) // self.split_factor
+                        expected_split = (actual_start_split + j) % self.split_factor
                         
-                        if (expected_bay, expected_split) in bay_splits:
-                            consecutive_positions.append((expected_bay, expected_split))
-                        else:
+                        if (row, expected_bay, expected_split, tier) not in position_set:
+                            valid = False
                             break
                     
-                    if len(consecutive_positions) == container_length:
-                        # Valid cross-bay placement found
-                        start_bay, start_split = consecutive_positions[0]
-                        valid_placements.append((row, start_bay, tier, start_split))
+                    if valid:
+                        valid_placements.append((row, start_bay, tier, actual_start_split))
         
         return valid_placements
 
@@ -629,7 +628,7 @@ if __name__ == "__main__":
     valid_placements_ffeu = new_yard.search_insertion_position(6, 'reg', 'FFEU', 3)
     print(f"Found {len(valid_placements_ffeu)} valid FFEU placements")
     if valid_placements_ffeu:
-        print("FFEU placements:", valid_placements_ffeu[:3])
+        print("FFEU placements:", valid_placements_ffeu[:5])
         print("Expected: Cross-bay spanning positions")
     
     end = time.time()
