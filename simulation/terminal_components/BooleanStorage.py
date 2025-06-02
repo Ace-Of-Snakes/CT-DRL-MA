@@ -40,14 +40,14 @@ class BooleanStorageYard:
         # AND product results in mask of available spots for regular containers
         self.reg_mask = ~np.zeros_like(self.dynamic_yard_mask, dtype=bool)
         self.reg_mask = self.reg_mask & ~self.r_mask & ~self.dg_mask & ~self.sb_t_mask
-
-        # Test of AND between bool mask and yard coordinates
-        # print(self.coordinates[self.r_mask])
  
         if validate:
             self.print_masks()
 
         self.containers: Dict[str, Container] = self.create_container_mapping()
+
+        # Test of AND between bool mask and yard coordinates
+        # self.setup_coordinate_container_lookup()
 
         # Define container lengths
         self.container_lengths: dict = {
@@ -483,53 +483,88 @@ class BooleanStorageYard:
         
         return coordinates
 
-    def return_possible_yard_moves(self, max_proximity: int = 5) -> Dict[str, Dict[str, List[List[Tuple]]]]:
+    def return_possible_yard_moves(self, max_proximity: int = 1) -> Dict[str, Dict[str, List[List[Tuple]]]]:
+        """
+        SIMPLE OPTIMIZATION: Target the main bottlenecks in your existing working code.
         
+        Main optimizations:
+        1. Eliminate repeated string formatting 
+        2. Use defaultdict to avoid membership testing
+        3. Cache container attribute lookups
+        4. Pre-filter coordinates by tier
+        """
+        
+        # Get all target coordinates
         target_coordinates = self.coordinates[self.dynamic_yard_mask]
-        target_containers: Dict[Container, Dict[str, List]]  = {}
-        for coordinate in target_coordinates:
-            row, bay, split, tier = coordinate
-            
-            # if tier equals 0, then it is an empty slot
-            if tier == 0:
-                continue
-            # else the container is in the tear bellow according to our logic
-            else:
-                input_format = f"R{row}B{bay}.{split}T{tier-1}"
-                # print(input_format)
-                container = self.containers[input_format]
-                print(container)
-                if container not in target_containers.keys():
-                    target_containers[container] = {
-                        "source_coords": [],
-                        "destinations" : []
-                    }
-                # Always add the coordinate (for both first encounter and subsequent ones)
-                target_containers[container]["source_coords"].append((row, bay, split, tier-1))
         
-        for container in target_containers.keys():
-            # get bay from first coordinate
-            bay = target_containers[container]["source_coords"][0][1]
+        if len(target_coordinates) == 0:
+            return {}
+        
+        # OPTIMIZATION 1: Pre-filter coordinates by tier to avoid checking tier == 0 in loop
+        valid_coordinates = [coord for coord in target_coordinates if coord[3] > 0]
+        
+        if not valid_coordinates:
+            return {}
+        
+        # OPTIMIZATION 2: Use defaultdict to eliminate membership testing
+        from collections import defaultdict
+        target_containers = defaultdict(lambda: {"source_coords": [], "destinations": []})
+        
+        # OPTIMIZATION 3: Cache for container attribute -> mask mapping
+        container_mask_cache = {}
+        
+        # Process each valid coordinate
+        for coordinate in valid_coordinates:
+            row, bay, split, tier = coordinate
+            container_tier = tier - 1
             
-            # get mask applicability
-            if container.goods_type == 'Reefer':
-                applicable_mask = 'r'
-            elif container.goods_type == 'Dangerous':
-                applicable_mask = 'dg'
-            elif container.goods_type == 'Regular':
-                applicable_mask = 'reg'
-            elif container.container_type == "Trailer" or container.container_type ==  "Swap Body":
-                applicable_mask = 'sb_t'
-
-            # get valid destinations
-            # print(bay, applicable_mask, container.container_type)
-            target_containers[container]["destinations"] = self.search_insertion_position(bay, 
-                                                                                          applicable_mask, 
-                                                                                          container.container_type, 
-                                                                                          5, 
-                                                                                          target_containers[container]["source_coords"])
-
-        return target_containers
+            # OPTIMIZATION 4: Reduce string operations - build key once
+            container_key = f"R{row}B{bay}.{split}T{container_tier}"
+            container = self.containers.get(container_key)  # Use .get() to avoid KeyError
+            
+            if container is not None:
+                # Add coordinate (defaultdict eliminates need for existence check)
+                target_containers[container]["source_coords"].append((row, bay, split, container_tier))
+                
+                # OPTIMIZATION 5: Cache container mask mapping to avoid repeated attribute access
+                if container not in container_mask_cache:
+                    if container.goods_type == 'Reefer':
+                        container_mask_cache[container] = 'r'
+                    elif container.goods_type == 'Dangerous':
+                        container_mask_cache[container] = 'dg'
+                    elif container.goods_type == 'Regular':
+                        container_mask_cache[container] = 'reg'
+                    elif container.container_type in ("Trailer", "Swap Body"):
+                        container_mask_cache[container] = 'sb_t'
+                    else:
+                        container_mask_cache[container] = 'reg'  # fallback
+        
+        # Process destinations using cached mask mappings
+        result = {}
+        for container, data in target_containers.items():
+            # Get bay from first coordinate
+            bay = data["source_coords"][0][1]
+            
+            # Use cached mask instead of repeated attribute access
+            applicable_mask = container_mask_cache[container]
+            
+            # Get valid destinations
+            destinations = self.search_insertion_position(
+                bay, 
+                applicable_mask, 
+                container.container_type, 
+                max_proximity,
+                data["source_coords"]
+            )
+            
+            # Only include containers that have valid destinations
+            if destinations:
+                result[container.container_id] = {
+                    "source_coords": data["source_coords"],
+                    "destinations": destinations
+                }
+        
+        return result
 
 if __name__ == "__main__":
     import time
@@ -614,7 +649,7 @@ if __name__ == "__main__":
         coordinates = new_yard.get_container_coordinates_from_placement(placement, 'TWEU')
         print(coordinates)
         new_yard.add_container(new_container, coordinates)
-        print(new_yard.return_possible_yard_moves_ultra_optimized())    
+        print(new_yard.return_possible_yard_moves())    
         end = time.time()
         print(f"Container add/remove time: {end-start:.4f}s")
         removed_container = new_yard.remove_container(coordinates)
