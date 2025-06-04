@@ -13,13 +13,13 @@ from datetime import datetime, timedelta
 import random
 
 # Import our custom components
-from simulation.terminal_layout.CTSimulator import ContainerTerminal
+from simulation.deprecated_components.terminal_layout.CTSimulator import ContainerTerminal
 from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
 from simulation.terminal_components.TerminalTruck import TerminalTruck
 from simulation.deprecated_components.BitmapYard import BitmapStorageYard  # Updated import
-from simulation.terminal_components.RMGCrane import RMGCrane
+from simulation.deprecated_components.RMGCrane import RMGCrane
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 
 
@@ -149,7 +149,7 @@ class OptimizedTerminalEnvironment(gym.Env):
 
     def _load_config(self, config_path):
         """Load terminal configuration."""
-        from simulation.config import TerminalConfig
+        from simulation.TerminalConfig import TerminalConfig
         return TerminalConfig(config_path)
     
     def _create_terminal(self):
