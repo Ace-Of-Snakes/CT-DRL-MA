@@ -15,7 +15,7 @@ def main():
     
     # Import the Container class and ContainerFactory
     from simulation.terminal_components.Container import Container, ContainerFactory
-    from simulation.terminal_components.BitmapYard import BitmapStorageYard 
+    from simulation.deprecated_components.BitmapYard import BitmapStorageYard 
     
     # Determine compute device - use GPU if available
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

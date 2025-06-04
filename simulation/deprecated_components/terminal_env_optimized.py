@@ -18,7 +18,7 @@ from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
 from simulation.terminal_components.TerminalTruck import TerminalTruck
-from simulation.terminal_components.BitmapYard import BitmapStorageYard  # Updated import
+from simulation.deprecated_components.BitmapYard import BitmapStorageYard  # Updated import
 from simulation.terminal_components.RMGCrane import RMGCrane
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 

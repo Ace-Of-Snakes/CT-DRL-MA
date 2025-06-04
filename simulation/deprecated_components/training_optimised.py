@@ -21,7 +21,7 @@ if project_root not in sys.path:
 
 # Import our modules
 from simulation.agents.dual_head_q import OptimizedTerminalAgent
-from simulation.terminal_env_optimized import OptimizedTerminalEnvironment  # Updated import
+from simulation.deprecated_components.terminal_env_optimized import OptimizedTerminalEnvironment  # Updated import
 from simulation import TerminalConfig
 
 class OptimizedTrainingLogger:
@@ -436,7 +436,7 @@ class OptimizedCurriculumTrainer:
         
     def _create_custom_storage_yard(self, env):
         """Create an optimized bitmap storage yard matching the terminal layout."""
-        from simulation.terminal_components.BitmapYard import BitmapStorageYard
+        from simulation.deprecated_components.BitmapYard import BitmapStorageYard
         
         # Define special areas for different container types
         special_areas = {
