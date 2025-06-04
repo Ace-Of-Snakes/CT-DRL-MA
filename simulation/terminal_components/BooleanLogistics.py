@@ -23,7 +23,7 @@ class BooleanLogistics:
                  split_factor: int,
                  yard: BooleanStorageYard,
                  validate: bool = False,
-                 device: str = 'cpu'):
+                 device: str = 'cuda'):
         
         self.n_rows = n_rows
         self.n_railtracks = n_railtracks
@@ -375,15 +375,84 @@ class BooleanLogistics:
         self.yard_container_index.clear()
         self.yard_container_set.clear()
         
+        # Track containers we've already indexed to avoid duplicates
+        indexed_containers = set()
+        
         # Single pass through yard to build index
         for row in range(self.yard.n_rows):
             for bay in range(self.yard.n_bays):
                 for tier in range(self.yard.n_tiers):
                     for split in range(self.yard.split_factor):
                         container = self.yard.get_container_at(row, bay, tier, split)
-                        if container is not None:
-                            self.yard_container_index[container.container_id] = (row, bay, tier, split)
-                            self.yard_container_set.add(container.container_id)
+                        if container is not None and container.container_id not in indexed_containers:
+                            # Get container length from yard's container_lengths dict
+                            container_length = self.yard.container_lengths.get(container.container_type, 1)
+                            
+                            # Get valid start positions for this container type
+                            valid_start_positions = self.yard._get_valid_start_positions(container_length)
+                            
+                            # Find which valid start position this container actually uses
+                            actual_start_split = None
+                            
+                            # Check each valid start position to see if the container starts there
+                            for start_pos in valid_start_positions:
+                                # For cross-bay containers (FFEU with length 5)
+                                if container_length > self.yard.split_factor:
+                                    # Handle negative start positions (e.g., -1 for FFEU)
+                                    if start_pos < 0:
+                                        start_pos = self.yard.split_factor + start_pos
+                                    
+                                    # Check if container starts at this position
+                                    # Need to check if we can find the same container at the expected positions
+                                    all_positions_match = True
+                                    for offset in range(container_length):
+                                        check_bay = bay + (start_pos + offset) // self.yard.split_factor
+                                        check_split = (start_pos + offset) % self.yard.split_factor
+                                        
+                                        # Make sure we're within bounds
+                                        if check_bay < self.yard.n_bays:
+                                            check_container = self.yard.get_container_at(row, check_bay, tier, check_split)
+                                            if check_container != container:
+                                                all_positions_match = False
+                                                break
+                                        else:
+                                            all_positions_match = False
+                                            break
+                                    
+                                    if all_positions_match:
+                                        actual_start_split = start_pos
+                                        break
+                                else:
+                                    # Regular container within single bay
+                                    # Check if all positions from start_pos match this container
+                                    all_positions_match = True
+                                    for offset in range(container_length):
+                                        if start_pos + offset < self.yard.split_factor:
+                                            check_container = self.yard.get_container_at(row, bay, tier, start_pos + offset)
+                                            if check_container != container:
+                                                all_positions_match = False
+                                                break
+                                        else:
+                                            all_positions_match = False
+                                            break
+                                    
+                                    if all_positions_match:
+                                        actual_start_split = start_pos
+                                        break
+                            
+                            # If we found the actual start position, record it
+                            if actual_start_split is not None:
+                                self.yard_container_index[container.container_id] = (row, bay, tier, actual_start_split)
+                                self.yard_container_set.add(container.container_id)
+                                indexed_containers.add(container.container_id)
+                            else:
+                                # Fallback: record current position if we couldn't determine start
+                                # This shouldn't happen with properly placed containers
+                                if self.validate:
+                                    print(f"Warning: Could not determine start position for {container.container_id} at ({row},{bay},{tier},{split})")
+                                self.yard_container_index[container.container_id] = (row, bay, tier, split)
+                                self.yard_container_set.add(container.container_id)
+                                indexed_containers.add(container.container_id)
     
     def _update_yard_container_index(self, container_id: str, position: Tuple = None):
         """OPTIMIZATION: Update yard index when container is added/removed."""
