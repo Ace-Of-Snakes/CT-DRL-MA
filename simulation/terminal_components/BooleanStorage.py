@@ -12,7 +12,7 @@ class BooleanStorageYard:
                  coordinates: List[Tuple[int, int, str]],
                  split_factor: int = 4,
                  validate: bool = False,
-                 device: str = 'cpu'):
+                 device: str = 'cuda'):
 
         # Type assertion to check for wrong input        
         assert type(n_rows) == int
