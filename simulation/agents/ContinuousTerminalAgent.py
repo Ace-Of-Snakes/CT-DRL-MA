@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from collections import deque, namedtuple
 import random
 from typing import Dict, Tuple, List, Optional, Any
+import copy
 
 
 Experience = namedtuple('Experience', 
@@ -31,14 +32,23 @@ class PrioritizedReplayBuffer:
         
     def add(self, experience: Experience):
         """Add experience with initial high priority."""
-        max_priority = max(self.priorities) if self.priorities else 1.0
+        # Use reward magnitude to influence initial priority
+        reward_influence = abs(experience.reward) + 1.0
+        
+        if self.priorities:
+            max_priority = max(self.priorities)
+        else:
+            max_priority = 1.0
+            
+        # Higher priority for experiences with significant rewards
+        initial_priority = max_priority * reward_influence
         
         if len(self.buffer) < self.capacity:
             self.buffer.append(experience)
         else:
             self.buffer[self.position] = experience
             
-        self.priorities.append(max_priority)
+        self.priorities.append(initial_priority)
         self.position = (self.position + 1) % self.capacity
         
     def sample(self, batch_size: int, current_day: int) -> Tuple[List[Experience], np.ndarray, np.ndarray]:
@@ -77,10 +87,11 @@ class PrioritizedReplayBuffer:
         
         return experiences, weights, indices
     
-    def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray):
-        """Update priorities based on TD errors."""
-        for idx, td_error in zip(indices, td_errors):
-            priority = (abs(td_error) + 1e-6) ** self.alpha
+    def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
+        """Update priorities based on combined TD errors and rewards."""
+        for idx, priority in zip(indices, priorities):
+            # Ensure priority is positive and not too small
+            priority = max(abs(priority), 1e-6) ** self.alpha
             self.priorities[idx] = priority
     
     def soft_reset(self, current_day: int):
@@ -122,19 +133,15 @@ class ContinuousTerminalAgent(nn.Module):
         # Move to device
         self.to(device)
         
-        # Target network
-        self.target_net = ContinuousTerminalAgent(
-            state_dim, hidden_dims, learning_rate, gamma, tau, device='cpu'
-        )
-        self.target_net.load_state_dict(self.state_dict())
-        self.target_net.to(device)
+        # Create target network as a deep copy
+        self.target_net = copy.deepcopy(self)
         self.target_net.eval()
         
         # Optimizer with gradient clipping
         self.optimizer = optim.AdamW(self.parameters(), lr=learning_rate, weight_decay=0.0001)
         
         # Experience replay
-        self.replay_buffer = PrioritizedReplayBuffer(capacity=100000)
+        self.replay_buffer = PrioritizedReplayBuffer(capacity=20000)  # Reduced from 100k
         
         # Training parameters
         self.batch_size = 64
@@ -321,11 +328,15 @@ class ContinuousTerminalAgent(nn.Module):
         if experiences is None:
             return None
             
-        # Convert to tensors
-        states = torch.FloatTensor([e.state for e in experiences]).to(self.device)
+        # Convert to tensors efficiently
+        # First convert lists to numpy arrays to avoid warning
+        states_np = np.array([e.state for e in experiences])
+        next_states_np = np.array([e.next_state for e in experiences])
+        
+        states = torch.FloatTensor(states_np).to(self.device)
         actions = torch.LongTensor([e.action for e in experiences]).to(self.device)
         rewards = torch.FloatTensor([e.reward for e in experiences]).to(self.device)
-        next_states = torch.FloatTensor([e.next_state for e in experiences]).to(self.device)
+        next_states = torch.FloatTensor(next_states_np).to(self.device)
         dones = torch.FloatTensor([e.done for e in experiences]).to(self.device)
         weights = torch.FloatTensor(weights).to(self.device)
         
@@ -355,22 +366,52 @@ class ContinuousTerminalAgent(nn.Module):
         # Compute targets
         targets = rewards + self.gamma * next_q_values * (1 - dones)
         
-        # Compute loss with importance sampling weights
+        # Compute TD errors
         td_errors = targets - current_q_values
-        loss = (weights * td_errors.pow(2)).mean()
+        
+        # Reward-modulated loss: directly incorporate reward signal
+        # 1. Base TD loss
+        td_loss = td_errors.pow(2)
+        
+        # 2. Direct reward loss - encourage Q-values to predict high rewards
+        # This makes the network directly optimize for reward maximization
+        reward_loss = (current_q_values - rewards).pow(2) * 0.1
+        
+        # 3. Reward-based weighting: prioritize learning from high-reward experiences
+        # Negative rewards get higher weight to learn what to avoid
+        # Positive rewards get moderate weight to learn what to seek
+        reward_weights = torch.where(
+            rewards < 0,
+            torch.abs(rewards) * 0.5 + 1.0,  # Amplify negative rewards
+            rewards * 0.2 + 1.0               # Moderate positive rewards
+        )
+        
+        # Combined loss with importance sampling
+        loss = (weights * reward_weights * (td_loss + reward_loss)).mean()
         
         # Add L2 regularization
         l2_reg = sum(p.pow(2).sum() for p in self.parameters())
         loss = loss + 0.0001 * l2_reg
         
-        # Optimize
+        # Optimize with reward-aware gradient clipping
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        
+        # Adaptive gradient clipping based on average reward magnitude
+        avg_reward_magnitude = torch.abs(rewards).mean().item()
+        clip_value = min(1.0, 0.1 + avg_reward_magnitude * 0.1)  # Scale clipping with rewards
+        torch.nn.utils.clip_grad_norm_(self.parameters(), clip_value)
+        
         self.optimizer.step()
         
-        # Update priorities
-        self.replay_buffer.update_priorities(indices, td_errors.detach().cpu().numpy())
+        # Update priorities with reward-aware TD errors
+        # Prioritize experiences with high absolute rewards AND high TD errors
+        reward_factor = torch.abs(rewards).cpu().numpy()
+        td_errors_np = td_errors.detach().cpu().numpy()
+        
+        # Combined priority: TD error magnitude × reward importance
+        combined_priorities = np.abs(td_errors_np) * (1 + reward_factor * 0.5)
+        self.replay_buffer.update_priorities(indices, combined_priorities)
         
         # Soft update target network
         self._soft_update_target()
@@ -382,6 +423,16 @@ class ContinuousTerminalAgent(nn.Module):
         self.training_stats['losses'].append(loss.item())
         self.training_stats['td_errors'].append(td_errors.abs().mean().item())
         self.training_stats['q_values'].append(current_q_values.mean().item())
+        
+        # Track reward-specific statistics
+        if 'avg_batch_reward' not in self.training_stats:
+            self.training_stats['avg_batch_reward'] = deque(maxlen=1000)
+            self.training_stats['reward_prediction_error'] = deque(maxlen=1000)
+        
+        self.training_stats['avg_batch_reward'].append(rewards.mean().item())
+        self.training_stats['reward_prediction_error'].append(
+            (current_q_values - rewards).abs().mean().item()
+        )
         
         return loss.item()
         
