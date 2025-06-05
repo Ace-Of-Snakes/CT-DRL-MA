@@ -162,10 +162,19 @@ class ContainerTerminal(gym.Env):
         yard_state_dim = 5 * self.n_rows * self.n_bays * self.n_tiers * self.split_factor
         rail_state_dim = self.n_rows * self.split_factor * self.n_railtracks
         parking_state_dim = self.n_rows * self.split_factor
-        queue_dim = 4  # train queue size, truck queue size, containers waiting
+        queue_dim = 4  # train queue, truck queue, trains in terminal, trucks in terminal
         time_dim = 3  # current time, day, time remaining in day
         
         total_state_dim = yard_state_dim + rail_state_dim + parking_state_dim + queue_dim + time_dim
+        
+        # Debug print
+        print(f"State dimension breakdown:")
+        print(f"  Yard: {yard_state_dim} (5×{self.n_rows}×{self.n_bays}×{self.n_tiers}×{self.split_factor})")
+        print(f"  Rail: {rail_state_dim} ({self.n_rows}×{self.split_factor}×{self.n_railtracks})")
+        print(f"  Parking: {parking_state_dim} ({self.n_rows}×{self.split_factor})")
+        print(f"  Queue: {queue_dim}")
+        print(f"  Time: {time_dim}")
+        print(f"  Total: {total_state_dim}")
         
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -322,7 +331,11 @@ class ContainerTerminal(gym.Env):
                     container.direction = "Export"
                     container.arrival_date = base_date - timedelta(days=random.randint(1, 5))
                     
-                    # Find position in yard
+                    # Find position in yard - suppress warnings during initialization
+                    with_warnings = hasattr(self, '_initialization_complete')
+                    if not with_warnings:
+                        self._coord_warning_shown = True  # Suppress warnings during init
+                        
                     if self._place_container_in_yard(container):
                         pass  # Container placed successfully
             
@@ -389,11 +402,18 @@ class ContainerTerminal(gym.Env):
         
         # Update container priorities
         self._update_container_priorities()
+        
+        # Mark initialization as complete
+        self._initialization_complete = True
     
     def _create_container_with_weight(self, container_id: str) -> Container:
         """Create container with weight sampled from KDE."""
         # Use ContainerFactory to create random container
         container = ContainerFactory.create_random(container_id)
+        
+        # Avoid FFEU containers for now as they cause cross-bay issues
+        while container.container_type == "FFEU":
+            container = ContainerFactory.create_random(container_id)
         
         # Sample weight from KDE if available
         if self.kde_models.get('container_weight'):
@@ -447,7 +467,7 @@ class ContainerTerminal(gym.Env):
         
         # Try multiple bay positions
         for _ in range(5):
-            bay = random.randint(2, self.n_bays-2)
+            bay = random.randint(2, self.n_bays-3)  # Leave more margin for cross-bay containers
             positions = self.yard.search_insertion_position(
                 bay,
                 goods_type,
@@ -456,11 +476,40 @@ class ContainerTerminal(gym.Env):
             )
             
             if positions:
+                # Get coordinates for the first valid position
+                placement = positions[0]
+                row, bay, tier, start_split = placement
+                
+                # For FFEU containers (length 5), ensure we don't go out of bounds
+                container_length = self.yard.container_lengths.get(container.container_type, 1)
+                if container_length > self.yard.split_factor:
+                    # Skip if this would go out of bounds
+                    if bay >= self.n_bays - 1:
+                        continue
+                
                 coords = self.yard.get_container_coordinates_from_placement(
-                    positions[0],
+                    placement,
                     container.container_type
                 )
-                return self.logistics.add_container_to_yard(container, coords)
+                
+                # Validate ALL coordinates before adding
+                valid = True
+                for coord in coords:
+                    r, b, s, t = coord
+                    if not (0 <= r < self.yard.n_rows and 
+                           0 <= b < self.yard.n_bays and 
+                           0 <= s < self.yard.split_factor and 
+                           0 <= t < self.yard.n_tiers):
+                        valid = False
+                        if not hasattr(self, '_coord_warning_shown'):
+                            print(f"Debug: Invalid coord {coord} for {container.container_type} (length={container_length})")
+                            self._coord_warning_shown = True
+                        break
+                
+                if valid:
+                    success = self.logistics.add_container_to_yard(container, coords)
+                    if success:
+                        return True
                 
         return False
         
@@ -486,6 +535,9 @@ class ContainerTerminal(gym.Env):
                                     container.priority = max(1, container.priority - 50)
                                 elif days_until_pickup <= 3:
                                     container.priority = max(1, container.priority - 25)
+                            
+                            # Update priority in the yard arrays
+                            self.yard._update_property_arrays(row, bay, tier, split, container)
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Execute action and return new state, reward, done flags, and info."""
@@ -583,11 +635,15 @@ class ContainerTerminal(gym.Env):
         # Priority bonus for high-priority containers
         container_id = move.get('container_id')
         if container_id:
-            # Check if container has high priority
-            container = self._find_container(container_id)
-            if container and hasattr(container, 'priority'):
-                if container.priority < 50:  # High priority
-                    reward += 2.0
+            try:
+                # Check if container has high priority
+                container = self._find_container(container_id)
+                if container and hasattr(container, 'priority'):
+                    if container.priority < 50:  # High priority
+                        reward += 2.0
+            except Exception as e:
+                # Handle any errors in container lookup
+                print(f"Warning: Error finding container {container_id}: {e}")
         
         return reward
     
@@ -630,7 +686,17 @@ class ContainerTerminal(gym.Env):
         # Check yard
         if container_id in self.logistics.yard_container_index:
             pos = self.logistics.yard_container_index[container_id]
-            return self.yard.get_container_at(*pos)
+            # Validate position bounds
+            row, bay, tier, split = pos
+            if (0 <= row < self.yard.n_rows and 
+                0 <= bay < self.yard.n_bays and 
+                0 <= tier < self.yard.n_tiers and 
+                0 <= split < self.yard.split_factor):
+                return self.yard.get_container_at(row, bay, tier, split)
+            else:
+                # Remove invalid entry silently
+                self.logistics.yard_container_index.pop(container_id, None)
+                self.logistics.yard_container_set.discard(container_id)
         
         # Check trains
         for train in self.logistics.active_trains.values():
@@ -682,8 +748,18 @@ class ContainerTerminal(gym.Env):
         # Parking state  
         parking_state = self.logistics.get_parking_state_tensor(as_tensor=False).flatten()
         
-        # Queue information
-        queue_state = self.logistics.get_queue_state_tensor(as_tensor=False)
+        # Queue information - ensure we get 4 values
+        train_queue_size = self.logistics.trains.size()
+        truck_queue_size = self.logistics.trucks.size()
+        trains_in_terminal = len(self.logistics.active_trains)
+        trucks_in_terminal = len(self.logistics.active_trucks)
+        
+        queue_state = np.array([
+            train_queue_size,
+            truck_queue_size,
+            trains_in_terminal,
+            trucks_in_terminal
+        ], dtype=np.float32)
         
         # Time information
         time_state = np.array([
@@ -691,6 +767,16 @@ class ContainerTerminal(gym.Env):
             self.current_day / self.max_days,  # Normalized day in episode
             (self.time_per_day - self.current_time) / self.time_per_day  # Time remaining in day
         ], dtype=np.float32)
+        
+        # Debug print on first call
+        if not hasattr(self, '_state_dims_logged'):
+            print(f"State dimensions debug:")
+            print(f"  Yard state: {yard_state.cpu().numpy().shape}")
+            print(f"  Rail state: {rail_state.shape}")
+            print(f"  Parking state: {parking_state.shape}")
+            print(f"  Queue state: {queue_state.shape}")
+            print(f"  Time state: {time_state.shape}")
+            self._state_dims_logged = True
         
         # Concatenate all states
         state = np.concatenate([
