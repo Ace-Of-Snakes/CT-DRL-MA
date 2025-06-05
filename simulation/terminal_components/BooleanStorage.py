@@ -43,7 +43,7 @@ class BooleanStorageYard:
         # Create coordinate mapping for yard
         self.coordinates = self.create_coordinate_mapping()
 
-        print(self.dynamic_yard_mask.shape)
+        # print(self.dynamic_yard_mask.shape)
         # Creating masks for specific container types
         self.r_mask, self.dg_mask, self.sb_t_mask = self.extract_special_masks(coordinates)
 
