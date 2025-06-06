@@ -312,7 +312,7 @@ class BooleanLogistics:
             if optimal_pos is not None:
                 if self.add_truck_to_yard(truck, optimal_pos):
                     placed_count += 1
-                    print(f"Truck {truck.truck_id} placed at position {optimal_pos}")
+                    # print(f"Truck {truck.truck_id} placed at position {optimal_pos}")
                 else:
                     # Put truck back in queue
                     self.trucks.add_vehicle(truck)
