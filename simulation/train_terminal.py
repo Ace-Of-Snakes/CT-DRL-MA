@@ -221,6 +221,9 @@ class TerminalTrainer:
         daily_moves = 0
         daily_distances = []
         
+        # Track current day to detect day changes
+        last_day = self.env.current_day
+        
         # Time tracking
         start_time = time.time()
         day_start_time = time.time()
@@ -270,9 +273,10 @@ class TerminalTrainer:
                 'loss': f'{loss:.4f}' if loss is not None else 'N/A'
             })
                     
-            # Check for day end
+            # Check for day change by comparing with last known day
             current_day = next_info['day']
-            if current_day > self.env.current_day or (current_day == 0 and self.env.current_day > 0):
+            if current_day != last_day:
+                # Day changed!
                 # Calculate day statistics
                 day_duration = time.time() - day_start_time
                 steps_per_second = step_count / (time.time() - start_time) if step_count > 0 else 0
@@ -286,9 +290,9 @@ class TerminalTrainer:
                     'day_time': f'{day_duration:.1f}s'
                 })
                 
-                # Day ended - process daily metrics
+                # Process daily metrics
                 self.process_day_end(
-                    self.env.current_day,
+                    last_day,  # Use the day that just ended
                     daily_reward,
                     daily_moves,
                     daily_distances,
@@ -301,21 +305,24 @@ class TerminalTrainer:
                 daily_distances = []
                 day_start_time = time.time()
                 
-                # Agent day-end update with soft reset
-                self.agent.day_end_update(self.env.current_day, daily_reward)
+                # Agent day-end update
+                self.agent.day_end_update(last_day, daily_reward)
                 
                 # Save checkpoint
-                if self.env.current_day % self.save_interval == 0:
-                    self.save_checkpoint(self.env.current_day)
+                if last_day % self.save_interval == 0:
+                    self.save_checkpoint(last_day)
                     
                 # Update plots
-                if self.env.current_day % 5 == 0:  # Update every 5 days
+                if last_day % 5 == 0:  # Update every 5 days
                     self.update_plots()
                     
                 # Reset step progress bar for new day
                 step_pbar.close()
                 step_pbar = tqdm(desc=f"Day {current_day} Steps", unit="step", position=1, leave=False)
-                    
+                
+                # Update last day tracker
+                last_day = current_day
+                
             # Update state and info
             state = next_state
             info = next_info
@@ -353,7 +360,7 @@ class TerminalTrainer:
         print(f"Average time per day: {avg_time_per_day:.1f}s")
         print(f"Average steps per second: {total_steps_per_second:.1f}")
         print(f"Total steps: {step_count}")
-        
+            
     def process_day_end(
         self, 
         day: int, 
@@ -453,7 +460,7 @@ def main():
     """Main training script."""
     parser = argparse.ArgumentParser(description='Train Container Terminal Agent')
     parser.add_argument('--days', type=int, default=365, help='Number of days to train')
-    parser.add_argument('--rows', type=int, default=10, help='Number of yard rows')
+    parser.add_argument('--rows', type=int, default=15, help='Number of yard rows')
     parser.add_argument('--bays', type=int, default=20, help='Number of yard bays')
     parser.add_argument('--tiers', type=int, default=5, help='Number of yard tiers')
     parser.add_argument('--save-dir', type=str, default='checkpoints', help='Save directory')
