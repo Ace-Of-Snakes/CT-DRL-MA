@@ -31,9 +31,10 @@ class PrioritizedReplayBuffer:
         self.day_weights = {}  # Maps day -> weight multiplier
         
     def add(self, experience: Experience):
-        """Add experience with initial high priority."""
+        """Add experience with initial high priority (with overflow protection)."""
         # Use reward magnitude to influence initial priority
-        reward_influence = abs(experience.reward) + 1.0
+        # Clip reward to prevent overflow
+        reward_influence = min(abs(experience.reward), 100.0) + 1.0
         
         if self.priorities:
             max_priority = max(self.priorities)
@@ -41,7 +42,8 @@ class PrioritizedReplayBuffer:
             max_priority = 1.0
             
         # Higher priority for experiences with significant rewards
-        initial_priority = max_priority * reward_influence
+        # Ensure priority doesn't overflow
+        initial_priority = min(max_priority * reward_influence, 1e6)  # Cap at 1 million
         
         if len(self.buffer) < self.capacity:
             self.buffer.append(experience)
@@ -52,35 +54,41 @@ class PrioritizedReplayBuffer:
         self.position = (self.position + 1) % self.capacity
         
     def sample(self, batch_size, current_day=0):
-        """Sample a batch with prioritization and day-awareness."""
+        """Sample with enhanced priority for recent high-reward experiences."""
         if len(self.buffer) < batch_size:
             return None
-            
-        # Calculate priorities with overflow protection
+        
+        # Calculate priorities with stronger recency bias
         priorities = []
         for exp in self.buffer:
-            # Base priority from TD error (clipped to prevent overflow)
+            # Base priority from TD error
             td_priority = np.clip(abs(exp.td_error), 0.01, 100.0) ** self.alpha
             
-            # Day recency factor (also clipped)
+            # Stronger recency factor for current day
             days_old = max(0, current_day - exp.day)
-            recency_factor = np.exp(-days_old * 0.1)  # Exponential decay
+            if days_old == 0:  # Current day
+                recency_factor = 2.0
+            else:
+                recency_factor = np.exp(-days_old * 0.2)  # Faster decay
             
-            # Reward influence (clipped to prevent overflow)
-            reward_factor = 1.0 + np.clip(exp.reward, -10, 10) * 0.1
+            # Reward influence - prioritize high rewards
+            if exp.reward > 10.0:
+                reward_factor = 3.0
+            elif exp.reward > 5.0:
+                reward_factor = 2.0
+            elif exp.reward > 0:
+                reward_factor = 1.5
+            else:
+                reward_factor = 0.8
             
-            # Combined priority (with safety checks)
+            # Combined priority
             priority = td_priority * recency_factor * reward_factor
-            priority = np.clip(priority, 1e-8, 1e8)  # Prevent extreme values
+            priority = np.clip(priority, 1e-8, 1e8)
             priorities.append(priority)
         
-        # Convert to probabilities (with safety checks)
+        # Convert to probabilities
         priorities = np.array(priorities)
-        if np.any(np.isnan(priorities)) or np.all(priorities == 0):
-            # Fallback to uniform sampling
-            probabilities = np.ones(len(self.buffer)) / len(self.buffer)
-        else:
-            probabilities = priorities / (priorities.sum() + 1e-8)  # Add epsilon to prevent division by zero
+        probabilities = priorities / (priorities.sum() + 1e-8)
         
         # Sample indices
         indices = np.random.choice(len(self.buffer), batch_size, p=probabilities)
@@ -102,7 +110,7 @@ class PrioritizedReplayBuffer:
             dones.append(exp.done)
             infos.append(exp.info)
         
-        # Convert to numpy arrays
+        # Convert to arrays
         states = np.array(states)
         actions = np.array(actions)
         rewards = np.array(rewards)
@@ -250,16 +258,30 @@ class ContinuousTerminalAgent(nn.Module):
         state: np.ndarray, 
         available_actions: List[int],
         epsilon: Optional[float] = None,
-        training: bool = True
+        training: bool = True,
+        ranked_actions: List[int] = None  # NEW: Pre-ranked actions by urgency
     ) -> int:
-        """Select action using epsilon-greedy with action masking."""
+        """
+        Select action with preference for high-urgency moves.
+        No waiting when actions are available.
+        """
         if epsilon is None:
             epsilon = self.epsilon if training else 0.0
-            
-        # Exploration
+        
+        # CHANGED: No action = wait. Force selection from available actions
+        if not available_actions:
+            return 0  # Default action when truly no moves
+        
+        # Exploration with smart bias
         if training and random.random() < epsilon:
-            return random.choice(available_actions) if available_actions else 0
-            
+            if ranked_actions and random.random() < 0.7:  # 70% chance to explore high-priority moves
+                # Select from top 25% of ranked moves
+                top_k = max(1, len(ranked_actions) // 4)
+                return random.choice(ranked_actions[:top_k])
+            else:
+                # Random exploration
+                return random.choice(available_actions)
+        
         # Exploitation
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -273,12 +295,23 @@ class ContinuousTerminalAgent(nn.Module):
             q_values = self.forward(state_tensor, action_mask)
             
             # Select best available action
-            if available_actions:
-                valid_q_values = q_values[0, available_actions]
-                best_idx = valid_q_values.argmax().item()
-                return available_actions[best_idx]
-            else:
-                return 0
+            valid_q_values = q_values[0, available_actions]
+            best_idx = valid_q_values.argmax().item()
+            
+            # NEW: Apply small bonus to high-urgency moves during learning
+            if training and ranked_actions:
+                # Create urgency bonus based on ranking
+                urgency_bonus = torch.zeros_like(valid_q_values)
+                for i, action in enumerate(available_actions):
+                    if action in ranked_actions[:5]:  # Top 5 urgent moves
+                        rank = ranked_actions.index(action)
+                        urgency_bonus[i] = (5 - rank) * 0.1  # Small bonus
+                
+                # Add bonus and reselect
+                adjusted_q_values = valid_q_values + urgency_bonus
+                best_idx = adjusted_q_values.argmax().item()
+            
+            return available_actions[best_idx]
     
     def store_experience(
         self,
@@ -289,20 +322,22 @@ class ContinuousTerminalAgent(nn.Module):
         done: bool,
         info: Dict[str, Any]
     ):
-        """Store experience with initial TD error estimate."""
+        """Store experience with enhanced priority for high-reward moves."""
         # Calculate initial TD error for prioritization
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(self.device)
             
             # Current Q-value
+            # print(action)
+            if type(action) == str:
+                action = int(str(action).replace('move_', ''))
             current_q = self.forward(state_tensor)[0, action].item()
             
             # Next state value (double DQN)
             move_list = info.get('move_list', [])
             if move_list and not done:
-                # Convert move list to integer indices
-                next_actions = list(range(len(move_list)))  # <-- FIX: Convert to indices
+                next_actions = list(range(len(move_list)))
                 
                 # Create mask for next state
                 next_mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
@@ -318,11 +353,18 @@ class ContinuousTerminalAgent(nn.Module):
                 next_value = target_q_values[0, next_action].item()
             else:
                 next_value = 0.0
-                
+            
             # TD error
             td_error = reward + self.gamma * next_value * (1 - done) - current_q
-            
-        # Create experience
+        
+        # NEW: Boost priority for high-reward experiences
+        priority_boost = 1.0
+        if reward > 10.0:  # High-value move
+            priority_boost = 2.0
+        elif reward > 5.0:  # Good move
+            priority_boost = 1.5
+        
+        # Create experience with boosted TD error
         experience = Experience(
             state=state,
             action=action,
@@ -330,7 +372,7 @@ class ContinuousTerminalAgent(nn.Module):
             next_state=next_state,
             done=done,
             info=info,
-            td_error=td_error,
+            td_error=td_error * priority_boost,
             day=info.get('day', 0)
         )
         
@@ -422,23 +464,32 @@ class ContinuousTerminalAgent(nn.Module):
             target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
             
     def day_end_update(self, day: int, daily_reward: float):
-        """Special update at end of day with soft reset."""
+        """Enhanced day-end update with performance-based exploration adjustment."""
         self.current_day = day
         
         # Soft reset in replay buffer
         self.replay_buffer.soft_reset(day)
         
-        # Adaptive exploration based on daily performance
-        if daily_reward > 0:
-            # Good day - reduce exploration faster
-            self.epsilon *= 0.98
-        else:
-            # Bad day - maintain exploration
-            self.epsilon = min(self.epsilon * 1.02, 0.3)
-            
-        # Extra training at day end
-        for _ in range(10):
-            self.update()
+        # NEW: More aggressive exploration adjustment
+        if daily_reward > 100:  # Excellent day
+            # Reduce exploration significantly
+            self.epsilon *= 0.95
+        elif daily_reward > 50:  # Good day
+            # Reduce exploration moderately
+            self.epsilon *= 0.97
+        elif daily_reward > 0:  # Positive day
+            # Small reduction
+            self.epsilon *= 0.99
+        else:  # Bad day
+            # Increase exploration to find better strategies
+            self.epsilon = min(self.epsilon * 1.05, 0.4)
+        
+        # Ensure minimum exploration
+        self.epsilon = max(self.epsilon, self.epsilon_min)
+        
+        # Extra training at day end with focus on recent experiences
+        for _ in range(20):  # More training iterations
+            self.update(current_day=day)
             
     def save(self, filepath: str):
         """Save agent state."""
