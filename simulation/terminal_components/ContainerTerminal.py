@@ -7,7 +7,7 @@ from gymnasium import spaces
 from datetime import datetime, timedelta
 import random
 import os
-
+from simulation.terminal_components.TemporalState import TemporalStateEnhancement, ProgressBasedRewardCalculator, MoveEvaluator
 from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
 from simulation.terminal_components.BooleanLogistics import BooleanLogistics
@@ -64,7 +64,22 @@ class ContainerTerminal(gym.Env):
         self.max_distance = self._calculate_max_distance()
         self.distance_reward_scale = 5.0 / self.max_distance  # Maps to [0, -5]
         
-        # Action and observation spaces
+        # MOVED: Add temporal awareness components BEFORE _init_spaces()
+        self.temporal_encoder = TemporalStateEnhancement(self.time_per_day)
+        self.reward_calculator = ProgressBasedRewardCalculator(distance_weight=0.1)
+        
+        # Additional tracking for daily operations
+        self.daily_goals = {
+            'train_departures': [],  # List of (train_id, departure_time)
+            'truck_pickups': [],     # List of (truck_id, container_ids)
+            'container_movements': defaultdict(list)  # container_id -> required moves
+        }
+        
+        # Move ranking cache
+        self.ranked_moves_cache = None
+        self.cache_timestamp = -1
+        
+        # Action and observation spaces (NOW temporal_encoder exists)
         self._init_spaces()
         
         # Load KDE models for generation
@@ -78,7 +93,7 @@ class ContainerTerminal(gym.Env):
         self.trains_per_day_range = (3, 8)
         self.trucks_per_day_range = (20, 40)
         self.containers_per_train_range = (15, 30)
-        
+
     def _init_terminal_components(self):
         """Initialize yard, logistics, and RMGC components."""
         # Define special storage areas
@@ -157,23 +172,27 @@ class ContainerTerminal(gym.Env):
         return kde_models
     
     def _init_spaces(self):
-        """Initialize action and observation spaces."""
-        # State includes: yard state, rail state, parking state, queues, time info
+        """Initialize action and observation spaces with temporal features."""
+        # Original state dimensions
         yard_state_dim = 5 * self.n_rows * self.n_bays * self.n_tiers * self.split_factor
         rail_state_dim = self.n_rows * self.split_factor * self.n_railtracks
         parking_state_dim = self.n_rows * self.split_factor
-        queue_dim = 4  # train queue, truck queue, trains in terminal, trucks in terminal
-        time_dim = 3  # current time, day, time remaining in day
+        queue_dim = 4
+        time_dim = 3
         
-        total_state_dim = yard_state_dim + rail_state_dim + parking_state_dim + queue_dim + time_dim
+        # Add temporal features
+        temporal_dim = self.temporal_encoder.feature_dim
         
-        # Debug print
+        total_state_dim = (yard_state_dim + rail_state_dim + parking_state_dim + 
+                        queue_dim + time_dim + temporal_dim)
+        
         print(f"State dimension breakdown:")
-        print(f"  Yard: {yard_state_dim} (5×{self.n_rows}×{self.n_bays}×{self.n_tiers}×{self.split_factor})")
-        print(f"  Rail: {rail_state_dim} ({self.n_rows}×{self.split_factor}×{self.n_railtracks})")
-        print(f"  Parking: {parking_state_dim} ({self.n_rows}×{self.split_factor})")
+        print(f"  Yard: {yard_state_dim}")
+        print(f"  Rail: {rail_state_dim}")
+        print(f"  Parking: {parking_state_dim}")
         print(f"  Queue: {queue_dim}")
         print(f"  Time: {time_dim}")
+        print(f"  Temporal: {temporal_dim} (NEW)")
         print(f"  Total: {total_state_dim}")
         
         self.observation_space = spaces.Box(
@@ -183,8 +202,8 @@ class ContainerTerminal(gym.Env):
             dtype=np.float32
         )
         
-        # Action space: select from available moves (masked)
-        max_moves = 1000  # Maximum possible moves
+        # Action space remains the same
+        max_moves = 1000
         self.action_space = spaces.Discrete(max_moves)
         
     def _calculate_max_distance(self) -> float:
@@ -557,27 +576,55 @@ class ContainerTerminal(gym.Env):
                             self.yard._update_property_arrays(row, bay, tier, split, container)
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Execute action and return new state, reward, done flags, and info."""
-        # Get available moves
+        """Execute action with forced move selection when available."""
+        # Get available moves and rank them
         moves = self.logistics.find_moves_optimized()
         eligible_moves = self.rmgc.mask_moves(moves)
         
-        if not eligible_moves or action >= len(eligible_moves):
-            # No valid action - wait
-            self._advance_time(60.0)  # Wait 1 minute
-            reward = -0.1  # Small penalty for waiting
-            
+        # NEW: Rank moves by urgency if cache is stale
+        if eligible_moves and self.current_time != self.cache_timestamp:
+            self.ranked_moves_cache = self._rank_moves_by_urgency(eligible_moves)
+            self.cache_timestamp = self.current_time
+        
+        # CHANGED: No waiting when moves are available
+        if not eligible_moves:
+            # No moves available - short wait
+            self._advance_time(30.0)  # 30 seconds
+            reward = 0.0  # Neutral reward for forced wait
         else:
-            # Execute selected move
-            move_list = list(eligible_moves.items())
+            # Must select from available moves
+            move_list = self.ranked_moves_cache or list(eligible_moves.items())
+            
+            # If action is str, reformat
+            if type(action) == str:
+                action = int(str(action).replace('move_', ''))
+                # print(action)
+            # Ensure action is within bounds
+            if action >= len(move_list):
+                action = action % len(move_list)
+            
             move_id, move = move_list[action]
             
-            # Execute move and get distance/time
+            # Execute move
             distance, time = self.rmgc.execute_move(move)
             
             if time > 0:
-                # Calculate reward
-                reward = self._calculate_reward(move, distance, time)
+                # NEW: Calculate progress-based reward
+                current_datetime = datetime(2025, 1, 1) + timedelta(
+                    days=self.current_day,
+                    seconds=self.current_time
+                )
+                
+                reward = self.reward_calculator.calculate_reward(
+                    move=move,
+                    distance=distance,
+                    time=time,
+                    current_datetime=current_datetime,
+                    trains=self.logistics.active_trains,
+                    trucks=self.logistics.active_trucks,
+                    container_pickup_schedules=self.container_pickup_schedules,
+                    logistics=self.logistics
+                )
                 
                 # Schedule crane unlock
                 head_id = self._get_crane_head_for_move(move)
@@ -585,36 +632,36 @@ class ContainerTerminal(gym.Env):
                     self.crane_completion_times[head_id] = self.current_time + time
                 
                 # Advance time
-                self._advance_time(time)  # Just update crane states
+                self._advance_time(time)
                 
                 # Track metrics
                 self.daily_metrics['moves'].append(move_id)
                 self.daily_metrics['distances'].append(distance)
                 self.daily_metrics['times'].append(time)
                 self.daily_metrics['rewards'].append(reward)
-                
             else:
-                # Failed move
-                reward = -1.0
+                # Failed move - small negative reward
+                reward = -0.5
         
         # Check and process completed cranes
         self._update_crane_states()
         
-        # Reorganize logistics (check departures, process new arrivals)
+        # Reorganize logistics
         departed = self.logistics.reorganize_logistics()
         trains_early, trains_late, trucks = departed
         
-        # Apply departure penalties/rewards
+        # Bonus/penalty for departures
+        if trains_early > 0:
+            reward += trains_early * 5.0  # Bonus for on-time departure
         if trains_late > 0:
             reward -= trains_late * 10.0  # Penalty for late trains
-            self.daily_metrics['late_trains'].append(trains_late)
         
         # Check if day ended
         day_ended = self.current_time >= self.time_per_day
         
         if day_ended:
             self._end_of_day()
-            
+        
         # Check episode termination
         terminated = self.current_day >= self.max_days
         truncated = False
@@ -623,57 +670,94 @@ class ContainerTerminal(gym.Env):
         state = self._get_state()
         info = self._get_info()
         
+        # Add ranked moves to info for action masking
+        if eligible_moves:
+            info['ranked_move_list'] = [m[0] for m in (self.ranked_moves_cache or [])]
+        
         return state, reward, terminated, truncated, info
     
-    def _calculate_reward(self, move: Dict, distance: float, time: float) -> float:
-        """Calculate reward for a move."""
-        reward = 0.0
+    def _rank_moves_by_urgency(self, moves: Dict[str, Dict]) -> List[Tuple[str, Dict]]:
+        """
+        Rank moves by urgency and value, with distance as tiebreaker.
+        Returns list of (move_id, move) tuples sorted by priority.
+        """
+        current_datetime = datetime(2025, 1, 1) + timedelta(
+            days=self.current_day,
+            seconds=self.current_time
+        )
         
-        # Base reward by move type
-        move_type = move.get('move_type', f"{move['source_type']}_to_{move['dest_type']}")
+        move_scores = []
         
-        if move_type == 'train_to_truck' or move_type == 'truck_to_train':
-            reward = 10.0  # High reward for vehicle transfers
-        elif move_type == 'from_yard':
-            reward = 5.0  # Good reward for retrievals
-        elif move_type == 'to_yard':
-            reward = 3.0  # Moderate reward for storage
-        elif move_type == 'yard_to_yard':
-            # Yard reshuffling - small positive reward instead of penalty
-            # This encourages action over inaction during quiet periods
-            reward = 0.5
+        for move_id, move in moves.items():
+            # Evaluate move urgency and value
+            urgency, value = self.reward_calculator.move_evaluator.evaluate_move_urgency(
+                move=move,
+                current_datetime=current_datetime,
+                trains=self.logistics.active_trains,
+                trucks=self.logistics.active_trucks,
+                container_pickup_schedules=self.container_pickup_schedules,
+                logistics=self.logistics
+            )
             
-            # Bonus if move improves yard organization
-            # (e.g., moving containers to be closer to their pickup vehicles)
-            container_id = move.get('container_id')
-            if container_id and container_id in self.container_pickup_schedules:
-                # Container has scheduled pickup - good to reposition
-                reward += 1.0
-        
-        # Distance penalty (scaled to [0, -5])
-        distance_penalty = -distance * self.distance_reward_scale
-        reward += distance_penalty
-        
-        # Time efficiency bonus (faster is better)
-        if time < 120:  # Less than 2 minutes
-            reward += 0.5
-        
-        # Priority bonus for high-priority containers
-        container_id = move.get('container_id')
-        if container_id:
+            # Get estimated distance for tiebreaking
             try:
-                container = self._find_container(container_id)
-                if container and hasattr(container, 'priority'):
-                    if container.priority < 50:  # High priority
-                        reward += 2.0
-            except Exception:
-                pass
+                source_str = self.rmgc._position_to_string(move['source_pos'])
+                dest_str = self.rmgc._position_to_string(move['dest_pos'])
+                
+                idx1 = self.rmgc.position_to_idx.get(source_str)
+                idx2 = self.rmgc.position_to_idx.get(dest_str)
+                
+                if idx1 is not None and idx2 is not None:
+                    distance = self.rmgc.distance_matrix[idx1, idx2]
+                else:
+                    distance = 50.0  # Default distance
+            except:
+                distance = 50.0
+            
+            # Composite score: urgency * value - small distance factor
+            score = (urgency + 1.0) * value - (distance * 0.01)
+            
+            move_scores.append((score, distance, move_id, move))
         
-        # Early training bonus - encourage ANY action over waiting
-        if self.current_day < 10:  # First 10 days
-            reward += 0.5  # Bonus for taking any action
+        # Sort by score (descending), then by distance (ascending) for tiebreaking
+        move_scores.sort(key=lambda x: (-x[0], x[1]))
         
-        return reward
+        # Return as list of (move_id, move) tuples
+        return [(item[2], item[3]) for item in move_scores]
+
+    def _update_daily_goals(self):
+        """Update daily goals based on current vehicles and schedules."""
+        self.daily_goals['train_departures'].clear()
+        self.daily_goals['truck_pickups'].clear()
+        self.daily_goals['container_movements'].clear()
+        
+        # Record train departures
+        for railtrack_id, train in self.logistics.active_trains.items():
+            if hasattr(train, 'departure_time') and train.departure_time:
+                self.daily_goals['train_departures'].append(
+                    (train.train_id, train.departure_time)
+                )
+        
+        # Record truck pickup requirements
+        for truck_pos, truck in self.logistics.active_trucks.items():
+            if hasattr(truck, 'pickup_container_ids') and truck.pickup_container_ids:
+                self.daily_goals['truck_pickups'].append(
+                    (truck.truck_id, list(truck.pickup_container_ids))
+                )
+        
+        # Track container movements needed
+        for container_id, pickup_time in self.container_pickup_schedules.items():
+            current_date = datetime(2025, 1, 1) + timedelta(days=self.current_day)
+            if current_date <= pickup_time < current_date + timedelta(days=1):
+                self.daily_goals['container_movements'][container_id].append({
+                    'type': 'pickup',
+                    'deadline': pickup_time
+                })
+
+    # Override the old _calculate_reward method
+    def _calculate_reward(self, move: Dict, distance: float, time: float) -> float:
+        """This method is replaced by the ProgressBasedRewardCalculator."""
+        raise NotImplementedError("Use reward_calculator.calculate_reward() instead")
     
     def _advance_time(self, seconds: float):
         """Advance simulation time."""
@@ -766,45 +850,38 @@ class ContainerTerminal(gym.Env):
             self._generate_daily_traffic()
     
     def _get_state(self) -> np.ndarray:
-        """Get current environment state as flattened tensor."""
-        # Yard state (5 channels: occupied, container_type, goods_type, weight, priority)
+        """Get current environment state with temporal awareness."""
+        # Original state components
         yard_state = self.yard.get_full_state_tensor(flatten=True)
-        
-        # Rail state
         rail_state = self.logistics.get_rail_state_tensor(as_tensor=False).flatten()
-        
-        # Parking state  
         parking_state = self.logistics.get_parking_state_tensor(as_tensor=False).flatten()
         
-        # Queue information - ensure we get 4 values
-        train_queue_size = self.logistics.trains.size()
-        truck_queue_size = self.logistics.trucks.size()
-        trains_in_terminal = len(self.logistics.active_trains)
-        trucks_in_terminal = len(self.logistics.active_trucks)
-        
+        # Queue information
         queue_state = np.array([
-            train_queue_size,
-            truck_queue_size,
-            trains_in_terminal,
-            trucks_in_terminal
+            self.logistics.trains.size(),
+            self.logistics.trucks.size(),
+            len(self.logistics.active_trains),
+            len(self.logistics.active_trucks)
         ], dtype=np.float32)
         
         # Time information
         time_state = np.array([
-            self.current_time / self.time_per_day,  # Normalized time in day
-            self.current_day / self.max_days,  # Normalized day in episode
-            (self.time_per_day - self.current_time) / self.time_per_day  # Time remaining in day
+            self.current_time / self.time_per_day,
+            self.current_day / self.max_days,
+            (self.time_per_day - self.current_time) / self.time_per_day
         ], dtype=np.float32)
         
-        # Debug print on first call
-        if not hasattr(self, '_state_dims_logged'):
-            print(f"State dimensions debug:")
-            print(f"  Yard state: {yard_state.cpu().numpy().shape}")
-            print(f"  Rail state: {rail_state.shape}")
-            print(f"  Parking state: {parking_state.shape}")
-            print(f"  Queue state: {queue_state.shape}")
-            print(f"  Time state: {time_state.shape}")
-            self._state_dims_logged = True
+        # NEW: Temporal schedule features
+        temporal_features = self.temporal_encoder.encode_daily_schedule(
+            current_time=self.current_time,
+            current_day=self.current_day,
+            trains=self.logistics.active_trains,
+            trucks=self.logistics.active_trucks,
+            train_queue=self.logistics.trains,
+            truck_queue=self.logistics.trucks,
+            container_pickup_schedules=self.container_pickup_schedules,
+            container_arrival_times=self.container_arrival_times
+        )
         
         # Concatenate all states
         state = np.concatenate([
@@ -812,7 +889,8 @@ class ContainerTerminal(gym.Env):
             rail_state,
             parking_state,
             queue_state,
-            time_state
+            time_state,
+            temporal_features  # NEW
         ])
         
         return state.astype(np.float32)

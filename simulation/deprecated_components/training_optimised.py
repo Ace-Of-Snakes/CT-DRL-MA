@@ -20,7 +20,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import our modules
-from simulation.agents.dual_head_q import OptimizedTerminalAgent
+from simulation.deprecated_components.dual_head_q import OptimizedTerminalAgent
 from simulation.deprecated_components.terminal_env_optimized import OptimizedTerminalEnvironment  # Updated import
 from simulation import TerminalConfig
 
