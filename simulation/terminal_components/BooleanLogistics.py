@@ -259,12 +259,7 @@ class BooleanLogistics:
         return truck
 
     def process_current_trains(self) -> int:
-        """
-        Process trains in queue and try to assign them rail slots.
-        
-        Returns:
-            int: Number of trains successfully placed
-        """
+        """Process trains in queue and try to assign them rail slots."""
         placed_count = 0
         
         while not self.trains.is_empty():
@@ -275,6 +270,10 @@ class BooleanLogistics:
             # Calculate required length
             required_length = self.train_head_length + len(train.wagons) * self.wagon_length
             
+            # Debug output
+            if self.validate:
+                print(f"Trying to place train {train.train_id}: {len(train.wagons)} wagons, needs {required_length} positions")
+            
             # Try to find an available railtrack
             placed = False
             for railtrack_id in range(self.n_railtracks):
@@ -282,12 +281,15 @@ class BooleanLogistics:
                     if self.add_train_to_yard(train, railtrack_id):
                         placed_count += 1
                         placed = True
-                        print(f"Train {train.train_id} placed on railtrack {railtrack_id}")
+                        if self.validate:
+                            print(f"  ✓ Placed on railtrack {railtrack_id}")
                         break
             
             if not placed:
                 # Put train back in queue for later
                 self.trains.add_vehicle(train)
+                if self.validate:
+                    print(f"  ✗ Could not place train, returning to queue")
                 break  # Stop processing if we can't place this train
         
         return placed_count
@@ -699,163 +701,46 @@ class BooleanLogistics:
                 }
                 move_counter += 1
         
+        # 5. YARD -> YARD MOVES (RESHUFFLING)
+        # This is CRITICAL for training - allows moves even without vehicle requests!
+        yard_moves = self.yard.return_possible_yard_moves(max_proximity=3)
+        
+        if self.validate:
+            print(f"  Yard reshuffling candidates: {len(yard_moves)}")
+        
+        # Convert yard moves to standard move format
+        for container_id, move_data in yard_moves.items():
+            source_coords = move_data['source_coords']
+            destinations = move_data['destinations']
+            
+            # Add up to 3 reshuffling options per container
+            for dest in destinations[:3]:
+                # Skip if destination is same as source
+                if dest == source_coords[0][:3]:  # Compare (row, bay, tier)
+                    continue
+                    
+                move_id = f"move_{move_counter}"
+                all_moves[move_id] = {
+                    'container_id': container_id,
+                    'source_type': 'yard',
+                    'source_pos': source_coords,  # List of coordinates
+                    'dest_type': 'yard',
+                    'dest_pos': dest,  # (row, bay, tier, start_split)
+                    'move_type': 'yard_to_yard',
+                    'priority': 5.0  # Lower priority than vehicle moves
+                }
+                move_counter += 1
+        
         if self.validate:
             print(f"  Total moves found: {len(all_moves)}")
+            move_types = {}
+            for move in all_moves.values():
+                move_type = move['move_type']
+                move_types[move_type] = move_types.get(move_type, 0) + 1
+            print(f"  Move breakdown: {move_types}")
         
         # Mark cache as clean after successful move finding
         self.yard_cache_dirty = False
-        
-        return all_moves
-        """
-        Find all possible moves: train->truck, truck->train, and yard insertions.
-        
-        Returns:
-            Dict mapping move_id -> move_details
-        """
-        all_moves = {}
-        move_counter = 0
-        
-        if self.validate:
-            print(f"DEBUG: Finding moves...")
-            print(f"  Active trains: {len(self.active_trains)}")
-            print(f"  Active trucks: {len(self.active_trucks)}")
-            print(f"  Pickup to train: {len(self.pickup_to_train)}")
-            print(f"  Pickup to truck: {len(self.pickup_to_truck)}")
-        
-        # 1. Train -> Truck moves (containers from trains to waiting trucks)
-        for railtrack_id, train in self.active_trains.items():
-            for wagon_idx, wagon in enumerate(train.wagons):
-                if self.validate:
-                    print(f"  Train {train.train_id} wagon {wagon_idx}: {len(wagon.containers)} containers")
-                for container in wagon.containers:
-                    container_id = container.container_id
-                    
-                    # Check if any truck is waiting for this container
-                    if container_id in self.pickup_to_truck:
-                        truck_pos = self.pickup_to_truck[container_id]
-                        move_id = f"move_{move_counter}"
-                        all_moves[move_id] = {
-                            'container_id': container_id,
-                            'source_type': 'train',
-                            'source_pos': (railtrack_id, wagon_idx),
-                            'dest_type': 'truck',
-                            'dest_pos': truck_pos,
-                            'move_type': 'train_to_truck',
-                            'priority': 10.0
-                        }
-                        move_counter += 1
-
-        # 2. Truck -> Train moves (containers from trucks to waiting trains)
-        for truck_pos, truck in self.active_trucks.items():
-            if self.validate:
-                print(f"  Truck {truck.truck_id}: {len(truck.containers)} containers")
-            for container in truck.containers:
-                container_id = container.container_id
-                
-                # Check if any train is waiting for this container
-                if container_id in self.pickup_to_train:
-                    railtrack_id, wagon_idx = self.pickup_to_train[container_id]
-                    move_id = f"move_{move_counter}"
-                    all_moves[move_id] = {
-                        'container_id': container_id,
-                        'source_type': 'truck',
-                        'source_pos': truck_pos,
-                        'dest_type': 'train', 
-                        'dest_pos': (railtrack_id, wagon_idx),
-                        'move_type': 'truck_to_train',
-                        'priority': 10.0
-                    }
-                    move_counter += 1
-
-        # 3. Yard retrieval moves (containers that need to be picked up from yard)
-        pickup_requests = set()
-        pickup_requests.update(self.pickup_to_train.keys())
-        pickup_requests.update(self.pickup_to_truck.keys())
-        
-        if self.validate:
-            print(f"  Pickup requests: {pickup_requests}")
-        
-        for container_id in pickup_requests:
-            # Find container in yard
-            container_pos = self._find_container_in_yard(container_id)
-            if self.validate:
-                print(f"  Container {container_id} in yard: {container_pos is not None}")
-            
-            if container_pos is not None:
-                # Check which vehicle wants it
-                if container_id in self.pickup_to_train:
-                    railtrack_id, wagon_idx = self.pickup_to_train[container_id]
-                    move_id = f"move_{move_counter}"
-                    all_moves[move_id] = {
-                        'container_id': container_id,
-                        'source_type': 'yard',
-                        'source_pos': container_pos,
-                        'dest_type': 'train',
-                        'dest_pos': (railtrack_id, wagon_idx),
-                        'move_type': 'from_yard',
-                        'priority': 9.0
-                    }
-                    move_counter += 1
-                
-                if container_id in self.pickup_to_truck:
-                    truck_pos = self.pickup_to_truck[container_id]
-                    move_id = f"move_{move_counter}"
-                    all_moves[move_id] = {
-                        'container_id': container_id,
-                        'source_type': 'yard',
-                        'source_pos': container_pos,
-                        'dest_type': 'truck',
-                        'dest_pos': truck_pos,
-                        'move_type': 'from_yard',
-                        'priority': 9.0
-                    }
-                    move_counter += 1
-
-        # 4. Yard insertion moves (containers that need to be stored)
-        # For containers on trains/trucks that need to go to yard
-        all_containers_needing_storage = []
-        
-        # From trains
-        for railtrack_id, train in self.active_trains.items():
-            for wagon_idx, wagon in enumerate(train.wagons):
-                for container in wagon.containers:
-                    if hasattr(container, 'direction') and container.direction == 'Import':  # Needs to go to yard
-                        all_containers_needing_storage.append({
-                            'container': container,
-                            'source_type': 'train',
-                            'source_pos': (railtrack_id, wagon_idx)
-                        })
-        
-        # From trucks
-        for truck_pos, truck in self.active_trucks.items():
-            for container in truck.containers:
-                if hasattr(container, 'direction') and container.direction == 'Import':  # Needs to go to yard
-                    all_containers_needing_storage.append({
-                        'container': container,
-                        'source_type': 'truck',
-                        'source_pos': truck_pos
-                    })
-        
-        # Find yard positions for each container
-        for container_info in all_containers_needing_storage:
-            container = container_info['container']
-            yard_positions = self._find_yard_positions_for_container(container)
-            
-            for position in yard_positions[:3]:  # Limit to top 3 options
-                move_id = f"move_{move_counter}"
-                all_moves[move_id] = {
-                    'container_id': container.container_id,
-                    'source_type': container_info['source_type'],
-                    'source_pos': container_info['source_pos'],
-                    'dest_type': 'yard',
-                    'dest_pos': position,
-                    'move_type': 'to_yard',
-                    'priority': 8.0
-                }
-                move_counter += 1
-
-        if self.validate:
-            print(f"  Total moves found: {len(all_moves)}")
 
         return all_moves
 

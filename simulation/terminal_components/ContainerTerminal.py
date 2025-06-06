@@ -27,7 +27,7 @@ class ContainerTerminal(gym.Env):
     
     def __init__(
         self,
-        n_rows: int = 10,
+        n_rows: int = 15,
         n_bays: int = 20,
         n_tiers: int = 5,
         n_railtracks: int = 4,
@@ -75,9 +75,9 @@ class ContainerTerminal(gym.Env):
         self.container_pickup_schedules = {}
         
         # Daily generation parameters
-        self.trains_per_day_range = (5, 15)
+        self.trains_per_day_range = (3, 8)
         self.trucks_per_day_range = (20, 40)
-        self.containers_per_train_range = (20, 40)
+        self.containers_per_train_range = (15, 30)
         
     def _init_terminal_components(self):
         """Initialize yard, logistics, and RMGC components."""
@@ -256,6 +256,23 @@ class ContainerTerminal(gym.Env):
         # Generate train arrivals
         n_trains = random.randint(*self.trains_per_day_range)
         
+        # On first day, pre-populate yard with some containers
+        if self.current_day == 0:
+            print("Initializing yard with containers...")
+            n_initial_containers = 50  # Start with some containers in yard
+            
+            for i in range(n_initial_containers):
+                container = self._create_container_with_weight(f"INIT_{i:04d}")
+                container.direction = "Export"  # Available for pickup
+                container.arrival_date = base_date - timedelta(days=random.randint(1, 5))
+                
+                # Place in yard
+                self._place_container_in_yard(container)
+                
+                # Schedule pickup in next few days
+                pickup_time = self._sample_pickup_time(base_date)
+                self.container_pickup_schedules[container.container_id] = pickup_time
+
         # Sample train arrival times using KDE
         if self.kde_models.get('train_arrival'):
             # Sample arrival hours
@@ -292,7 +309,7 @@ class ContainerTerminal(gym.Env):
         # Process trains in arrival order
         for train_id, planned_arrival, realized_arrival in train_arrivals:
             # Create train
-            n_wagons = random.randint(5, 10)
+            n_wagons = random.randint(2, 5)
             train = Train(train_id, num_wagons=n_wagons, arrival_time=realized_arrival)
             
             # Generate containers for train
@@ -568,7 +585,7 @@ class ContainerTerminal(gym.Env):
                     self.crane_completion_times[head_id] = self.current_time + time
                 
                 # Advance time
-                self._advance_time(0.0)  # Just update crane states
+                self._advance_time(time)  # Just update crane states
                 
                 # Track metrics
                 self.daily_metrics['moves'].append(move_id)
@@ -613,16 +630,25 @@ class ContainerTerminal(gym.Env):
         reward = 0.0
         
         # Base reward by move type
-        move_type = f"{move['source_type']}_to_{move['dest_type']}"
+        move_type = move.get('move_type', f"{move['source_type']}_to_{move['dest_type']}")
         
-        if move_type in ['train_to_truck', 'truck_to_train']:
+        if move_type == 'train_to_truck' or move_type == 'truck_to_train':
             reward = 10.0  # High reward for vehicle transfers
         elif move_type == 'from_yard':
             reward = 5.0  # Good reward for retrievals
         elif move_type == 'to_yard':
             reward = 3.0  # Moderate reward for storage
-        elif move['source_type'] == 'yard' and move['dest_type'] == 'yard':
-            reward = -1.0  # Small penalty for reshuffling
+        elif move_type == 'yard_to_yard':
+            # Yard reshuffling - small positive reward instead of penalty
+            # This encourages action over inaction during quiet periods
+            reward = 0.5
+            
+            # Bonus if move improves yard organization
+            # (e.g., moving containers to be closer to their pickup vehicles)
+            container_id = move.get('container_id')
+            if container_id and container_id in self.container_pickup_schedules:
+                # Container has scheduled pickup - good to reposition
+                reward += 1.0
         
         # Distance penalty (scaled to [0, -5])
         distance_penalty = -distance * self.distance_reward_scale
@@ -636,14 +662,16 @@ class ContainerTerminal(gym.Env):
         container_id = move.get('container_id')
         if container_id:
             try:
-                # Check if container has high priority
                 container = self._find_container(container_id)
                 if container and hasattr(container, 'priority'):
                     if container.priority < 50:  # High priority
                         reward += 2.0
-            except Exception as e:
-                # Handle any errors in container lookup
-                print(f"Warning: Error finding container {container_id}: {e}")
+            except Exception:
+                pass
+        
+        # Early training bonus - encourage ANY action over waiting
+        if self.current_day < 10:  # First 10 days
+            reward += 0.5  # Bonus for taking any action
         
         return reward
     
