@@ -51,41 +51,65 @@ class PrioritizedReplayBuffer:
         self.priorities.append(initial_priority)
         self.position = (self.position + 1) % self.capacity
         
-    def sample(self, batch_size: int, current_day: int) -> Tuple[List[Experience], np.ndarray, np.ndarray]:
-        """Sample batch with prioritization and day-based weighting."""
+    def sample(self, batch_size, current_day=0):
+        """Sample a batch with prioritization and day-awareness."""
         if len(self.buffer) < batch_size:
-            return None, None, None
+            return None
             
-        # Update beta
-        self.beta = min(1.0, self.beta + self.beta_increment)
+        # Calculate priorities with overflow protection
+        priorities = []
+        for exp in self.buffer:
+            # Base priority from TD error (clipped to prevent overflow)
+            td_priority = np.clip(abs(exp.td_error), 0.01, 100.0) ** self.alpha
+            
+            # Day recency factor (also clipped)
+            days_old = max(0, current_day - exp.day)
+            recency_factor = np.exp(-days_old * 0.1)  # Exponential decay
+            
+            # Reward influence (clipped to prevent overflow)
+            reward_factor = 1.0 + np.clip(exp.reward, -10, 10) * 0.1
+            
+            # Combined priority (with safety checks)
+            priority = td_priority * recency_factor * reward_factor
+            priority = np.clip(priority, 1e-8, 1e8)  # Prevent extreme values
+            priorities.append(priority)
         
-        # Calculate sampling probabilities
-        priorities = np.array(self.priorities)
-        probabilities = priorities ** self.alpha
-        probabilities /= probabilities.sum()
+        # Convert to probabilities (with safety checks)
+        priorities = np.array(priorities)
+        if np.any(np.isnan(priorities)) or np.all(priorities == 0):
+            # Fallback to uniform sampling
+            probabilities = np.ones(len(self.buffer)) / len(self.buffer)
+        else:
+            probabilities = priorities / (priorities.sum() + 1e-8)  # Add epsilon to prevent division by zero
         
         # Sample indices
         indices = np.random.choice(len(self.buffer), batch_size, p=probabilities)
         
-        # Calculate importance sampling weights
-        total = len(self.buffer)
-        weights = (total * probabilities[indices]) ** (-self.beta)
-        weights /= weights.max()
+        # Extract batch data
+        states = []
+        actions = []
+        rewards = []
+        next_states = []
+        dones = []
+        infos = []
         
-        # Apply day-based soft reset weights
-        experiences = []
         for idx in indices:
             exp = self.buffer[idx]
-            experiences.append(exp)
-            
-            # Reduce weight for older experiences (soft reset)
-            day_diff = current_day - exp.day
-            if day_diff > 0:
-                # Exponential decay: experiences lose 10% importance per day
-                day_weight = 0.9 ** day_diff
-                weights[len(experiences)-1] *= day_weight
+            states.append(exp.state)
+            actions.append(exp.action)
+            rewards.append(exp.reward)
+            next_states.append(exp.next_state)
+            dones.append(exp.done)
+            infos.append(exp.info)
         
-        return experiences, weights, indices
+        # Convert to numpy arrays
+        states = np.array(states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        next_states = np.array(next_states)
+        dones = np.array(dones)
+        
+        return states, actions, rewards, next_states, dones, infos, indices
     
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         """Update priorities based on combined TD errors and rewards."""
@@ -99,6 +123,8 @@ class PrioritizedReplayBuffer:
         self.current_day = current_day
         # This is handled in the sample method with day-based weighting
 
+    def __len__(self):
+        return len(self.buffer)  # or whatever the internal storage is called
 
 class ContinuousTerminalAgent(nn.Module):
     """
@@ -273,8 +299,11 @@ class ContinuousTerminalAgent(nn.Module):
             current_q = self.forward(state_tensor)[0, action].item()
             
             # Next state value (double DQN)
-            next_actions = info.get('move_list', [])
-            if next_actions and not done:
+            move_list = info.get('move_list', [])
+            if move_list and not done:
+                # Convert move list to integer indices
+                next_actions = list(range(len(move_list)))  # <-- FIX: Convert to indices
+                
                 # Create mask for next state
                 next_mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
                 next_mask[next_actions] = True
@@ -311,128 +340,79 @@ class ContinuousTerminalAgent(nn.Module):
         # Track reward
         self.training_stats['rewards'].append(reward)
         
-    def update(self) -> Optional[float]:
-        """Update network from replay buffer."""
-        self.step_count += 1
-        
-        # Only update periodically
-        if self.step_count % self.update_every != 0:
+    def update(self, current_day=0):
+        """Update Q-network from sampled experiences."""
+        # Only update after sufficient experiences
+        if len(self.replay_buffer.buffer) < self.batch_size:
             return None
             
-        # Sample batch
-        experiences, weights, indices = self.replay_buffer.sample(
-            self.batch_size, 
-            self.current_day
-        )
+        # Sample batch - returns a tuple
+        batch_data = self.replay_buffer.sample(self.batch_size, current_day)
         
-        if experiences is None:
-            return None
-            
-        # Convert to tensors efficiently
-        # First convert lists to numpy arrays to avoid warning
-        states_np = np.array([e.state for e in experiences])
-        next_states_np = np.array([e.next_state for e in experiences])
+        # Unpack the tuple
+        states, actions, rewards, next_states, dones, infos, indices = batch_data
         
-        states = torch.FloatTensor(states_np).to(self.device)
-        actions = torch.LongTensor([e.action for e in experiences]).to(self.device)
-        rewards = torch.FloatTensor([e.reward for e in experiences]).to(self.device)
-        next_states = torch.FloatTensor(next_states_np).to(self.device)
-        dones = torch.FloatTensor([e.done for e in experiences]).to(self.device)
-        weights = torch.FloatTensor(weights).to(self.device)
+        # Convert to tensors
+        states = torch.FloatTensor(states).to(self.device)
+        actions = torch.LongTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        next_states = torch.FloatTensor(next_states).to(self.device)
+        dones = torch.FloatTensor(dones).to(self.device)
         
-        # Current Q-values
-        current_q_values = self.forward(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        # Current Q values
+        current_q_values = self.forward(states).gather(1, actions.unsqueeze(1))
         
-        # Next Q-values (double DQN with action masking)
+        # Next Q values with double DQN
         with torch.no_grad():
-            next_q_values = torch.zeros(self.batch_size, device=self.device)
+            # Create masks for valid next actions
+            batch_size = states.size(0)
+            next_masks = torch.zeros(batch_size, 1000, dtype=torch.bool, device=self.device)
             
-            for i, exp in enumerate(experiences):
-                if not exp.done:
-                    next_actions = exp.info.get('move_list', [])
-                    if next_actions:
-                        # Create mask
-                        mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
-                        mask[next_actions] = True
-                        
-                        # Select action with main network
-                        next_q = self.forward(next_states[i:i+1], mask.unsqueeze(0))
-                        next_action = next_q.argmax(dim=1).item()
-                        
-                        # Evaluate with target network
-                        target_q = self.target_net.forward(next_states[i:i+1])
-                        next_q_values[i] = target_q[0, next_action]
-                        
-        # Compute targets
-        targets = rewards + self.gamma * next_q_values * (1 - dones)
+            for i in range(batch_size):
+                if not dones[i]:
+                    # FIX: Convert move_list strings to integer indices
+                    move_list = infos[i].get('move_list', [])
+                    if move_list:
+                        next_actions = list(range(len(move_list)))
+                        next_masks[i, next_actions] = True
+            
+            # Select actions using main network
+            next_q_values = self.forward(next_states, next_masks)
+            next_actions_selected = next_q_values.argmax(dim=1)
+            
+            # Evaluate using target network
+            target_next_q_values = self.target_net.forward(next_states)
+            next_q_values_selected = target_next_q_values.gather(1, next_actions_selected.unsqueeze(1))
+            
+            # Compute targets
+            targets = rewards.unsqueeze(1) + self.gamma * next_q_values_selected * (1 - dones.unsqueeze(1))
         
-        # Compute TD errors
-        td_errors = targets - current_q_values
+        # Compute loss
+        loss = F.mse_loss(current_q_values, targets)
         
-        # Reward-modulated loss: directly incorporate reward signal
-        # 1. Base TD loss
-        td_loss = td_errors.pow(2)
-        
-        # 2. Direct reward loss - encourage Q-values to predict high rewards
-        # This makes the network directly optimize for reward maximization
-        reward_loss = (current_q_values - rewards).pow(2) * 0.1
-        
-        # 3. Reward-based weighting: prioritize learning from high-reward experiences
-        # Negative rewards get higher weight to learn what to avoid
-        # Positive rewards get moderate weight to learn what to seek
-        reward_weights = torch.where(
-            rewards < 0,
-            torch.abs(rewards) * 0.5 + 1.0,  # Amplify negative rewards
-            rewards * 0.2 + 1.0               # Moderate positive rewards
-        )
-        
-        # Combined loss with importance sampling
-        loss = (weights * reward_weights * (td_loss + reward_loss)).mean()
-        
-        # Add L2 regularization
-        l2_reg = sum(p.pow(2).sum() for p in self.parameters())
-        loss = loss + 0.0001 * l2_reg
-        
-        # Optimize with reward-aware gradient clipping
+        # Optimize
         self.optimizer.zero_grad()
         loss.backward()
-        
-        # Adaptive gradient clipping based on average reward magnitude
-        avg_reward_magnitude = torch.abs(rewards).mean().item()
-        clip_value = min(1.0, 0.1 + avg_reward_magnitude * 0.1)  # Scale clipping with rewards
-        torch.nn.utils.clip_grad_norm_(self.parameters(), clip_value)
-        
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         self.optimizer.step()
         
-        # Update priorities with reward-aware TD errors
-        # Prioritize experiences with high absolute rewards AND high TD errors
-        reward_factor = torch.abs(rewards).cpu().numpy()
-        td_errors_np = td_errors.detach().cpu().numpy()
+        # Update priorities in replay buffer
+        with torch.no_grad():
+            td_errors = (targets - current_q_values).squeeze().cpu().numpy()
+            self.replay_buffer.update_priorities(indices, np.abs(td_errors))
         
-        # Combined priority: TD error magnitude × reward importance
-        combined_priorities = np.abs(td_errors_np) * (1 + reward_factor * 0.5)
-        self.replay_buffer.update_priorities(indices, combined_priorities)
-        
-        # Soft update target network
-        self._soft_update_target()
-        
-        # Update exploration
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        # Update target network periodically
+        self.step_count += 1
+        if self.step_count % self.update_every == 0:
+            self._soft_update_target()
         
         # Track statistics
         self.training_stats['losses'].append(loss.item())
-        self.training_stats['td_errors'].append(td_errors.abs().mean().item())
         self.training_stats['q_values'].append(current_q_values.mean().item())
+        self.training_stats['td_errors'].append(np.mean(np.abs(td_errors)))
         
-        # Track reward-specific statistics
-        if 'avg_batch_reward' not in self.training_stats:
-            self.training_stats['avg_batch_reward'] = deque(maxlen=1000)
-            self.training_stats['reward_prediction_error'] = deque(maxlen=1000)
-        
-        self.training_stats['avg_batch_reward'].append(rewards.mean().item())
-        self.training_stats['reward_prediction_error'].append(
-            (current_q_values - rewards).abs().mean().item()
-        )
+        # Decay epsilon
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         
         return loss.item()
         

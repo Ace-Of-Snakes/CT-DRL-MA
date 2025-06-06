@@ -245,10 +245,11 @@ class TerminalTrainer:
             next_state, reward, terminated, truncated, next_info = self.env.step(action)
             
             # Store experience
+            info['available_actions'] = list(range(len(info.get('move_list', []))))
             self.agent.store_experience(state, action, reward, next_state, terminated, info)
             
             # Update agent
-            loss = self.agent.update()
+            loss = self.agent.update(current_day=self.env.current_day)
             if loss is not None:
                 self.training_metrics['losses'].append(loss)
                 
