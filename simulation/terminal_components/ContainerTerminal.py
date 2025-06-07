@@ -329,53 +329,44 @@ class ContainerTerminal(gym.Env):
         
         # Process trains in arrival order
         for train_id, planned_arrival, realized_arrival in train_arrivals:
-            # Create train
             n_wagons = random.randint(2, 5)
             train = Train(train_id, num_wagons=n_wagons, arrival_time=realized_arrival)
             
-            # Generate containers for train
-            n_containers = random.randint(*self.containers_per_train_range)
-            
-            for j in range(n_containers):
-                # 60% import, 40% export/pickup
-                if random.random() < 0.6:
-                    # Import container - train brings it
+            # 70% import trains, 30% export trains
+            if random.random() < 0.7:
+                # IMPORT TRAIN - brings containers
+                n_containers = random.randint(*self.containers_per_train_range)
+                for j in range(n_containers):
                     container = self._create_container_with_weight(f"{train_id}_C{j:03d}")
                     container.direction = "Import"
                     container.arrival_date = realized_arrival
                     
                     # Try to add to wagon
-                    added = False
                     for wagon in train.wagons:
                         if wagon.add_container(container):
-                            added = True
+                            # Schedule future pickup by truck
+                            pickup_time = self._sample_pickup_time(base_date)
+                            self.container_pickup_schedules[container.container_id] = pickup_time
                             break
-                    
-                    if added:
-                        # Schedule future pickup using KDE
-                        pickup_time = self._sample_pickup_time(base_date)
-                        self.container_pickup_schedules[container.container_id] = pickup_time
-                        self.container_arrival_times[container.container_id] = realized_arrival
-                else:
-                    # Export container - train needs to pick up
-                    container_id = f"{train_id}_PICKUP_{j:03d}"
-                    
-                    # Add to train's pickup list
-                    wagon_idx = random.randint(0, len(train.wagons) - 1)
-                    train.wagons[wagon_idx].add_pickup_container(container_id)
-                    
-                    # Create container and place in yard
-                    container = self._create_container_with_weight(container_id)
-                    container.direction = "Export"
-                    container.arrival_date = base_date - timedelta(days=random.randint(1, 5))
-                    
-                    # Find position in yard - suppress warnings during initialization
-                    with_warnings = hasattr(self, '_initialization_complete')
-                    if not with_warnings:
-                        self._coord_warning_shown = True  # Suppress warnings during init
-                        
-                    if self._place_container_in_yard(container):
-                        pass  # Container placed successfully
+            else:
+                # EXPORT TRAIN - needs existing containers
+                n_pickups = random.randint(5, 15)
+                
+                # Find existing containers in yard without pickup requests
+                available_containers = []
+                for cid in list(self.logistics.yard_container_set):
+                    if (cid not in self.logistics.pickup_to_train and 
+                        cid not in self.logistics.pickup_to_truck and
+                        not cid.startswith('TRN_')):  # Not already assigned
+                        available_containers.append(cid)
+                
+                # Assign pickups from available containers
+                n_actual_pickups = min(n_pickups, len(available_containers))
+                if n_actual_pickups > 0:
+                    selected = random.sample(available_containers, n_actual_pickups)
+                    for container_id in selected:
+                        wagon_idx = random.randint(0, len(train.wagons) - 1)
+                        train.wagons[wagon_idx].add_pickup_container(container_id)
             
             # Schedule train arrival
             self.logistics.trains.schedule_arrival(train, realized_arrival)
@@ -393,33 +384,29 @@ class ContainerTerminal(gym.Env):
             truck_id = f"TRK_{self.current_day:03d}_{i:03d}"
             truck = Truck(truck_id)
             
-            # 70% pickup trucks, 30% delivery trucks
-            if random.random() < 0.7:
-                # Pickup truck - select containers due for pickup
-                available_pickups = [
-                    (cid, pickup_time) 
-                    for cid, pickup_time in self.container_pickup_schedules.items()
-                    if base_date <= pickup_time < base_date + timedelta(days=1)
-                ]
-                
-                if available_pickups:
-                    # Pick 1-3 containers
-                    n_pickups = min(random.randint(1, 3), len(available_pickups))
-                    selected = random.sample(available_pickups, n_pickups)
-                    
-                    for container_id, _ in selected:
-                        truck.add_pickup_container_id(container_id)
-            else:
-                # Delivery truck - brings containers
+            if random.random() < 0.3:
+                # DELIVERY TRUCK - brings new containers
                 n_containers = random.randint(1, 2)
                 for j in range(n_containers):
                     container = self._create_container_with_weight(f"{truck_id}_C{j}")
                     container.direction = "Import"
                     truck.add_container(container)
                     
-                    # Schedule future pickup
-                    pickup_time = self._sample_pickup_time(base_date)
-                    self.container_pickup_schedules[container.container_id] = pickup_time
+                    # These will be placed in yard, available for future trains
+            else:
+                # PICKUP TRUCK - picks up train-delivered containers
+                # Find containers delivered by trains (Import containers in yard)
+                available_for_pickup = []
+                for cid in list(self.logistics.yard_container_set):
+                    if (cid not in self.logistics.pickup_to_truck and 
+                        cid.startswith('TRN_') and '_C' in cid):  # Train-delivered
+                        available_for_pickup.append(cid)
+                
+                if available_for_pickup:
+                    n_pickups = min(random.randint(1, 3), len(available_for_pickup))
+                    selected = random.sample(available_for_pickup, n_pickups)
+                    for container_id in selected:
+                        truck.add_pickup_container_id(container_id)
             
             # Schedule truck arrival
             h, m, s = hours_to_time(truck_hours[i])

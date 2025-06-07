@@ -85,6 +85,12 @@ class BooleanLogistics:
         if self.validate:
             self._print_validation_info()
 
+        # Terminal trucks for swap bodies/trailers
+        self.terminal_trucks = [
+            {'id': 0, 'busy': False, 'completion_time': 0.0},
+            {'id': 1, 'busy': False, 'completion_time': 0.0}
+        ]
+
     def _init_property_arrays(self):
         """Initialize arrays for fast tensor conversion."""
         # Train arrays
@@ -108,6 +114,13 @@ class BooleanLogistics:
                     coordinate_format = (row, railtrack, split)
                     coordinate_arr[row * self.split_factor + split][railtrack] = coordinate_format
         return coordinate_arr
+
+    def get_available_terminal_truck(self) -> Optional[int]:
+        """Get first available terminal truck ID, O(1) operation."""
+        for truck in self.terminal_trucks:
+            if not truck['busy']:
+                return truck['id']
+        return None
 
     def add_train_to_queue(self, train: Train):
         """Add train to train queue."""
@@ -623,35 +636,60 @@ class BooleanLogistics:
         for container_id in yard_pickup_containers:
             container_pos = self.yard_container_index[container_id]
             
-            # Check train pickups
-            if container_id in self.pickup_to_train:
-                railtrack_id, wagon_idx = self.pickup_to_train[container_id]
-                move_id = f"move_{move_counter}"
-                all_moves[move_id] = {
-                    'container_id': container_id,
-                    'source_type': 'yard',
-                    'source_pos': container_pos,
-                    'dest_type': 'train',
-                    'dest_pos': (railtrack_id, wagon_idx),
-                    'move_type': 'from_yard',
-                    'priority': 9.0
-                }
-                move_counter += 1
+            # Find the actual container (it might be stored at different positions)
+            container = None
+            full_coords = []
             
-            # Check truck pickups
-            if container_id in self.pickup_to_truck:
-                truck_pos = self.pickup_to_truck[container_id]
-                move_id = f"move_{move_counter}"
-                all_moves[move_id] = {
-                    'container_id': container_id,
-                    'source_type': 'yard',
-                    'source_pos': container_pos,
-                    'dest_type': 'truck',
-                    'dest_pos': truck_pos,
-                    'move_type': 'from_yard',
-                    'priority': 9.0
-                }
-                move_counter += 1
+            # Search for the container in the yard
+            row, bay, tier, start_split = container_pos
+            
+            # Check a range of positions to find where the container actually starts
+            for check_split in range(max(0, start_split - 4), min(self.yard.split_factor, start_split + 5)):
+                try:
+                    check_container = self.yard.get_container_at(row, bay, tier, check_split)
+                    if check_container and check_container.container_id == container_id:
+                        container = check_container
+                        # Found it, now get full coordinates
+                        container_length = self.yard.container_lengths.get(container.container_type, 1)
+                        for i in range(container_length):
+                            coord_bay = bay + (check_split + i) // self.yard.split_factor
+                            coord_split = (check_split + i) % self.yard.split_factor
+                            if coord_bay < self.yard.n_bays and coord_split < self.yard.split_factor:
+                                full_coords.append((row, coord_bay, coord_split, tier))
+                        break
+                except IndexError:
+                    continue
+            
+            if container and full_coords:
+                # Check train pickups
+                if container_id in self.pickup_to_train:
+                    railtrack_id, wagon_idx = self.pickup_to_train[container_id]
+                    move_id = f"move_{move_counter}"
+                    all_moves[move_id] = {
+                        'container_id': container_id,
+                        'source_type': 'yard',
+                        'source_pos': full_coords,
+                        'dest_type': 'train',
+                        'dest_pos': (railtrack_id, wagon_idx),
+                        'move_type': 'from_yard',
+                        'priority': 9.0
+                    }
+                    move_counter += 1
+                
+                # Check truck pickups
+                if container_id in self.pickup_to_truck:
+                    truck_pos = self.pickup_to_truck[container_id]
+                    move_id = f"move_{move_counter}"
+                    all_moves[move_id] = {
+                        'container_id': container_id,
+                        'source_type': 'yard',
+                        'source_pos': full_coords,
+                        'dest_type': 'truck',
+                        'dest_pos': truck_pos,
+                        'move_type': 'from_yard',
+                        'priority': 9.0
+                    }
+                    move_counter += 1
         
         # 4. Vehicle -> Yard moves (using cached positions)
         import_containers = []
@@ -738,6 +776,81 @@ class BooleanLogistics:
                 move_type = move['move_type']
                 move_types[move_type] = move_types.get(move_type, 0) + 1
             print(f"  Move breakdown: {move_types}")
+
+        # 6. YARD -> STACK MOVES (Terminal trucks for swap bodies/trailers)
+        available_truck = self.get_available_terminal_truck()
+        if available_truck is not None:
+            # Find swap bodies and trailers in yard
+            sb_t_count = 0
+            for container_id, pos in list(self.yard_container_index.items()):
+                if sb_t_count >= 5:  # Limit for performance
+                    break
+                    
+                row, bay, tier, split = pos
+                
+                # Validate position bounds
+                if (row >= self.yard.n_rows or bay >= self.yard.n_bays or 
+                    tier >= self.yard.n_tiers or split >= self.yard.split_factor):
+                    continue
+                
+                try:
+                    container = self.yard.get_container_at(row, bay, tier, split)
+                except IndexError:
+                    # Skip invalid positions
+                    continue
+                
+                if container and container.container_type in ['Swap Body', 'Trailer']:
+                    # Check if not requested by any vehicle
+                    if (container_id not in self.pickup_to_train and 
+                        container_id not in self.pickup_to_truck):
+                        
+                        # Get full coordinates - find actual start position
+                        container_length = self.yard.container_lengths[container.container_type]
+                        coords = []
+                        
+                        # Find the actual starting position by checking nearby splits
+                        found_start = False
+                        for start_split in range(max(0, split - container_length + 1), 
+                                               min(self.yard.split_factor, split + 1)):
+                            # Check if this could be the start
+                            test_coords = []
+                            valid = True
+                            for i in range(container_length):
+                                c_bay = bay + (start_split + i) // self.yard.split_factor
+                                c_split = (start_split + i) % self.yard.split_factor
+                                if c_bay < self.yard.n_bays and c_split < self.yard.split_factor:
+                                    try:
+                                        test_container = self.yard.get_container_at(row, c_bay, tier, c_split)
+                                        if test_container and test_container.container_id == container_id:
+                                            test_coords.append((row, c_bay, c_split, tier))
+                                        else:
+                                            valid = False
+                                            break
+                                    except IndexError:
+                                        valid = False
+                                        break
+                                else:
+                                    valid = False
+                                    break
+                            
+                            if valid and len(test_coords) == container_length:
+                                coords = test_coords
+                                found_start = True
+                                break
+                        
+                        if found_start and coords:
+                            move_id = f"move_{move_counter}"
+                            all_moves[move_id] = {
+                                'container_id': container_id,
+                                'source_type': 'yard',
+                                'source_pos': coords,
+                                'dest_type': 'stack',
+                                'dest_pos': None,
+                                'move_type': 'yard_to_stack',
+                                'priority': 3.0
+                            }
+                            move_counter += 1
+                            sb_t_count += 1
         
         # Mark cache as clean after successful move finding
         self.yard_cache_dirty = False
@@ -801,6 +914,13 @@ class BooleanLogistics:
         for truck_pos in trucks_to_remove:
             self.remove_truck(truck_pos)
         
+        # Update terminal truck states
+        for truck in self.terminal_trucks:
+            if truck['busy'] and truck['completion_time'] <= 0:
+                truck['busy'] = False
+            elif truck['busy']:
+                truck['completion_time'] -= 1  # Decrement if using step-based time
+
         # Try to place new vehicles from queues
         self.process_current_trains()
         self.process_current_trucks()

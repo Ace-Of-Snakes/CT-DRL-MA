@@ -211,10 +211,10 @@ class MoveEvaluator:
             # Check if this move improves yard organization
             if self._is_optimization_move(move, container_pickup_schedules, current_datetime):
                 urgency += self.urgency_weights['yard_optimization']
-                value += 5.0
+                value += 2.0
             else:
-                value += 1.0  # Minimal value for reshuffling
-        
+                value -= 1.0  # Minimal value for reshuffling
+
         return urgency, value
     
     def _is_optimization_move(
@@ -289,6 +289,11 @@ class ProgressBasedRewardCalculator:
         # Final reward
         reward = base_reward * distance_factor + time_bonus
         
+        # Special handling for yard_to_stack moves
+        if move.get('move_type') == 'yard_to_stack':
+            # Small reward for clearing swap bodies/trailers
+            return 3.0 * distance_factor + time_bonus
+
         # Ensure minimum positive reward for any completed move
         reward = max(reward, 0.5)
         
