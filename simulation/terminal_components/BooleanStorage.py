@@ -222,7 +222,7 @@ class BooleanStorageYard:
             self.dynamic_yard_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = False
             
             # lock stack for that container type
-            self.cldymc[container.container_type][(row*self.n_tiers):(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = False
+            self.cldymc[container.container_type][row*self.n_tiers:(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = False
 
             # unlock the next tier
             if tier < self.n_tiers - 1:
@@ -261,7 +261,7 @@ class BooleanStorageYard:
 
             # unlock the stack for all container types if the removal opens a stack
             if tier == 0:
-                self.cldymc[container.container_type][(row*self.n_tiers):(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = True
+                self.cldymc[container.container_type][row*self.n_tiers:(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = True
 
             # if not max height, lock tier above
             if tier < self.n_tiers - 1:
