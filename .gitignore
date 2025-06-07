@@ -198,3 +198,4 @@ precomputed/
 
 # random data
 *.json
+*.csv
