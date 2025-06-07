@@ -43,7 +43,6 @@ class BooleanStorageYard:
         # Create coordinate mapping for yard
         self.coordinates = self.create_coordinate_mapping()
 
-        # print(self.dynamic_yard_mask.shape)
         # Creating masks for specific container types
         self.r_mask, self.dg_mask, self.sb_t_mask = self.extract_special_masks(coordinates)
 
@@ -66,7 +65,7 @@ class BooleanStorageYard:
         '''Container lengths defined in ammount of subslots that they use up '''
 
         self.cldymc = {
-            k:self.dynamic_yard_mask for k in self.container_lengths
+            k:self.dynamic_yard_mask.copy() for k in self.container_lengths
         }
         '''Container-Lengths-Dynamic-Yard-Mask-Copy for each different container length'''
 
@@ -89,25 +88,25 @@ class BooleanStorageYard:
         self.occupied_mask = np.zeros((self.n_rows, self.n_bays, self.n_tiers, self.split_factor), dtype=bool)
 
     def create_dynamic_yard_mask(self)->np.ndarray:
-        bool_arr = np.zeros((self.n_rows*self.split_factor, self.n_bays*self.n_tiers), dtype=bool)
+        bool_arr = np.zeros((self.n_rows*self.n_tiers, self.n_bays*self.split_factor), dtype=bool)
         for row in range(self.n_rows):
             for bay in range(self.n_bays):
                 for tier in range(self.n_tiers):
                     for split in range(self.split_factor):
                         if tier == 0:
-                            bool_arr[row*self.split_factor+split][bay*self.n_tiers+tier] = True
+                            bool_arr[row*self.n_tiers+tier][bay*self.split_factor+split] = True
         
         return bool_arr
 
     def create_coordinate_mapping(self)->np.ndarray:
         ''' 0-starting coordinate map as identical mask to the dynamic_yard_mask'''
-        coordinate_arr = np.zeros((self.n_rows*self.split_factor, self.n_bays*self.n_tiers), dtype=tuple)
+        coordinate_arr = np.zeros((self.n_rows*self.n_tiers, self.n_bays*self.split_factor), dtype=object)
         for row in range(self.n_rows):
             for bay in range(self.n_bays):
                 for tier in range(self.n_tiers):
                     for split in range(self.split_factor):
                         coordinate_format = (row, bay, split, tier)
-                        coordinate_arr[row*self.split_factor+split][bay*self.n_tiers+tier] = coordinate_format
+                        coordinate_arr[row*self.n_tiers+tier][bay*self.split_factor+split] = coordinate_format
         
         return coordinate_arr
 
@@ -134,18 +133,17 @@ class BooleanStorageYard:
                 case "r":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
-                            # print((row, split),(bay, tier)) DEBUGGING PRINT STATEMENT
-                            r_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
+                            r_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = True
                 case "dg":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
-                            dg_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
+                            dg_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = True
                 case "sb_t":
                     for tier in range(self.n_tiers):
                         for split in range(self.split_factor):
                             # non-stackable
                             if tier == 0:
-                                sb_t_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
+                                sb_t_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = True
                 case _:
                     raise Exception("Storage Yard Class: invalid coordinates passed") 
         return (r_mask, dg_mask, sb_t_mask)
@@ -174,7 +172,7 @@ class BooleanStorageYard:
         print("Mask for regular Containers")
         print(self.reg_mask)
 
-        print("Dinamic Yard at init")
+        print("Dynamic Yard at init")
         print(self.dynamic_yard_mask)
         print(self.dynamic_yard_mask.shape)
 
@@ -221,14 +219,14 @@ class BooleanStorageYard:
             # Update property arrays for tensor conversion
             self._update_property_arrays(row, bay, tier, split, container)
             
-            self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = False
+            self.dynamic_yard_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = False
             
             # lock stack for that container type
-            self.cldymc[container.container_type][row*self.split_factor+split, (bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = False
+            self.cldymc[container.container_type][(row*self.n_tiers):(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = False
 
             # unlock the next tier
             if tier < self.n_tiers - 1:
-                self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier+1] = True
+                self.dynamic_yard_mask[row*self.n_tiers+tier+1, bay*self.split_factor+split] = True
 
     def remove_container(self, coordinates: List[Tuple[int, int, int, int]]) -> Container:
         '''
@@ -259,15 +257,15 @@ class BooleanStorageYard:
             # Update property arrays for tensor conversion
             self._update_property_arrays(row, bay, tier, split, None)
             
-            self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier] = True
+            self.dynamic_yard_mask[row*self.n_tiers+tier, bay*self.split_factor+split] = True
 
             # unlock the stack for all container types if the removal opens a stack
             if tier == 0:
-                self.cldymc[container.container_type][row*self.split_factor+split, (bay*self.n_tiers):(bay*self.n_tiers)+self.n_tiers-1] = True
+                self.cldymc[container.container_type][(row*self.n_tiers):(row*self.n_tiers)+self.n_tiers-1, bay*self.split_factor+split] = True
 
             # if not max height, lock tier above
             if tier < self.n_tiers - 1:
-                self.dynamic_yard_mask[row*self.split_factor+split, bay*self.n_tiers+tier+1] = False
+                self.dynamic_yard_mask[row*self.n_tiers+tier+1, bay*self.split_factor+split] = False
 
         return container
     
@@ -408,7 +406,7 @@ class BooleanStorageYard:
         """OPTIMIZED: Direct mask access for occupancy check."""
         return self.occupied_mask[row, bay, tier, split]
 
-    # ==================== REMAINING METHODS (UNCHANGED) ====================
+    # ==================== REMAINING METHODS ====================
 
     def _find_valid_container_placements(self, available_coordinates, container_type: str) -> List[Tuple]:
         """
@@ -585,13 +583,13 @@ class BooleanStorageYard:
         max_bay = min(self.n_bays, bay + max_proximity + 1)
 
         # Block off everything past min and max bay
-        available_places[:, :min_bay*self.n_tiers] = False
-        available_places[:, max_bay*self.n_tiers:] = False
+        available_places[:, :min_bay*self.split_factor] = False
+        available_places[:, max_bay*self.split_factor:] = False
 
         if coords != None:
             for coord in coords:
                 r, b, s, t = coord
-                available_places[r*self.split_factor+s, b*self.n_tiers+t+1] = False
+                available_places[r*self.n_tiers+t+1, b*self.split_factor+s] = False
 
         # Convert to coordinates
         available_coordinates = self.coordinates[available_places]
