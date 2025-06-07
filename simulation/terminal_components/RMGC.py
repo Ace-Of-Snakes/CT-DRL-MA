@@ -107,6 +107,12 @@ class RMGC_Controller:
         idx = 0
         x_offset = 0.0
         
+        # Add virtual stack position
+        self.position_to_coords["stack_0_0_0"] = (x_offset + 100, 0, 0)  # Far position
+        self.position_to_idx["stack_0_0_0"] = idx
+        self.idx_to_position[idx] = "stack_0_0_0"
+        self.num_positions = idx + 1
+
         # Process areas in order
         for area in self.order:
             if area == 'rails':
@@ -343,7 +349,7 @@ class RMGC_Controller:
             self.crane_heads[head_id]['busy'] = False
             self.crane_heads[head_id]['current_move'] = None
             self.crane_heads[head_id]['working_bays'].clear()
-    
+
     def _position_to_string(self, pos) -> str:
         """Convert position from move format to string format."""
         if isinstance(pos, tuple):
@@ -364,6 +370,10 @@ class RMGC_Controller:
             first_coord = pos[0]
             if len(first_coord) == 4:
                 return f"yard_{first_coord[0]}_{first_coord[1]}_{first_coord[2]}_{first_coord[3]}"
+        elif pos is None:
+            # Virtual position for stack moves
+            return "stack_0_0_0"
+        
         # Unknown position format
         return str(pos)
     
@@ -512,6 +522,18 @@ class RMGC_Controller:
                         if hasattr(truck, 'pickup_container_ids') and container.container_id in truck.pickup_container_ids:
                             truck.remove_pickup_container_id(container.container_id)
         
+
+            elif dest_type == 'stack':
+                # Terminal truck move - remove from yard
+                success = True
+                # Container is removed from terminal system
+                # Update terminal truck state in logistics
+                truck_id = self.logistics.get_available_terminal_truck()
+                if truck_id is not None:
+                    self.logistics.terminal_trucks[truck_id]['busy'] = True
+                    self.logistics.terminal_trucks[truck_id]['completion_time'] = 300.0  # 5 minutes
+
+
         # Calculate physics
         if success:
             # Get distance from matrix - with error handling
