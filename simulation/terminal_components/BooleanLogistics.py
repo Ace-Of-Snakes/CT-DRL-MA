@@ -10,6 +10,7 @@ import torch
 from collections import defaultdict, deque
 import time
 from datetime import datetime, timedelta
+import random
 
 class BooleanLogistics:
     """
@@ -857,45 +858,72 @@ class BooleanLogistics:
 
         return all_moves
 
-    def reorganize_logistics(self) -> np.ndarray:
+    def reorganize_logistics(self) -> Tuple[np.ndarray, float]:
         """
         Reorganize logistics after moves: remove completed vehicles, update tracking.
         
         Returns:
-            Summary vector: [trains_departed_early, trains_departed_late, trucks_departed]
+            Tuple of (summary_vector, penalty) where penalty is negative reward for missed containers
         """
         trains_departed_early = 0
         trains_departed_late = 0
         trucks_departed = 0
+        total_penalty = 0.0
         
-        current_time = datetime.now()  # Use datetime for consistency with train.departure_time
+        current_time = datetime.now()
         
         # Check trains for completion/departure
         trains_to_remove = []
         for railtrack_id, train in self.active_trains.items():
-            # Check if train is ready to depart (all pickups completed, no deliveries left)
-            ready_to_depart = True
-            
             # Check if all pickup requests are fulfilled
+            ready_to_depart = True
+            unfulfilled_pickups = 0
+            undelivered_containers = 0
+            
             for wagon in train.wagons:
                 if len(wagon.pickup_container_ids) > 0:
                     ready_to_depart = False
-                    break
+                    unfulfilled_pickups += len(wagon.pickup_container_ids)
+                undelivered_containers += len(wagon.containers)
             
             # Check departure time
             departure_time = getattr(train, 'departure_time', None)
-            if departure_time and ready_to_depart:
-                if current_time <= departure_time:
+            
+            if departure_time:
+                if current_time >= departure_time:
+                    # FORCED DEPARTURE - Calculate penalty
+                    if ready_to_depart:
+                        trains_departed_late += 1
+                    else:
+                        # Major penalty for forced departure with unfulfilled tasks
+                        trains_departed_late += 1
+                        
+                        # Penalty calculation:
+                        # -5 points per unfulfilled pickup
+                        # -3 points per undelivered container
+                        # -10 bonus penalty for missing departure with tasks
+                        penalty = (unfulfilled_pickups * 5.0 + 
+                                undelivered_containers * 3.0 + 
+                                10.0)
+                        total_penalty -= penalty
+                        
+                        # Log the failure
+                        if self.validate:
+                            print(f"PENALTY: Train {train.train_id} forced departure!")
+                            print(f"  Unfulfilled pickups: {unfulfilled_pickups}")
+                            print(f"  Undelivered containers: {undelivered_containers}")
+                            print(f"  Total penalty: -{penalty}")
+                        
+                        # Remove containers from train and place them in yard
+                        self._salvage_train_containers(railtrack_id, train)
+                        
+                    trains_to_remove.append(railtrack_id)
+                elif ready_to_depart and current_time <= departure_time:
+                    # On-time departure with all tasks complete
                     trains_departed_early += 1
-                else:
-                    trains_departed_late += 1
-                trains_to_remove.append(railtrack_id)
-            elif departure_time and current_time > departure_time:
-                # Force departure if past departure time
-                trains_departed_late += 1
-                trains_to_remove.append(railtrack_id)
+                    trains_to_remove.append(railtrack_id)
         
-        # Remove completed trains
+        # Remove departed trains
         for railtrack_id in trains_to_remove:
             self.remove_train(railtrack_id)
         
@@ -906,11 +934,37 @@ class BooleanLogistics:
             pickup_complete = len(getattr(truck, 'pickup_container_ids', set())) == 0
             delivery_complete = len(truck.containers) == 0
             
-            if pickup_complete and delivery_complete:
+            # Get truck's time in terminal
+            arrival_time = getattr(truck, 'arrival_time', current_time)
+            time_in_terminal = (current_time - arrival_time).total_seconds() / 3600.0  # hours
+            
+            # Force departure after 8 hours
+            if time_in_terminal > 8.0 and not (pickup_complete and delivery_complete):
+                # Calculate penalty
+                unfulfilled_pickups = len(getattr(truck, 'pickup_container_ids', set()))
+                undelivered_containers = len(truck.containers)
+                
+                penalty = (unfulfilled_pickups * 3.0 + 
+                        undelivered_containers * 2.0 + 
+                        5.0)  # Base penalty for overtime
+                total_penalty -= penalty
+                
+                if self.validate:
+                    print(f"PENALTY: Truck {truck.truck_id} forced departure after {time_in_terminal:.1f}h!")
+                    print(f"  Unfulfilled pickups: {unfulfilled_pickups}")
+                    print(f"  Undelivered containers: {undelivered_containers}")
+                    print(f"  Total penalty: -{penalty}")
+                
+                # Salvage containers
+                self._salvage_truck_containers(truck_pos, truck)
+                trucks_departed += 1
+                trucks_to_remove.append(truck_pos)
+                
+            elif pickup_complete and delivery_complete:
                 trucks_departed += 1
                 trucks_to_remove.append(truck_pos)
         
-        # Remove completed trucks
+        # Remove departed trucks
         for truck_pos in trucks_to_remove:
             self.remove_truck(truck_pos)
         
@@ -919,7 +973,7 @@ class BooleanLogistics:
             if truck['busy'] and truck['completion_time'] <= 0:
                 truck['busy'] = False
             elif truck['busy']:
-                truck['completion_time'] -= 1  # Decrement if using step-based time
+                truck['completion_time'] -= 1
 
         # Try to place new vehicles from queues
         self.process_current_trains()
@@ -928,7 +982,82 @@ class BooleanLogistics:
         # Update move cache
         self.available_moves_cache = self.find_moves_optimized()
         
-        return np.array([trains_departed_early, trains_departed_late, trucks_departed])
+        return np.array([trains_departed_early, trains_departed_late, trucks_departed]), total_penalty
+
+    def _salvage_train_containers(self, railtrack_id: int, train: Train):
+        """Remove containers from departing train and place them in yard for future pickup."""
+        salvaged_count = 0
+        
+        for wagon in train.wagons:
+            # Remove all containers from wagon
+            containers_to_salvage = list(wagon.containers)
+            for container in containers_to_salvage:
+                wagon.remove_container(container.container_id)
+                
+                # Try to place in yard
+                if self._place_container_in_yard_from_vehicle(container):
+                    salvaged_count += 1
+                    
+                    # Clear any delivery mission for this container
+                    if container.container_id in self.pickup_to_train:
+                        del self.pickup_to_train[container.container_id]
+                else:
+                    print(f"WARNING: Could not salvage container {container.container_id}")
+        
+        if salvaged_count > 0 and self.validate:
+            print(f"  Salvaged {salvaged_count} containers from train to yard")
+
+    def _salvage_truck_containers(self, truck_pos: Tuple, truck: Truck):
+        """Remove containers from departing truck and place them in yard."""
+        salvaged_count = 0
+        
+        containers_to_salvage = list(truck.containers)
+        for container in containers_to_salvage:
+            truck.remove_container(container.container_id)
+            
+            # Try to place in yard
+            if self._place_container_in_yard_from_vehicle(container):
+                salvaged_count += 1
+                
+                # Clear any delivery mission
+                if container.container_id in self.pickup_to_truck:
+                    del self.pickup_to_truck[container.container_id]
+        
+        if salvaged_count > 0 and self.validate:
+            print(f"  Salvaged {salvaged_count} containers from truck to yard")
+
+    def _place_container_in_yard_from_vehicle(self, container: Container) -> bool:
+        """Place a salvaged container in the yard."""
+        goods_type = 'r' if container.goods_type == 'Reefer' else \
+                    'dg' if container.goods_type == 'Dangerous' else \
+                    'sb_t' if container.container_type in ['Trailer', 'Swap Body'] else 'reg'
+        
+        # Try multiple bay positions
+        for _ in range(10):
+            bay = random.randint(2, self.yard.n_bays-3)
+            positions = self.yard.search_insertion_position(
+                bay,
+                goods_type,
+                container.container_type,
+                5  # Larger search radius
+            )
+            
+            if positions:
+                placement = positions[0]
+                coords = self.yard.get_container_coordinates_from_placement(
+                    placement,
+                    container.container_type
+                )
+                
+                # Add to yard
+                try:
+                    self.yard.add_container(container, coords)
+                    self._update_yard_container_index(container.container_id, coords[0])
+                    return True
+                except:
+                    continue
+                    
+        return False
 
     # ==================== TENSOR CONVERSION METHODS ====================
     
