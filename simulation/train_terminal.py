@@ -57,6 +57,9 @@ class EnhancedTerminalTrainer:
         self.save_dir = save_dir
         self.log_interval = log_interval
         self.save_interval = save_interval
+
+        # In EnhancedTerminalTrainer.__init__, after creating self.env:
+        self.env.move_log_file = os.path.join(self.save_dir, "move_history.csv")
         
         # Create save directory
         os.makedirs(save_dir, exist_ok=True)

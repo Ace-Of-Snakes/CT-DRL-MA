@@ -94,6 +94,8 @@ class ContainerTerminal(gym.Env):
         self.trucks_per_day_range = (20, 40)
         self.containers_per_train_range = (15, 30)
 
+        # History of moves to print out
+        self.move_history = []
     def _init_terminal_components(self):
         """Initialize yard, logistics, and RMGC components."""
         # Define special storage areas
@@ -639,6 +641,21 @@ class ContainerTerminal(gym.Env):
                 self.daily_metrics['distances'].append(distance)
                 self.daily_metrics['times'].append(time)
                 self.daily_metrics['rewards'].append(reward)
+
+                # Track move
+                self.move_history.append({
+                    'day': self.current_day,
+                    'move_id': move_id,
+                    'container_id': move.get('container_id', ''),
+                    'source_type': move.get('source_type', ''),
+                    'source_pos': str(move.get('source_pos', '')),
+                    'dest_type': move.get('dest_type', ''),
+                    'dest_pos': str(move.get('dest_pos', '')),
+                    'move_type': move.get('move_type', ''),
+                    'reward': reward,
+                    'distance': distance,
+                    'time': time
+                })
             else:
                 # Failed move - small negative reward
                 reward = -0.5
@@ -848,6 +865,19 @@ class ContainerTerminal(gym.Env):
         # Generate new day's traffic
         if self.current_day < self.max_days:
             self._generate_daily_traffic()
+
+        # Write out history and clear
+        if hasattr(self, 'move_log_file') and self.move_history:
+            import csv
+            with open(self.move_log_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['day', 'move_id', 'container_id', 
+                                                    'source_type', 'source_pos', 'dest_type', 
+                                                    'dest_pos', 'move_type', 'reward', 
+                                                    'distance', 'time'])
+                if self.current_day == 0:  # Write header on first day
+                    writer.writeheader()
+                writer.writerows(self.move_history)
+            self.move_history.clear()
     
     def _get_state(self) -> np.ndarray:
         """Get current environment state with temporal awareness."""
