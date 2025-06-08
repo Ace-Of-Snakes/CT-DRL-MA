@@ -531,7 +531,7 @@ class BooleanLogistics:
             source_coords = move_data['source_coords']
             destinations = move_data['destinations']
             
-            for dest in destinations[:3]:
+            for dest in destinations:
                 if dest != source_coords[0][:3]:
                     move_id = f"move_{move_counter}"
                     all_moves[move_id] = {
@@ -549,7 +549,7 @@ class BooleanLogistics:
         available_truck = self.get_available_terminal_truck()
         if available_truck is not None:
             sb_t_count = 0
-            for container_id, pos in list(self.yard_container_index.items())[:20]:  # Limit scan
+            for container_id, pos in list(self.yard_container_index.items()):  # Limit scan
                 if sb_t_count >= 5:
                     break
                 
@@ -814,7 +814,7 @@ class BooleanLogistics:
                 positions = self.yard.search_insertion_position(
                     center_bay, goods_type, container.container_type, max_proximity=5
                 )
-                self.cached_yard_positions[cache_key] = positions[:10]
+                self.cached_yard_positions[cache_key] = positions
             except:
                 self.cached_yard_positions[cache_key] = []
         
@@ -986,22 +986,33 @@ if __name__ == '__main__':
     
     # Create a test yard
     test_yard = BooleanStorageYard(
-        n_rows=15,
-        n_bays=20,
+        n_rows=5,
+        n_bays=15,
         n_tiers=3,
         coordinates=[
-            (1, 1, "r"), (2, 1, "r"), (19, 1, "r"), (20, 1, "r"),
-            (10, 8, "dg"), (11, 8, "dg"), (10, 9, "dg"), (11, 9, "dg"),
-            (5, 1, "sb_t"), (6, 1, "sb_t"), (7, 1, "sb_t")
+            # Reefers on both ends
+            (1, 1, "r"), (1, 2, "r"), (1, 3, "r"), (1, 4, "r"), (1, 5, "r"),
+            (15, 1, "r"), (15, 2, "r"), (15, 3, "r"), (15, 4, "r"), (15, 5, "r"),
+            
+            # Row nearest to trucks is for swap bodies and trailers
+            (1, 1, "sb_t"), (2, 1, "sb_t"), (3, 1, "sb_t"), (4, 1, "sb_t"), (5, 1, "sb_t"),
+            (6, 1, "sb_t"), (7, 1, "sb_t"), (8, 1, "sb_t"), (9, 1, "sb_t"), (10, 1, "sb_t"),
+            (11, 1, "sb_t"), (12, 1, "sb_t"), (13, 1, "sb_t"), (14, 1, "sb_t"), (15, 1, "sb_t"),
+            
+            # Pit in the middle for dangerous goods
+            (7, 3, "dg"), (8, 3, "dg"), (9, 3, "dg"),
+            (7, 4, "dg"), (8, 4, "dg"), (9, 4, "dg"),
+            (7, 5, "dg"), (8, 5, "dg"), (9, 5, "dg"),
         ],
         split_factor=4,
-        validate=False
+        device='cuda',  # or 'cuda' if available
+        validate=True
     )
     
     # Create logistics manager with proper n_bays parameter
     logistics = BooleanLogistics(
-        n_rows=15,
-        n_bays=20,  # Now properly passed
+        n_rows=5,
+        n_bays=15,  # Now properly passed
         n_railtracks=6,
         split_factor=4,
         yard=test_yard,
@@ -1045,6 +1056,8 @@ if __name__ == '__main__':
         test_yard.add_container(pickup_container_3, coords_3)
         print(f"  Added {pickup_container_3.container_id} to yard at {coords_3}")
     
+    print(test_yard.dynamic_yard_mask)
+    print()
     # CRITICAL: Sync the logistics yard index after manually adding containers
     logistics.sync_yard_index()
     print(f"\nSynced yard index: {len(logistics.yard_container_index)} containers indexed")
@@ -1122,7 +1135,7 @@ if __name__ == '__main__':
         print("\nMove breakdown by type:")
         for move_type, move_list in move_types.items():
             print(f"\n  {move_type}: {len(move_list)} moves")
-            for move_id, move in move_list[:3]:  # Show first 3 of each type
+            for move_id, move in move_list:  # Show first 3 of each type
                 print(f"    {move_id}: {move['container_id']} "
                       f"({move['source_type']} -> {move['dest_type']})")
     
