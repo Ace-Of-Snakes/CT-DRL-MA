@@ -637,9 +637,7 @@ class BooleanStorageYard:
         return coordinates
 
     def return_possible_yard_moves(self, max_proximity: int = 1) -> Dict[str, Dict[str, List[List[Tuple]]]]:
-        """
-        OPTIMIZED: Use direct array access instead of string operations.
-        """
+        """Find all possible yard moves for accessible containers."""
         # Get all target coordinates
         target_coordinates = self.coordinates[self.dynamic_yard_mask]
         
@@ -661,16 +659,21 @@ class BooleanStorageYard:
         # Process each valid coordinate
         for coordinate in valid_coordinates:
             row, bay, split, tier = coordinate
-            container_tier = tier - 1
             
-            # OPTIMIZED: Direct array access instead of string operations
-            container = self.containers[row, bay, container_tier, split]
+            # CASE 1: Check container below empty space (original logic)
+            if tier < self.n_tiers - 1:
+                container_tier = tier - 1
+                container = self.containers[row, bay, container_tier, split]
+            # CASE 2: At max tier - check current position for container
+            else:  # tier == self.n_tiers - 1
+                container = self.containers[row, bay, tier, split]
             
             if container is not None:
                 # Add coordinate (defaultdict eliminates need for existence check)
-                target_containers[container]["source_coords"].append((row, bay, split, container_tier))
+                actual_tier = tier - 1 if tier < self.n_tiers - 1 else tier
+                target_containers[container]["source_coords"].append((row, bay, split, actual_tier))
                 
-                # Cache container mask mapping to avoid repeated attribute access
+                # Cache container mask mapping
                 if container not in container_mask_cache:
                     if container.goods_type == 'Reefer':
                         container_mask_cache[container] = 'r'
@@ -681,7 +684,17 @@ class BooleanStorageYard:
                     elif container.container_type in ("Trailer", "Swap Body"):
                         container_mask_cache[container] = 'sb_t'
                     else:
-                        container_mask_cache[container] = 'reg'  # fallback
+                        container_mask_cache[container] = 'reg'
+        
+        # CASE 3: Check swap bodies/trailers using sb_t_mask
+        sb_t_positions = self.coordinates[self.sb_t_mask & self.dynamic_yard_mask]
+        for coordinate in sb_t_positions:
+            row, bay, split, tier = coordinate
+            if tier == 0:  # sb_t only on ground level
+                container = self.containers[row, bay, tier, split]
+                if container is not None and container.container_type in ("Trailer", "Swap Body"):
+                    target_containers[container]["source_coords"].append((row, bay, split, tier))
+                    container_mask_cache[container] = 'sb_t'
         
         # Process destinations using cached mask mappings
         result = {}
@@ -689,7 +702,7 @@ class BooleanStorageYard:
             # Get bay from first coordinate
             bay = data["source_coords"][0][1]
             
-            # Use cached mask instead of repeated attribute access
+            # Use cached mask
             applicable_mask = container_mask_cache[container]
             
             # Get valid destinations
@@ -709,7 +722,6 @@ class BooleanStorageYard:
                 }
         
         return result
-
 
 # Example usage and testing
 if __name__ == "__main__":
