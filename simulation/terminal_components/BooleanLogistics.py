@@ -582,6 +582,26 @@ class BooleanLogistics:
         
         return all_moves
 
+    def sync_pickup_mappings(self):
+        """Synchronize pickup mappings with current vehicle states."""
+        # Clear and rebuild pickup mappings
+        self.pickup_to_train.clear()
+        self.pickup_to_truck.clear()
+        
+        # Rebuild from trains
+        for track_trains in self.trains_on_track.values():
+            for _, _, train in track_trains:
+                for wagon_idx, wagon in enumerate(train.wagons):
+                    for container_id in wagon.pickup_container_ids:
+                        self.pickup_to_train[container_id] = (train.train_id, wagon_idx)
+        
+        # Rebuild from trucks
+        for pos, truck in self.active_trucks.items():
+            if hasattr(truck, 'pickup_container_ids'):
+                for container_id in truck.pickup_container_ids:
+                    self.pickup_to_truck[container_id] = pos
+
+    # In BooleanLogistics.reorganize_logistics, fix the departure logic:
     def reorganize_logistics(self) -> Tuple[np.ndarray, float]:
         """Reorganize logistics after moves with penalty system."""
         trains_departed_early = 0
@@ -589,43 +609,47 @@ class BooleanLogistics:
         trucks_departed = 0
         total_penalty = 0.0
         
-        current_time = datetime.now()
+        # Use simulation datetime if available, otherwise current time
+        current_time = getattr(self, 'current_datetime', datetime.now())
         
         # Check all trains across all tracks
         trains_to_remove = []
         for track_id, track_trains in self.trains_on_track.items():
             for dep_time, pos_range, train in track_trains:
+                # IMPORTANT: Use train's departure_time attribute
+                scheduled_departure = getattr(train, 'departure_time', dep_time)
+                
                 ready_to_depart = all(
                     len(wagon.pickup_container_ids) == 0 
                     for wagon in train.wagons
                 )
                 
-                if dep_time and current_time >= dep_time:
-                    # Forced departure
-                    if ready_to_depart:
-                        trains_departed_late += 1
-                    else:
+                # Only remove if departure time has passed
+                if scheduled_departure and current_time >= scheduled_departure:
+                    if not ready_to_depart:
                         # Calculate penalty
                         unfulfilled = sum(len(w.pickup_container_ids) for w in train.wagons)
                         undelivered = sum(len(w.containers) for w in train.wagons)
                         penalty = unfulfilled * 5.0 + undelivered * 3.0 + 10.0
                         total_penalty -= penalty
                         trains_departed_late += 1
-                        
-                        # Salvage containers
-                        self._salvage_train_containers(train)
+                    else:
+                        trains_departed_late += 1
                     
                     trains_to_remove.append(train.train_id)
                     
-                elif ready_to_depart and dep_time and current_time <= dep_time:
-                    trains_departed_early += 1
-                    trains_to_remove.append(train.train_id)
+                elif ready_to_depart and scheduled_departure:
+                    # Only depart early if very close to departure (30 min)
+                    time_until = (scheduled_departure - current_time).total_seconds() / 60.0
+                    if 0 < time_until < 30:
+                        trains_departed_early += 1
+                        trains_to_remove.append(train.train_id)
         
         # Remove departed trains
         for train_id in trains_to_remove:
             self.remove_train(train_id)
         
-        # Check trucks
+        # Similar for trucks - keep at least 2 hours
         trucks_to_remove = []
         for truck_pos, truck in list(self.active_trucks.items()):
             pickup_complete = len(getattr(truck, 'pickup_container_ids', set())) == 0
@@ -634,18 +658,19 @@ class BooleanLogistics:
             arrival_time = getattr(truck, 'arrival_time', current_time)
             time_in_terminal = (current_time - arrival_time).total_seconds() / 3600.0
             
-            if time_in_terminal > 8.0 and not (pickup_complete and delivery_complete):
-                # Penalty
-                unfulfilled = len(getattr(truck, 'pickup_container_ids', set()))
-                undelivered = len(truck.containers)
-                penalty = unfulfilled * 3.0 + undelivered * 2.0 + 5.0
-                total_penalty -= penalty
+            if time_in_terminal > 8.0:
+                # Force out after 8 hours
+                if not (pickup_complete and delivery_complete):
+                    unfulfilled = len(getattr(truck, 'pickup_container_ids', set()))
+                    undelivered = len(truck.containers)
+                    penalty = unfulfilled * 3.0 + undelivered * 2.0 + 5.0
+                    total_penalty -= penalty
                 
-                self._salvage_truck_containers(truck_pos, truck)
                 trucks_departed += 1
                 trucks_to_remove.append(truck_pos)
-                
-            elif pickup_complete and delivery_complete:
+                    
+            elif pickup_complete and delivery_complete and time_in_terminal > 2.0:
+                # Leave after 2+ hours if work complete
                 trucks_departed += 1
                 trucks_to_remove.append(truck_pos)
         
@@ -668,6 +693,7 @@ class BooleanLogistics:
         self.available_moves_cache = self.find_moves_optimized()
         
         return np.array([trains_departed_early, trains_departed_late, trucks_departed]), total_penalty
+
 
     # ==================== HELPER METHODS ====================
 

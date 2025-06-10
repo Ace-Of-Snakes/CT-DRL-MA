@@ -17,7 +17,7 @@ class TemporalStateEnhancement:
         self,
         current_time: float,
         current_day: int,
-        trains: Dict,  # Active trains with departure times
+        trains: Dict,  # Active trains (now properly extracted from new tracking)
         trucks: Dict,  # Active trucks
         train_queue: Any,  # Train queue with scheduled arrivals
         truck_queue: Any,  # Truck queue with scheduled arrivals
@@ -64,6 +64,7 @@ class TemporalStateEnhancement:
         departures_2h = 0
         departures_4h = 0
         
+        # Count departures from all trains (properly handling new structure)
         for train in trains.values():
             if hasattr(train, 'departure_time') and train.departure_time:
                 time_until = (train.departure_time - current_datetime).total_seconds() / 3600.0
@@ -101,6 +102,9 @@ class TemporalStateEnhancement:
         features[17] = len(trucks) / 30.0  # Active trucks normalized
         
         # Schedule density (how busy is the upcoming period)
+        # Need to recount since we might have different train counts
+        total_trains = len(trains)
+        total_trucks = len(trucks)
         total_events_4h = train_arrivals + truck_arrivals + departures_1h + departures_2h
         features[18] = min(total_events_4h / 20.0, 1.0)
         
@@ -128,6 +132,7 @@ class TemporalStateEnhancement:
 class MoveEvaluator:
     """
     Evaluates the urgency and value of moves based on terminal state.
+    Updated to work with new BooleanLogistics train tracking.
     """
     
     def __init__(self):
@@ -142,13 +147,14 @@ class MoveEvaluator:
         self,
         move: Dict[str, Any],
         current_datetime: datetime,
-        trains: Dict,
+        trains: Dict,  # Now contains train_id -> train mapping
         trucks: Dict,
         container_pickup_schedules: Dict[str, datetime],
         logistics: Any
     ) -> Tuple[float, float]:
         """
-        Evaluate move urgency and value.
+        Evaluate move urgency and value with departure awareness.
+        Updated to handle new train tracking system.
         
         Returns:
             (urgency_score, value_score)
@@ -158,63 +164,230 @@ class MoveEvaluator:
         
         container_id = move.get('container_id')
         move_type = move.get('move_type')
+        source_type = move.get('source_type')
+        dest_type = move.get('dest_type')
         
-        # 1. Train departure urgency
-        if move['dest_type'] == 'train':
-            railtrack_id, wagon_idx = move['dest_pos']
-            if railtrack_id in trains:
-                train = trains[railtrack_id]
-                if hasattr(train, 'departure_time') and train.departure_time:
-                    hours_until = (train.departure_time - current_datetime).total_seconds() / 3600.0
-                    if hours_until < 1:
-                        urgency += self.urgency_weights['train_departure'] * 2.0
-                        value += 20.0
-                    elif hours_until < 2:
-                        urgency += self.urgency_weights['train_departure']
-                        value += 15.0
-                    elif hours_until < 4:
-                        urgency += self.urgency_weights['train_departure'] * 0.5
-                        value += 10.0
+        # CORE PRINCIPLE: Any move involving vehicles gets high base value
+        if source_type != 'yard' or dest_type != 'yard':
+            # Vehicle involved - high base value
+            value = 30.0
+            urgency = 5.0
+            
+            # 1. Vehicle-to-vehicle transfers (HIGHEST PRIORITY)
+            if source_type != 'yard' and dest_type != 'yard':
+                value = 40.0
+                urgency = 10.0
+                
+                # Check departure urgency for both vehicles
+                if source_type == 'train' and dest_type == 'train':
+                    # NEW: Handle new position format (train_id, wagon_idx)
+                    src_train_id, _ = move['source_pos']
+                    dst_train_id, _ = move['dest_pos']
+                    
+                    # Check source train departure
+                    if src_train_id in trains:
+                        src_train = trains[src_train_id]
+                        if hasattr(src_train, 'departure_time') and src_train.departure_time:
+                            hours_until = (src_train.departure_time - current_datetime).total_seconds() / 3600.0
+                            if hours_until < 1:
+                                urgency += 10.0
+                                value += 10.0
+                    
+                    # Check destination train departure
+                    if dst_train_id in trains:
+                        dst_train = trains[dst_train_id]
+                        if hasattr(dst_train, 'departure_time') and dst_train.departure_time:
+                            hours_until = (dst_train.departure_time - current_datetime).total_seconds() / 3600.0
+                            if hours_until < 1:
+                                urgency += 10.0
+                                value += 10.0
+                                
+            # 2. From yard to vehicle (EXPORTS - HIGH PRIORITY)
+            elif source_type == 'yard' and dest_type in ['train', 'truck']:
+                value = 35.0
+                urgency = 8.0
+                
+                if dest_type == 'train':
+                    # NEW: Handle new position format
+                    train_id, wagon_idx = move['dest_pos']
+                    if train_id in trains:
+                        train = trains[train_id]
+                        
+                        # Check for imminent departure
+                        if hasattr(train, 'departure_time') and train.departure_time:
+                            hours_until = (train.departure_time - current_datetime).total_seconds() / 3600.0
+                            
+                            # CRITICAL URGENCY for trains about to leave
+                            if hours_until < 0.5:  # 30 minutes
+                                urgency = 20.0
+                                value = 50.0
+                            elif hours_until < 1:  # 1 hour
+                                urgency = 15.0
+                                value = 45.0
+                            elif hours_until < 2:  # 2 hours
+                                urgency = 10.0
+                                value = 40.0
+                        
+                        # Extra bonus for fulfilling pickup request
+                        for wagon in train.wagons:
+                            if container_id in wagon.pickup_container_ids:
+                                value += 15.0  # Big bonus for fulfilling request
+                                urgency += 5.0
+                                
+                                # Even more urgent if train leaving soon
+                                if hasattr(train, 'departure_time') and train.departure_time:
+                                    hours_until = (train.departure_time - current_datetime).total_seconds() / 3600.0
+                                    if hours_until < 1:
+                                        urgency += 5.0  # Total urgency could be 25+
+                                        value += 5.0
+                                break
+                                
+                elif dest_type == 'truck':
+                    truck_pos = move['dest_pos']
+                    if truck_pos in trucks:
+                        truck = trucks[truck_pos]
+                        
+                        # Check truck time in terminal
+                        arrival_time = getattr(truck, 'arrival_time', current_datetime)
+                        hours_in_terminal = (current_datetime - arrival_time).total_seconds() / 3600.0
+                        
+                        # Urgency based on time in terminal (trucks forced out after 8 hours)
+                        if hours_in_terminal > 7:  # About to be forced out
+                            urgency = 15.0
+                            value = 40.0
+                        elif hours_in_terminal > 6:
+                            urgency = 10.0
+                            value = 35.0
+                        
+                        # Bonus for fulfilling pickup request
+                        if hasattr(truck, 'pickup_container_ids') and container_id in truck.pickup_container_ids:
+                            value += 10.0  # Fulfilling request bonus
+                            urgency += 3.0
+                            
+                            # More urgent if truck been waiting long
+                            if hours_in_terminal > 4:
+                                urgency += 2.0
+                                
+            # 3. From vehicle to yard (IMPORTS - MEDIUM-HIGH PRIORITY)
+            elif source_type in ['train', 'truck'] and dest_type == 'yard':
+                value = 25.0
+                urgency = 6.0
+                
+                # Urgent if vehicle needs to leave soon
+                if source_type == 'train':
+                    # NEW: Handle new position format
+                    train_id, _ = move['source_pos']
+                    if train_id in trains:
+                        train = trains[train_id]
+                        if hasattr(train, 'departure_time') and train.departure_time:
+                            hours_until = (train.departure_time - current_datetime).total_seconds() / 3600.0
+                            
+                            if hours_until < 0.5:  # 30 minutes
+                                urgency = 18.0  # Very urgent to unload
+                                value = 40.0
+                            elif hours_until < 1:
+                                urgency = 12.0
+                                value = 35.0
+                            elif hours_until < 2:
+                                urgency = 8.0
+                                value = 30.0
+                                
+                elif source_type == 'truck':
+                    truck_pos = move['source_pos']
+                    if truck_pos in trucks:
+                        truck = trucks[truck_pos]
+                        arrival_time = getattr(truck, 'arrival_time', current_datetime)
+                        hours_in_terminal = (current_datetime - arrival_time).total_seconds() / 3600.0
+                        
+                        if hours_in_terminal > 7:  # About to be forced out
+                            urgency = 12.0
+                            value = 35.0
+                        elif hours_in_terminal > 6:
+                            urgency = 8.0
+                            value = 30.0
+                            
+        # 4. Yard to stack (MEDIUM PRIORITY - clearing space)
+        elif move_type == 'yard_to_stack':
+            value = 15.0
+            urgency = 3.0
+            
+            # Higher priority if it's a swap body/trailer that's been sitting
+            if container_id and hasattr(logistics, 'yard_container_index'):
+                # Try to find container info
+                container_pos = logistics.yard_container_index.get(container_id)
+                if container_pos:
+                    row, bay, tier, split = container_pos
+                    try:
+                        container = logistics.yard.get_container_at(row, bay, tier, split)
+                        if container and container.container_type in ['Swap Body', 'Trailer']:
+                            # Check how long it's been in yard
+                            if container.arrival_date:
+                                days_in_yard = (current_datetime - container.arrival_date).days
+                                if days_in_yard > 5:
+                                    urgency = 5.0
+                                    value = 20.0
+                                elif days_in_yard > 3:
+                                    urgency = 4.0
+                                    value = 17.0
+                    except:
+                        pass
+                        
+        # 5. Yard to yard (LOWEST PRIORITY - reshuffling)
+        else:  # yard_to_yard
+            value = 2.0
+            urgency = 1.0
+            
+            # Check if it's an optimization move
+            if self._is_optimization_move(move, container_pickup_schedules, current_datetime):
+                value += 3.0
+                urgency += 1.0
+                
+            # Check if moving to better position for upcoming pickup
+            if container_id in container_pickup_schedules:
+                pickup_time = container_pickup_schedules[container_id]
+                hours_until_pickup = (pickup_time - current_datetime).total_seconds() / 3600.0
+                
+                if 0 < hours_until_pickup < 4:
+                    # Move is preparing for upcoming pickup
+                    dest_pos = move['dest_pos']
+                    if isinstance(dest_pos, tuple) and len(dest_pos) >= 2:
+                        # Handle both yard position formats
+                        if len(dest_pos) == 4:  # (row, bay, tier, split)
+                            _, bay, tier, _ = dest_pos
+                        elif len(dest_pos) == 3:  # (row, bay, tier)
+                            _, bay, tier = dest_pos
+                        else:
+                            bay, tier = 10, 2  # Default middle values
+                            
+                        # Lower tiers are better
+                        if tier == 0:
+                            value += 2.0
+                            urgency += 1.0
+                        # Edge bays are better for access
+                        if bay <= 2 or bay >= 17:
+                            value += 1.0
         
-        # 2. Truck pickup urgency
-        if move['source_type'] == 'yard' and move['dest_type'] == 'truck':
-            truck_pos = move['dest_pos']
-            if truck_pos in trucks:
-                truck = trucks[truck_pos]
-                # Truck is waiting for this container
-                if hasattr(truck, 'pickup_container_ids') and container_id in truck.pickup_container_ids:
-                    urgency += self.urgency_weights['truck_waiting']
-                    value += 15.0
-        
-        # 3. Container pickup schedule
-        if container_id in container_pickup_schedules:
+        # Additional urgency based on container pickup schedule
+        if container_id and container_id in container_pickup_schedules:
             pickup_time = container_pickup_schedules[container_id]
             hours_until_pickup = (pickup_time - current_datetime).total_seconds() / 3600.0
             
             if hours_until_pickup < 0:  # Overdue
-                urgency += self.urgency_weights['pickup_due'] * 2.0
-                value += 5.0  # Lower value because it's late
-            elif hours_until_pickup < 2:
-                urgency += self.urgency_weights['pickup_due']
-                value += 15.0
-            elif hours_until_pickup < 4:
-                urgency += self.urgency_weights['pickup_due'] * 0.5
-                value += 10.0
-        
-        # 4. Vehicle-to-vehicle transfers (high value)
-        if move_type == 'train_to_truck' or move_type == 'truck_to_train':
-            urgency += 5.0
-            value += 20.0
-        
-        # 5. Yard optimization moves (low urgency but still valuable)
-        if move_type == 'yard_to_yard':
-            # Check if this move improves yard organization
-            if self._is_optimization_move(move, container_pickup_schedules, current_datetime):
-                urgency += self.urgency_weights['yard_optimization']
+                urgency += 5.0
                 value += 2.0
-            else:
-                value -= 1.0  # Minimal value for reshuffling
-
+            elif hours_until_pickup < 1:  # Very urgent
+                urgency += 4.0
+                value += 2.0
+            elif hours_until_pickup < 2:
+                urgency += 3.0
+                value += 1.0
+            elif hours_until_pickup < 4:
+                urgency += 1.0
+        
+        # Cap values to prevent overflow
+        urgency = min(urgency, 30.0)
+        value = min(value, 60.0)
+        
         return urgency, value
     
     def _is_optimization_move(
@@ -233,7 +406,11 @@ class MoveEvaluator:
                 # Check if destination is closer to pickup area
                 dest_pos = move['dest_pos']
                 if isinstance(dest_pos, tuple) and len(dest_pos) >= 2:
-                    _, bay, tier, _ = dest_pos
+                    # Handle both formats
+                    if len(dest_pos) >= 4:
+                        _, bay, tier, _ = dest_pos
+                    else:
+                        _, bay, tier = dest_pos[:3]
                     # Lower tiers and edge bays are better for pickup
                     if tier <= 1 or bay <= 2 or bay >= 15:
                         return True
@@ -244,6 +421,7 @@ class MoveEvaluator:
 class ProgressBasedRewardCalculator:
     """
     Calculates rewards based on progress toward daily goals.
+    No changes needed - works with the refactored system.
     """
     
     def __init__(self, distance_weight: float = 0.1):

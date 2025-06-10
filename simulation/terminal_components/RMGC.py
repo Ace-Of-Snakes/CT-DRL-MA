@@ -563,13 +563,22 @@ class RMGC_Controller:
         
         # Remove from source
         if source_type == 'yard':
-            coords = move['source_pos'] if isinstance(move['source_pos'], list) else [move['source_pos']]
+            # Fix: Ensure source_pos is properly formatted
+            if isinstance(move['source_pos'], list):
+                coords = move['source_pos']
+            else:
+                coords = [move['source_pos']]
             container = self.logistics.remove_container_from_yard(coords)
+            
+            # If removal failed, unlock and return
+            if not container:
+                self.unlock_head(head_id)
+                return 0.0, 0.0
         
         elif source_type == 'train':
             train_id, wagon_idx = move['source_pos']
             
-            # Find train by ID
+            # Find train by ID - use logistics tracking
             train = None
             for track_trains in self.logistics.trains_on_track.values():
                 for _, _, t in track_trains:
@@ -590,6 +599,10 @@ class RMGC_Controller:
                     
                     if container:
                         self.logistics._update_train_lookups(train)
+            
+            if not container:
+                self.unlock_head(head_id)
+                return 0.0, 0.0
         
         elif source_type == 'truck':
             truck_pos = move['source_pos']
@@ -603,6 +616,10 @@ class RMGC_Controller:
                 
                 if container:
                     self.logistics._update_truck_lookups(truck, truck_pos)
+            
+            if not container:
+                self.unlock_head(head_id)
+                return 0.0, 0.0
         
         # Add to destination
         success = False
@@ -651,7 +668,7 @@ class RMGC_Controller:
         
         # Calculate physics if successful
         if success:
-            # Get distance from matrix
+            # Get distance from matrix - ensure valid indices
             idx1 = self.position_to_idx.get(source_str)
             idx2 = self.position_to_idx.get(dest_str)
             
@@ -670,6 +687,9 @@ class RMGC_Controller:
             new_coords = self.position_to_coords.get(dest_str, head_pos)
             self.crane_heads[head_id]['position'] = np.array(new_coords)
             self.crane_heads[head_id]['completion_time'] = timeVal
+            
+            # Ensure we unlock the head after time expires
+            self.unlock_head(head_id)
             
             return distance, timeVal
         
@@ -704,17 +724,17 @@ class RMGC_Controller:
     
     def _get_yard_placement_coords(self, container: Container, dest_pos) -> List[Tuple]:
         """Get yard coordinates for container placement."""
-        if isinstance(dest_pos, tuple):
+        if isinstance(dest_pos, list) and len(dest_pos) > 0:
+            # Already a list of coordinates
+            return dest_pos
+        elif isinstance(dest_pos, tuple):
             if len(dest_pos) == 4:
                 placement = dest_pos
                 return self.yard.get_container_coordinates_from_placement(placement, container.container_type)
             elif len(dest_pos) == 3:
                 placement = (dest_pos[0], dest_pos[1], dest_pos[2], 0)
                 return self.yard.get_container_coordinates_from_placement(placement, container.container_type)
-        elif isinstance(dest_pos, list):
-            return dest_pos
-        else:
-            return [dest_pos] if dest_pos else []
+        return []
     
     def get_system_stats(self) -> Dict[str, any]:
         """Get comprehensive system statistics."""
