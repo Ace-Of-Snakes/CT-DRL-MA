@@ -1,39 +1,50 @@
-from typing import Dict, Tuple, List, Optional, Any
-import numpy as np
-import torch
-from collections import defaultdict, deque
+# simulation/terminal_components/ContainerTerminal.py
+
 import gymnasium as gym
 from gymnasium import spaces
+import numpy as np
+import torch
+from typing import Dict, List, Tuple, Optional, Any, Set
 from datetime import datetime, timedelta
+from collections import defaultdict, deque
 import random
-import os
-from simulation.terminal_components.TemporalState import TemporalStateEnhancement, ProgressBasedRewardCalculator, MoveEvaluator
-from simulation.terminal_components.Container import Container, ContainerFactory
+
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
 from simulation.terminal_components.BooleanLogistics import BooleanLogistics
-from simulation.terminal_components.RMGC import RMGC_Controller
+from simulation.terminal_components.Container import Container, ContainerFactory
 from simulation.terminal_components.Train import Train
 from simulation.terminal_components.Truck import Truck
-from simulation.terminal_components.Wagon import Wagon
+from simulation.terminal_components.TemporalState import (
+    TemporalStateEnhancement, 
+    MoveEvaluator, 
+    ProgressBasedRewardCalculator
+)
 from simulation.TerminalConfig import TerminalConfig
-from simulation.kde_sampling_utils import load_kde_model, sample_from_kde, hours_to_time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ContainerTerminal(gym.Env):
     """
-    Optimized container terminal environment for continuous DRL training.
-    Updated to work with refactored Boolean components.
+    Gymnasium environment for container terminal simulation.
+    
+    This environment simulates a container terminal with trains, trucks, and containers
+    moving through the system based on realistic KDE distributions.
     """
+    
+    metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 30}
     
     def __init__(
         self,
-        n_rows: int = 15,
+        n_rows: int = 5,
         n_bays: int = 20,
-        n_tiers: int = 5,
+        n_tiers: int = 4,
         n_railtracks: int = 4,
         split_factor: int = 4,
         max_days: int = 365,
-        time_per_day: float = 86400.0,  # seconds
+        config_path: str = None,
+        seed: int = None,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     ):
         super().__init__()
@@ -45,102 +56,172 @@ class ContainerTerminal(gym.Env):
         self.n_railtracks = n_railtracks
         self.split_factor = split_factor
         self.max_days = max_days
-        self.time_per_day = time_per_day
         self.device = device
         
-        # Initialize components
-        self._init_terminal_components()
+        # Set random seed
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            random.seed(seed)
+        
+        # Load configuration with KDE models
+        self.config = TerminalConfig(config_path)
         
         # Time tracking
-        self.current_time = 0.0
+        self.seconds_per_day = 86400  # 24 hours
+        self.current_time = 0.0  # Seconds since start of current day
         self.current_day = 0
-        self.crane_completion_times = np.zeros(self.rmgc.heads)
+        self.current_datetime = datetime(2025, 1, 1)  # Base date
         
-        # Performance tracking
-        self.daily_metrics = defaultdict(list)
-        self.episode_metrics = defaultdict(float)
+        # Initialize yard with special zones
+        self._init_yard_zones()
         
-        # Reward parameters
-        self.max_distance = self._calculate_max_distance()
+        # Create yard and logistics
+        self.yard = BooleanStorageYard(
+            n_rows=n_rows,
+            n_bays=n_bays,
+            n_tiers=n_tiers,
+            coordinates=self.yard_zones,
+            split_factor=split_factor,
+            device=device,
+            validate=False
+        )
         
-        # Temporal awareness components
-        self.temporal_encoder = TemporalStateEnhancement(self.time_per_day)
+        self.logistics = BooleanLogistics(
+            n_rows=n_rows,
+            n_bays=n_bays,
+            n_railtracks=n_railtracks,
+            split_factor=split_factor,
+            yard=self.yard,
+            validate=False,
+            device=device
+        )
+        
+        # Temporal components
+        self.temporal_encoder = TemporalStateEnhancement(time_per_day=self.seconds_per_day)
+        self.move_evaluator = MoveEvaluator()
         self.reward_calculator = ProgressBasedRewardCalculator(distance_weight=0.1)
         
-        # Daily goals tracking
-        self.daily_goals = {
-            'train_departures': [],
-            'truck_pickups': [],
-            'container_movements': defaultdict(list)
-        }
+        # Container lifecycle tracking
+        self.container_arrival_times = {}  # container_id -> arrival datetime
+        self.container_pickup_schedules = {}  # container_id -> scheduled pickup datetime
+        self.container_destinations = {}  # container_id -> 'train_id' or 'truck_id'
         
-        # Move ranking cache
-        self.ranked_moves_cache = None
-        self.cache_timestamp = -1
+        # Vehicle tracking
+        self.scheduled_trains = []  # List of (arrival_time, train) tuples
+        self.scheduled_trucks = []  # List of (arrival_time, truck) tuples
+        self.active_trains = {}  # train_id -> train object
+        self.active_trucks = {}  # truck_id -> truck object
         
-        # Action and observation spaces
-        self._init_spaces()
+        # Metrics tracking
+        self.episode_metrics = defaultdict(lambda: 0)
+        self.daily_metrics = defaultdict(list)
         
-        # Load KDE models for generation
-        self.kde_models = self._load_kde_models()
+        # Move history
+        self.move_history = deque(maxlen=1000)
+        self.move_log_file = None
         
-        # Container tracking
-        self.container_arrival_times = {}
-        self.container_pickup_schedules = {}
+        # Define action and observation spaces
+        self._define_spaces()
         
-        # Daily generation parameters
-        self.trains_per_day_range = (3, 8)
-        self.trucks_per_day_range = (20, 40)
-        self.containers_per_train_range = (15, 30)
+        # Initialize environment
+        self.reset()
+    
+    def _init_yard_zones(self):
+        """Initialize yard zones for different container types."""
+        self.yard_zones = []
         
-        # Move history tracking
-        self.move_history = []
+        # Reefers on both ends (bays 1-5 and last 5 bays)
+        for row in range(1, 6):
+            for bay in [1, 2, 3, 4, 5]:
+                self.yard_zones.append((bay, row, "r"))
+            for bay in range(self.n_bays - 4, self.n_bays + 1):
+                self.yard_zones.append((bay, row, "r"))
         
-        # Penalty tracking
-        self.penalty_metrics = {
-            'daily_penalties': [],
-            'forced_train_departures': [],
-            'forced_truck_departures': [],
-            'unfulfilled_pickups': [],
-            'undelivered_containers': []
-        }
-
-    def _init_terminal_components(self):
-        """Initialize yard, logistics, and RMGC components."""
-        # Define special storage areas
-        coordinates = []
-        
-        # Reefer areas on ends
-        for row in [1, 2]:
-            for bay in [1, 2, self.n_bays-1, self.n_bays]:
-                coordinates.append((bay, row, "r"))
+        # Swap bodies/trailers nearest to trucks (row 1)
+        for bay in range(1, self.n_bays + 1):
+            self.yard_zones.append((bay, 1, "sb_t"))
         
         # Dangerous goods in middle
-        mid_bay = self.n_bays // 2
-        mid_row = self.n_rows // 2
+        middle_bay = self.n_bays // 2
         for offset in [-1, 0, 1]:
-            coordinates.append((mid_bay + offset, mid_row, "dg"))
-            coordinates.append((mid_bay + offset, mid_row + 1, "dg"))
+            for row in range(3, min(6, self.n_rows + 1)):
+                self.yard_zones.append((middle_bay + offset, row, "dg"))
+    
+    def _define_spaces(self):
+        """Define action and observation spaces."""
+        # Action space: index of move to execute (dynamic size)
+        # We use a large discrete space and mask invalid actions
+        self.action_space = spaces.Discrete(10000)
         
-        # Swap bodies/trailers near trucks (first row)
-        for bay in range(1, min(10, self.n_bays + 1)):
-            coordinates.append((bay, 1, "sb_t"))
+        # Observation space components
+        obs_components = []
         
-        # Initialize yard
+        # Yard state tensors
+        yard_state_size = self.n_rows * self.n_bays * self.n_tiers * self.split_factor * 5
+        obs_components.append(yard_state_size)  # Yard tensor (flattened)
+        
+        # Rail and parking states
+        rail_state_size = self.n_railtracks * self.n_bays * self.split_factor
+        parking_state_size = self.n_bays * self.split_factor
+        obs_components.append(rail_state_size + parking_state_size)
+        
+        # Vehicle properties
+        train_props_size = self.n_railtracks * 3  # trains, containers, pickups per track
+        truck_props_size = parking_state_size * 3  # containers, pickups, weights per spot
+        obs_components.append(train_props_size + truck_props_size)
+        
+        # Queue information
+        obs_components.append(2)  # train queue size, truck queue size
+        
+        # Temporal features
+        obs_components.append(self.temporal_encoder.feature_dim)
+        
+        # Total observation size
+        total_obs_size = sum(obs_components)
+        
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(total_obs_size,),
+            dtype=np.float32
+        )
+    
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        """Reset environment to initial state."""
+        super().reset(seed=seed)
+        
+        # Reset time
+        self.current_time = 0.0
+        self.current_day = 0
+        self.current_datetime = datetime(2025, 1, 1)
+        
+        # Clear tracking
+        self.container_arrival_times.clear()
+        self.container_pickup_schedules.clear()
+        self.container_destinations.clear()
+        self.scheduled_trains.clear()
+        self.scheduled_trucks.clear()
+        self.active_trains.clear()
+        self.active_trucks.clear()
+        self.episode_metrics.clear()
+        self.daily_metrics.clear()
+        self.move_history.clear()
+        
+        # Reset yard and logistics
         self.yard = BooleanStorageYard(
             n_rows=self.n_rows,
             n_bays=self.n_bays,
             n_tiers=self.n_tiers,
-            coordinates=coordinates,
+            coordinates=self.yard_zones,
             split_factor=self.split_factor,
-            validate=False,
-            device=self.device
+            device=self.device,
+            validate=False
         )
         
-        # Initialize logistics WITH n_bays parameter
         self.logistics = BooleanLogistics(
             n_rows=self.n_rows,
-            n_bays=self.n_bays,  # NOW REQUIRED
+            n_bays=self.n_bays,
             n_railtracks=self.n_railtracks,
             split_factor=self.split_factor,
             yard=self.yard,
@@ -148,1103 +229,958 @@ class ContainerTerminal(gym.Env):
             device=self.device
         )
         
-        # Initialize RMGC controller
-        self.rmgc = RMGC_Controller(
-            yard=self.yard,
-            logistics=self.logistics,
-            heads=2
-        )
-    
-    def _init_spaces(self):
-        """Initialize action and observation spaces with temporal features."""
-        # State dimensions
-        yard_state_dim = 5 * self.n_rows * self.n_bays * self.n_tiers * self.split_factor
-        rail_state_dim = self.n_railtracks * self.n_bays * self.split_factor
-        parking_state_dim = 1 * self.n_bays * self.split_factor
-        train_props_dim = self.n_railtracks * 3
-        truck_props_dim = self.n_bays * self.split_factor * 3
-        queue_dim = 2
-        time_dim = 3
-        temporal_dim = self.temporal_encoder.feature_dim
+        # Initialize yard with 30% capacity
+        self._initialize_yard()
         
-        total_state_dim = (yard_state_dim + rail_state_dim + parking_state_dim + 
-                          train_props_dim + truck_props_dim + queue_dim + 
-                          time_dim + temporal_dim)
+        # Generate initial day's schedule
+        self._generate_daily_schedule()
         
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(total_state_dim,),
-            dtype=np.float32
-        )
+        # Place some vehicles immediately for initial moves
+        # Schedule some arrivals at time 0
+        for i in range(min(2, len(self.scheduled_trains))):
+            if self.scheduled_trains[i][0].hour < 6:  # Early morning trains
+                self.scheduled_trains[i] = (self.current_datetime, self.scheduled_trains[i][1])
         
-        # Action space
-        max_moves = 1000
-        self.action_space = spaces.Discrete(max_moves)
-    
-    def _calculate_max_distance(self) -> float:
-        """Calculate maximum possible distance in terminal."""
-        max_x = self.n_bays * 12.192
-        max_y = self.n_rows * 2.44
-        max_z = self.rmgc.max_height
-        return max_x + max_y + max_z
-    
-    def _load_kde_models(self) -> Dict[str, Any]:
-        """Load KDE models from data/models directory."""
-        kde_models = {}
-        model_files = {
-            'train_arrival': 'train_arrival_kde.pkl',
-            'train_delay': 'train_delay_kde.pkl',
-            'truck_pickup': 'truck_pickup_kde.pkl',
-            'pickup_wait': 'pickup_wait_kde.pkl',
-            'container_weight': 'container_weight_kde.pkl'
-        }
+        for i in range(min(4, len(self.scheduled_trucks))):
+            if self.scheduled_trucks[i][0].hour < 6:  # Early morning trucks
+                self.scheduled_trucks[i] = (self.current_datetime, self.scheduled_trucks[i][1])
         
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        models_dir = os.path.join(base_dir, 'data', 'models')
+        # Process initial arrivals
+        self._process_arrivals()
         
-        for model_name, file_name in model_files.items():
-            file_path = os.path.join(models_dir, file_name)
-            try:
-                if os.path.exists(file_path):
-                    kde_models[model_name] = load_kde_model(file_path)
-                else:
-                    kde_models[model_name] = None
-            except Exception as e:
-                print(f"Error loading {model_name}: {e}")
-                kde_models[model_name] = None
-                
-        return kde_models
-    
-    def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
-        """Reset environment for new episode."""
-        super().reset(seed=seed)
-        
-        # Re-initialize components
-        self._init_terminal_components()
-        
-        # Reset time
-        self.current_time = 0.0
-        self.current_day = 0
-        self.crane_completion_times = np.zeros(self.rmgc.heads)
-        
-        # Reset tracking
-        self.container_arrival_times.clear()
-        self.container_pickup_schedules.clear()
-        self.daily_metrics.clear()
-        self.episode_metrics.clear()
-        self.move_history.clear()
-        
-        # Generate initial day
-        self._generate_daily_traffic()
-        
-        # Get initial state
-        state = self._get_state()
+        # Get initial observation
+        obs = self._get_observation()
         info = self._get_info()
         
-        return state, info
+        return obs, info
     
-    def _generate_daily_traffic(self):
-        """
-        CRITICAL: Properly generate daily traffic ensuring moves are always available.
-        Focus on container lifecycle management and proper queue handling.
-        """
-        base_date = datetime(2025, 1, 1) + timedelta(days=self.current_day)
-        current_datetime = base_date
+    def _initialize_yard(self):
+        """Initialize yard with 30% capacity."""
+        target_containers = int(self.n_rows * self.n_bays * self.n_tiers * 0.3)
+        containers_placed = 0
         
-        # First, ensure we have containers in yard if day > 0
-        # containers_in_yard = len(self.logistics.yard_container_index)
+        # Generate variety of container types
+        container_types = ['TWEU', 'THEU', 'FEU', 'FFEU', 'Swap Body', 'Trailer']
+        goods_types = ['Regular', 'Reefer', 'Dangerous']
         
-        if self.current_day == 0:
-            # Initial population or replenishment
-            n_initial = 50 if self.current_day == 0 else 20
-            print(f"Day {self.current_day}: Adding {n_initial} containers to yard")
+        attempts = 0
+        max_attempts = target_containers * 3
+        
+        while containers_placed < target_containers and attempts < max_attempts:
+            attempts += 1
             
-            for i in range(n_initial):
-                container = self._create_container_with_weight(
-                    f"YARD_{self.current_day:03d}_{i:04d}"
-                )
-                container.direction = "Export"
-                container.arrival_date = base_date - timedelta(days=random.randint(1, 3))
-                
-                if self._place_container_in_yard(container):
-                    # Schedule future pickup
-                    pickup_time = self._sample_pickup_time(base_date)
-                    self.container_pickup_schedules[container.container_id] = pickup_time
-        
-        # Sync yard index after initial population
-        self.logistics.sync_yard_index()
-        
-        # Generate trains
-        n_trains = random.randint(*self.trains_per_day_range)
-        train_counter = 0
-        container_counter = 1000
-        
-        # Sample arrival times
-        if self.kde_models.get('train_arrival'):
-            arrival_hours = sample_from_kde(self.kde_models['train_arrival'], n_samples=n_trains)
-        else:
-            arrival_hours = np.random.uniform(0, 24, n_trains)
-        
-        # Create trains
-        for i in range(n_trains):
-            train_id = f"TRN_{self.current_day:03d}_{i:04d}"
+            # Random container properties
+            container_type = random.choice(container_types)
             
-            # Calculate arrival time
-            h, m, s = hours_to_time(arrival_hours[i])
-            arrival_time = base_date.replace(hour=h, minute=m, second=s)
-            
-            # Create train
-            n_wagons = random.randint(2, 4)
-            train = Train(train_id, num_wagons=n_wagons, arrival_time=arrival_time)
-            
-            # Set departure time (4-8 hours after arrival)
-            departure_hours = random.uniform(4, 8)
-            train.departure_time = arrival_time + timedelta(hours=departure_hours)
-            
-            # 50/50 import/export trains
-            if random.random() < 0.5:
-                # IMPORT TRAIN - brings containers
-                n_containers = random.randint(10, 20)
-                containers_added = 0
-                
-                for j in range(n_containers):
-                    container = self._create_container_with_weight(
-                        f"IMP_{self.current_day:03d}_{container_counter:04d}"
-                    )
-                    container_counter += 1
-                    container.direction = "Import"
-                    container.arrival_date = arrival_time
-                    
-                    # Try to add to wagon
-                    wagon_idx = containers_added % len(train.wagons)
-                    if train.wagons[wagon_idx].add_container(container):
-                        containers_added += 1
-                        # Schedule future pickup
-                        pickup_time = self._sample_pickup_time(base_date)
-                        self.container_pickup_schedules[container.container_id] = pickup_time
+            # Match goods type to yard zones
+            if container_type in ['Swap Body', 'Trailer']:
+                goods_type = 'Regular'
+                search_type = 'sb_t'
             else:
-                # EXPORT TRAIN - picks up from yard
-                available_for_train = []
-                
-                # Find unassigned containers in yard
-                for cid in list(self.logistics.yard_container_set):
-                    if (cid not in self.logistics.pickup_to_train and 
-                        cid not in self.logistics.pickup_to_truck):
-                        # Check if container exists and is export
-                        pos = self.logistics.yard_container_index.get(cid)
-                        if pos:
-                            try:
-                                row, bay, tier, split = pos
-                                container = self.yard.get_container_at(row, bay, tier, split)
-                                if container and container.direction == "Export":
-                                    available_for_train.append(cid)
-                            except:
-                                continue
-                
-                # Assign pickups
-                if available_for_train:
-                    n_pickups = min(random.randint(5, 15), len(available_for_train))
-                    selected = random.sample(available_for_train, n_pickups)
-                    
-                    for container_id in selected:
-                        wagon_idx = random.randint(0, len(train.wagons) - 1)
-                        train.wagons[wagon_idx].add_pickup_container(container_id)
+                if random.random() < 0.05:  # 5% dangerous
+                    goods_type = 'Dangerous'
+                    search_type = 'dg'
+                elif random.random() < 0.1:  # 10% reefer
+                    goods_type = 'Reefer'
+                    search_type = 'r'
+                else:
+                    goods_type = 'Regular'
+                    search_type = 'reg'
             
-            # Add train to system
-            if arrival_time <= current_datetime + timedelta(hours=1):
-                # Immediate arrival
-                self.logistics.add_train_to_queue(train)
-            else:
-                # Schedule for later
-                self.logistics.trains.schedule_arrival(train, arrival_time)
+            # Fixed weight sampling
+            weight = None
+            if self.config and 'container_weight' in self.config.kde_models:
+                weight_samples = self.config.sample_from_kde('container_weight', 1, 1000, 31000)
+                if weight_samples is not None and len(weight_samples) > 0:
+                    weight = float(weight_samples[0])
             
-            train_counter += 1
-        
-        # Process train queue immediately
-        trains_placed = self.logistics.process_current_trains()
-        
-        # Generate trucks
-        n_trucks = random.randint(*self.trucks_per_day_range)
-        truck_counter = 0
-        
-        # Sample truck arrival times
-        if self.kde_models.get('truck_pickup'):
-            truck_hours = sample_from_kde(self.kde_models['truck_pickup'], n_samples=n_trucks)
-        else:
-            truck_hours = np.random.uniform(6, 18, n_trucks)
-        
-        for i in range(n_trucks):
-            truck_id = f"TRK_{self.current_day:03d}_{i:03d}"
-            truck = Truck(truck_id)
-            
-            # 30% delivery, 70% pickup
-            if random.random() < 0.3:
-                # DELIVERY TRUCK
-                container = self._create_container_with_weight(
-                    f"DEL_{self.current_day:03d}_{container_counter:04d}"
-                )
-                container_counter += 1
-                container.direction = "Import"
-                
-                if truck.add_container(container):
-                    # Schedule future pickup
-                    pickup_time = self._sample_pickup_time(base_date)
-                    self.container_pickup_schedules[container.container_id] = pickup_time
-            else:
-                # PICKUP TRUCK
-                available_for_truck = []
-                
-                # Find unassigned containers
-                for cid in list(self.logistics.yard_container_set):
-                    if (cid not in self.logistics.pickup_to_truck and 
-                        cid not in self.logistics.pickup_to_train):
-                        # Prioritize containers due for pickup
-                        if cid in self.container_pickup_schedules:
-                            pickup_time = self.container_pickup_schedules[cid]
-                            if pickup_time <= base_date + timedelta(days=1):
-                                available_for_truck.append((0, cid))  # High priority
-                            else:
-                                available_for_truck.append((1, cid))  # Lower priority
-                        else:
-                            available_for_truck.append((2, cid))  # Lowest priority
-                
-                if available_for_truck:
-                    # Sort by priority
-                    available_for_truck.sort()
-                    n_pickups = min(random.randint(1, 3), len(available_for_truck))
-                    
-                    for _, container_id in available_for_truck[:n_pickups]:
-                        truck.add_pickup_container_id(container_id)
-            
-            # Set arrival time
-            h, m, s = hours_to_time(truck_hours[i])
-            arrival_time = base_date.replace(hour=h, minute=m, second=s)
-            truck.arrival_time = arrival_time
-            truck.max_dwell_time = 8.0
-            
-            # Add truck to system
-            if arrival_time <= current_datetime + timedelta(hours=1):
-                # Immediate arrival
-                self.logistics.add_truck_to_queue(truck)
-            else:
-                # Schedule for later
-                self.logistics.trucks.schedule_arrival(truck, arrival_time)
-            
-            truck_counter += 1
-        
-        # Process truck queue immediately
-        trucks_placed = self.logistics.process_current_trucks()
-        
-        # Handle swap bodies/trailers with terminal trucks
-        if self.current_day > 0:
-            sb_trailers = []
-            for cid, pos in self.logistics.yard_container_index.items():
-                row, bay, tier, split = pos
-                try:
-                    container = self.yard.get_container_at(row, bay, tier, split)
-                    if container and container.container_type in ['Swap Body', 'Trailer']:
-                        if container.arrival_date:
-                            days_in_yard = (base_date - container.arrival_date).days
-                            if days_in_yard > 3:
-                                sb_trailers.append(container.container_id)
-                except:
-                    continue
-            
-            # Mark some for removal via terminal trucks
-            if sb_trailers:
-                n_to_remove = min(3, len(sb_trailers))
-                for cid in random.sample(sb_trailers, n_to_remove):
-                    # This will trigger yard_to_stack moves
-                    self.container_pickup_schedules[cid] = base_date + timedelta(hours=1)
-        
-        # Update priorities
-        self._update_container_priorities()
-        
-        # Final sync
-        self.logistics.sync_yard_index()
-        
-        # Ensure moves are available
-        moves = self.logistics.find_moves_optimized()
-        
-        print(f"\nDay {self.current_day} generation complete:")
-        print(f"  Trains: {n_trains} scheduled, {trains_placed} placed")
-        print(f"  Trucks: {n_trucks} scheduled, {trucks_placed} placed")
-        print(f"  Containers in yard: {len(self.logistics.yard_container_index)}")
-        print(f"  Available moves: {len(moves)}")
-        
-        # If no moves available, add emergency vehicles
-        if len(moves) == 0:
-            print("WARNING: No moves available! Adding emergency vehicles...")
-            self._add_emergency_vehicles()
-    
-    def _add_emergency_vehicles(self):
-        """Add emergency vehicles to ensure moves are available."""
-        base_date = datetime(2025, 1, 1) + timedelta(days=self.current_day)
-        
-        # Add pickup truck for any available container
-        if self.logistics.yard_container_set:
-            truck = Truck(f"EMERGENCY_TRK_{self.current_day}")
-            
-            # Pick first available container
-            for cid in list(self.logistics.yard_container_set)[:3]:
-                if (cid not in self.logistics.pickup_to_truck and 
-                    cid not in self.logistics.pickup_to_train):
-                    truck.add_pickup_container_id(cid)
-            
-            if truck.pickup_container_ids:
-                truck.arrival_time = base_date
-                self.logistics.add_truck_to_queue(truck)
-                self.logistics.process_current_trucks()
-        
-        # Add delivery truck with container
-        delivery_truck = Truck(f"EMERGENCY_DEL_{self.current_day}")
-        container = self._create_container_with_weight(f"EMERGENCY_{self.current_day}")
-        container.direction = "Import"
-        
-        if delivery_truck.add_container(container):
-            delivery_truck.arrival_time = base_date
-            self.logistics.add_truck_to_queue(delivery_truck)
-            self.logistics.process_current_trucks()
-        
-        # Sync and check
-        self.logistics.sync_yard_index()
-        moves = self.logistics.find_moves_optimized()
-        print(f"  Emergency vehicles added. Moves now: {len(moves)}")
-    
-    def _create_container_with_weight(self, container_id: str) -> Container:
-        """Create container with weight sampled from KDE."""
-        container = ContainerFactory.create_random(container_id)
-        
-        # Avoid FFEU for now (cross-bay complexity)
-        while container.container_type == "FFEU":
-            container = ContainerFactory.create_random(container_id)
-        
-        # Sample weight
-        if self.kde_models.get('container_weight'):
-            weight = sample_from_kde(
-                self.kde_models['container_weight'], 
-                n_samples=1, 
-                min_val=1000, 
-                max_val=31000
-            )[0]
-            container.weight = float(weight)
-        
-        return container
-    
-    def _sample_pickup_time(self, base_date: datetime) -> datetime:
-        """Sample pickup time using KDE."""
-        if self.kde_models.get('pickup_wait'):
-            wait_hours = sample_from_kde(
-                self.kde_models['pickup_wait'], 
-                n_samples=1, 
-                min_val=0, 
-                max_val=168
-            )[0]
-            
-            wait_days = int(wait_hours // 24)
-            pickup_date = base_date + timedelta(days=wait_days)
-            
-            if self.kde_models.get('truck_pickup'):
-                pickup_hour = sample_from_kde(self.kde_models['truck_pickup'], n_samples=1)[0]
-            else:
-                pickup_hour = random.uniform(6, 18)
-                
-            h, m, s = hours_to_time(pickup_hour)
-            return pickup_date.replace(hour=h, minute=m, second=s)
-        else:
-            days_ahead = random.randint(1, 5)
-            hour = random.randint(6, 18)
-            return base_date + timedelta(days=days_ahead, hours=hour)
-    
-    def _place_container_in_yard(self, container: Container) -> bool:
-        """Place container in appropriate yard location."""
-        goods_type = 'r' if container.goods_type == 'Reefer' else \
-                    'dg' if container.goods_type == 'Dangerous' else \
-                    'sb_t' if container.container_type in ['Trailer', 'Swap Body'] else 'reg'
-        
-        # Try multiple positions
-        for attempt in range(10):
-            bay = random.randint(2, self.n_bays - 3)
-            positions = self.yard.search_insertion_position(
-                bay, goods_type, container.container_type, 3
+            # Create container
+            container_id = f"INIT_{containers_placed:06d}"
+            container = ContainerFactory.create_container(
+                container_id,
+                container_type,
+                direction=random.choice(['Import', 'Export']),
+                goods_type=goods_type,
+                arrival_date=self.current_datetime - timedelta(days=random.randint(0, 5)),
+                weight=weight,
+                config=self.config
             )
+            
+            # Find placement
+            bay = random.randint(0, self.n_bays - 1)
+            positions = self.yard.search_insertion_position(bay, search_type, container_type, max_proximity=5)
             
             if positions:
                 placement = positions[0]
-                coords = self.yard.get_container_coordinates_from_placement(
-                    placement, container.container_type
-                )
+                coords = self.yard.get_container_coordinates_from_placement(placement, container_type)
                 
-                # Validate coordinates
-                valid = True
-                for coord in coords:
-                    r, b, s, t = coord
-                    if not (0 <= r < self.yard.n_rows and 
-                           0 <= b < self.yard.n_bays and 
-                           0 <= s < self.yard.split_factor and 
-                           0 <= t < self.yard.n_tiers):
-                        valid = False
-                        break
-                
-                if valid:
-                    success = self.logistics.add_container_to_yard(container, coords)
-                    if success:
-                        return True
-        
-        return False
-    
-    def _update_container_priorities(self):
-        """Update priorities for all containers based on pickup schedules."""
-        current_date = datetime(2025, 1, 1) + timedelta(
-            days=self.current_day, 
-            seconds=self.current_time
-        )
-        
-        for container_id, pos in self.logistics.yard_container_index.items():
-            row, bay, tier, split = pos
-            try:
-                container = self.yard.get_container_at(row, bay, tier, split)
-                if container:
-                    container.update_priority()
+                try:
+                    self.yard.add_container(container, coords)
+                    self.logistics._update_yard_container_index(container_id, coords[0])
                     
-                    if container.container_id in self.container_pickup_schedules:
-                        pickup_time = self.container_pickup_schedules[container.container_id]
-                        hours_until = (pickup_time - current_date).total_seconds() / 3600
-                        
-                        if hours_until < 0:
-                            container.priority = 1  # Overdue
-                        elif hours_until <= 4:
-                            container.priority = max(1, container.priority - 40)
-                        elif hours_until <= 24:
-                            container.priority = max(1, container.priority - 20)
+                    # Track container
+                    self.container_arrival_times[container_id] = container.arrival_date
                     
-                    self.yard._update_property_arrays(row, bay, tier, split, container)
-            except:
-                continue
+                    # Schedule pickup based on wait time distribution
+                    if self.config and 'pickup_wait' in self.config.kde_models:
+                        wait_samples = self.config.sample_from_kde('pickup_wait', 1, 0, 168)
+                        if wait_samples is not None and len(wait_samples) > 0:
+                            wait_hours = float(wait_samples[0])
+                            pickup_time = self.current_datetime + timedelta(hours=wait_hours)
+                            self.container_pickup_schedules[container_id] = pickup_time
+                    
+                    containers_placed += 1
+                except:
+                    continue
+        
+        # Sync yard index
+        self.logistics.sync_yard_index()
+        logger.info(f"Initialized yard with {containers_placed} containers ({containers_placed/target_containers*100:.1f}% of target)")
     
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Execute action with updated move handling."""
-        # Get and rank moves
-        moves = self.logistics.find_moves_optimized()
-        eligible_moves = self.rmgc.mask_moves(moves)
+    def _generate_daily_schedule(self):
+        """Generate trains and trucks for the current day using KDE distributions."""
+        # Clear previous day's unprocessed schedules
+        self.scheduled_trains = [
+            (time, train) for time, train in self.scheduled_trains 
+            if time.date() >= self.current_datetime.date()
+        ]
+        self.scheduled_trucks = [
+            (time, truck) for time, truck in self.scheduled_trucks 
+            if time.date() >= self.current_datetime.date()
+        ]
         
-        # Rank moves if needed
-        if eligible_moves and self.current_time != self.cache_timestamp:
-            self.ranked_moves_cache = self._rank_moves_by_urgency(eligible_moves)
-            self.cache_timestamp = self.current_time
+        # Generate trains
+        self._generate_trains()
         
-        # Execute action
-        if not eligible_moves:
-            # No moves - wait and check for new arrivals
-            self._advance_time(30.0)
-            reward = -0.1  # Small penalty for waiting
-        else:
-            # Select from available moves
-            move_list = self.ranked_moves_cache or list(eligible_moves.items())
+        # Generate trucks
+        self._generate_trucks()
+        
+        # Sort schedules
+        self.scheduled_trains.sort(key=lambda x: x[0])
+        self.scheduled_trucks.sort(key=lambda x: x[0])
+    
+    def _generate_trains(self):
+        """Generate trains for the day."""
+        trains_per_track = 4  # ~4 trains per track per day
+        
+        for track_id in range(self.n_railtracks):
+            track_trains = []
             
-            if action >= len(move_list):
-                action = action % len(move_list)
-            
-            move_id, move = move_list[action]
-            
-            # Execute move
-            distance, time = self.rmgc.execute_move(move)
-            
-            if time > 0:
-                # Calculate reward
-                current_datetime = datetime(2025, 1, 1) + timedelta(
-                    days=self.current_day,
-                    seconds=self.current_time
+            # Generate arrival times using KDE
+            if self.config and 'train_arrival' in self.config.kde_models:
+                arrival_hours = self.config.sample_from_kde(
+                    'train_arrival', 
+                    n_samples=trains_per_track,
+                    min_val=0,
+                    max_val=24
                 )
-                
-                reward = self.reward_calculator.calculate_reward(
-                    move=move,
-                    distance=distance,
-                    time=time,
-                    current_datetime=current_datetime,
-                    trains={t.train_id: t for t in self.logistics.trains_on_track.values() 
-                            for _, _, t in t},
-                    trucks=self.logistics.active_trucks,
-                    container_pickup_schedules=self.container_pickup_schedules,
-                    logistics=self.logistics
-                )
-                
-                # Schedule crane unlock
-                head_id = self._get_crane_head_for_move(move)
-                if head_id is not None:
-                    self.crane_completion_times[head_id] = self.current_time + time
-                
-                # Advance time
-                self._advance_time(time)
-                
-                # Track metrics
-                self.daily_metrics['moves'].append(move_id)
-                self.daily_metrics['distances'].append(distance)
-                self.daily_metrics['times'].append(time)
-                self.daily_metrics['rewards'].append(reward)
-                
-                # Track move history
-                self.move_history.append({
-                    'day': self.current_day,
-                    'move_id': move_id,
-                    'container_id': move.get('container_id', ''),
-                    'source_type': move.get('source_type', ''),
-                    'source_pos': str(move.get('source_pos', '')),
-                    'dest_type': move.get('dest_type', ''),
-                    'dest_pos': str(move.get('dest_pos', '')),
-                    'move_type': move.get('move_type', ''),
-                    'reward': reward,
-                    'distance': distance,
-                    'time': time
-                })
             else:
-                reward = -1.0  # Failed move
-        
-        # Update crane states
-        self._update_crane_states()
-        
-        # Reorganize logistics
-        departed, penalty = self.logistics.reorganize_logistics()
-        trains_early, trains_late, trucks = departed
-        
-        # Apply penalty and bonuses
-        reward += penalty
-        if trains_early > 0:
-            reward += trains_early * 5.0
-        if trains_late > 0 and penalty == 0:
-            reward -= trains_late * 2.0
-        
-        # Check day end
-        day_ended = self.current_time >= self.time_per_day
-        if day_ended:
-            self._end_of_day()
-        
-        # Check termination
-        terminated = self.current_day >= self.max_days
-        truncated = False
-        
-        # Get new state and info
-        state = self._get_state()
-        info = self._get_info()
-        
-        # Add ranking info
-        if eligible_moves:
-            info['ranked_move_list'] = [m[0] for m in (self.ranked_moves_cache or [])]
-        
-        return state, reward, terminated, truncated, info
+                # Fallback: uniform distribution
+                arrival_hours = np.random.uniform(0, 24, trains_per_track)
+            
+            # Sort arrival times
+            arrival_hours.sort()
+            
+            for i, arrival_hour in enumerate(arrival_hours):
+                # Create arrival datetime
+                arrival_time = self.current_datetime.replace(
+                    hour=int(arrival_hour),
+                    minute=int((arrival_hour % 1) * 60),
+                    second=0,
+                    microsecond=0
+                )
+                
+                # Stay duration: 4-6 hours (normal distribution)
+                stay_hours = np.random.normal(5, 0.5)
+                stay_hours = np.clip(stay_hours, 4, 6)
+                departure_time = arrival_time + timedelta(hours=stay_hours)
+                
+                # Check for overlaps and determine wagon count
+                max_wagons = self._calculate_max_wagons(track_id, arrival_time, departure_time, track_trains)
+                
+                if max_wagons < 3:  # Need at least 3 wagons (changed from 2)
+                    continue
+                
+                # Create train - ensure valid range for randint
+                num_wagons = random.randint(3, max(3, min(10, max_wagons)))  # Fixed logic
+                train_id = f"TRN_{self.current_day:03d}_{track_id:02d}_{i:02d}"
+                
+                train = Train(
+                    train_id=train_id,
+                    num_wagons=num_wagons,
+                    wagon_length=24.384,
+                    arrival_time=arrival_time,
+                    departure_time=departure_time
+                )
+                
+                # Add to track schedule
+                track_trains.append((arrival_time, departure_time, train))
+                
+                # Generate containers for train
+                self._generate_train_containers(train)
+                
+                # Schedule train
+                self.scheduled_trains.append((arrival_time, train))
     
-    def _rank_moves_by_urgency(self, moves: Dict[str, Dict]) -> List[Tuple[str, Dict]]:
-        """Rank moves by urgency and value."""
-        current_datetime = datetime(2025, 1, 1) + timedelta(
-            days=self.current_day,
-            seconds=self.current_time
-        )
+    def _calculate_max_wagons(self, track_id: int, arrival: datetime, departure: datetime, 
+                             track_trains: List[Tuple[datetime, datetime, Any]]) -> int:
+        """Calculate maximum wagons for a train given track constraints."""
+        track_length = self.n_bays * self.split_factor
+        wagon_length = self.logistics.wagon_length  # From BooleanLogistics
+        head_length = self.logistics.train_head_length
         
-        # Get all trains from new tracking system
-        all_trains = {}
-        for track_trains in self.logistics.trains_on_track.values():
-            for _, _, train in track_trains:
-                all_trains[train.train_id] = train
+        # Find overlapping trains
+        overlapping_trains = []
+        for arr, dep, train in track_trains:
+            if not (departure <= arr or arrival >= dep):  # Overlap exists
+                overlapping_trains.append(train)
         
-        move_scores = []
+        if not overlapping_trains:
+            # No overlap - can use 70%+ of track
+            max_positions = int(track_length * 0.8)
+            return (max_positions - head_length) // wagon_length
+        else:
+            # Must share track
+            total_heads = len(overlapping_trains) + 1
+            total_head_space = total_heads * head_length
+            available_space = track_length - total_head_space
+            
+            # Divide space fairly
+            space_per_train = available_space // total_heads
+            return max(0, space_per_train // wagon_length)
+    
+    def _generate_train_containers(self, train: Train):
+        """Generate containers for a train's wagons."""
+        for wagon_idx, wagon in enumerate(train.wagons):
+            if random.random() < 0.5:  # Import containers
+                # Generate realistic container combinations
+                combo_type = random.choice(['4tweu', 'feu_2tweu', 'theu_ffeu', 'mixed'])
+                
+                if combo_type == '4tweu':
+                    # 4 TWEUs
+                    for _ in range(4):
+                        container = self._create_import_container(source='train', force_type='TWEU')
+                        if not wagon.add_container(container):
+                            break
+                        self.container_arrival_times[container.container_id] = train.arrival_time
+                        
+                elif combo_type == 'feu_2tweu':
+                    # 1 FEU + 2 TWEUs
+                    container = self._create_import_container(source='train', force_type='FEU')
+                    wagon.add_container(container)
+                    self.container_arrival_times[container.container_id] = train.arrival_time
+                    
+                    for _ in range(2):
+                        container = self._create_import_container(source='train', force_type='TWEU')
+                        if not wagon.add_container(container):
+                            break
+                        self.container_arrival_times[container.container_id] = train.arrival_time
+                        
+                elif combo_type == 'theu_ffeu':
+                    # 1 THEU + 1 FFEU
+                    container = self._create_import_container(source='train', force_type='THEU')
+                    wagon.add_container(container)
+                    self.container_arrival_times[container.container_id] = train.arrival_time
+                    
+                    container = self._create_import_container(source='train', force_type='FFEU')
+                    wagon.add_container(container)
+                    self.container_arrival_times[container.container_id] = train.arrival_time
+                    
+                else:  # mixed
+                    # Random realistic mix
+                    remaining_length = 23.0
+                    while remaining_length > 6.0:  # Minimum container length
+                        if remaining_length >= 12.19:
+                            container_type = random.choice(['TWEU', 'FEU', 'THEU'])
+                        else:
+                            container_type = 'TWEU'
+                        
+                        container = self._create_import_container(source='train', force_type=container_type)
+                        if wagon.add_container(container):
+                            self.container_arrival_times[container.container_id] = train.arrival_time
+                            # Update remaining length
+                            if container_type == 'TWEU':
+                                remaining_length -= 6.06
+                            elif container_type == 'FEU':
+                                remaining_length -= 12.19
+                            elif container_type == 'THEU':
+                                remaining_length -= 9.14
+                        else:
+                            break
+    
+    def _generate_trucks(self):
+        """Generate trucks for the day."""
+        # Number of trucks based on terminal capacity
+        num_trucks = int(self.n_bays * 2)  # ~2 trucks per bay per day
         
-        for move_id, move in moves.items():
-            urgency, value = self.reward_calculator.move_evaluator.evaluate_move_urgency(
-                move=move,
-                current_datetime=current_datetime,
-                trains=all_trains,
-                trucks=self.logistics.active_trucks,
-                container_pickup_schedules=self.container_pickup_schedules,
-                logistics=self.logistics
+        # Generate arrival times using KDE
+        if 'truck_pickup' in self.config.kde_models:
+            arrival_hours = self.config.sample_from_kde(
+                'truck_pickup',
+                n_samples=num_trucks,
+                min_val=0,
+                max_val=24
+            )
+        else:
+            # Fallback: concentrated during business hours
+            arrival_hours = np.random.normal(12, 3, num_trucks) % 24
+        
+        # Get train schedule for coordination
+        train_times = [(t[0].hour + t[0].minute/60, t[1]) for t in self.scheduled_trains]
+        
+        for i, arrival_hour in enumerate(arrival_hours):
+            # Create arrival datetime
+            arrival_time = self.current_datetime.replace(
+                hour=int(arrival_hour),
+                minute=int((arrival_hour % 1) * 60),
+                second=0,
+                microsecond=0
             )
             
-            # Estimate distance
-            try:
-                source_str = self.rmgc._position_to_string(move['source_pos'])
-                dest_str = self.rmgc._position_to_string(move['dest_pos'])
-                
-                idx1 = self.rmgc.position_to_idx.get(source_str)
-                idx2 = self.rmgc.position_to_idx.get(dest_str)
-                
-                if idx1 is not None and idx2 is not None:
-                    distance = self.rmgc.distance_matrix[idx1, idx2]
-                else:
-                    distance = 50.0
-            except:
-                distance = 50.0
+            # Create truck
+            truck_id = f"TRK_{self.current_day:03d}_{i:04d}"
+            truck = Truck(
+                truck_id=truck_id,
+                arrival_time=arrival_time
+            )
             
-            score = (urgency + 1.0) * value - (distance * 0.01)
-            move_scores.append((score, distance, move_id, move))
-        
-        # Sort by score desc, distance asc
-        move_scores.sort(key=lambda x: (-x[0], x[1]))
-        
-        return [(item[2], item[3]) for item in move_scores]
+            # Check if arrival matches train time (within 1 hour)
+            near_train = any(
+                abs(arrival_hour - train_hour) < 1.0 
+                for train_hour, _ in train_times
+            )
+            
+            # 50/50 import/export, higher train connection chance if near train
+            if random.random() < 0.5:  # Import
+                container = self._create_import_container(source='truck')
+                truck.add_container(container)
+                self.container_arrival_times[container.container_id] = arrival_time
+            else:  # Export
+                if near_train and random.random() < 0.7:  # 70% chance to connect with train
+                    # Find train container to relay
+                    matching_train = self._find_matching_train(arrival_hour, train_times)
+                    if matching_train:
+                        train = matching_train[1]
+                        # Pick container from train's imports
+                        train_containers = [c.container_id for wagon in train.wagons for c in wagon.containers]
+                        if train_containers:
+                            container_id = random.choice(train_containers)
+                            truck.add_pickup_container_id(container_id)
+                            self.container_destinations[container_id] = truck_id
+                else:
+                    # Regular yard pickup
+                    yard_container = self._find_suitable_yard_container()
+                    if yard_container:
+                        truck.add_pickup_container_id(yard_container)
+                        self.container_destinations[yard_container] = truck_id
+            
+            # Schedule truck
+            self.scheduled_trucks.append((arrival_time, truck))
     
+    def _get_high_priority_containers(self, limit: int) -> List[str]:
+        """Get high-priority containers from yard based on wait time."""
+        priority_list = []
+        
+        for container_id, arrival_time in self.container_arrival_times.items():
+            if container_id in self.logistics.yard_container_index:
+                days_waiting = (self.current_datetime - arrival_time).days
+                priority = days_waiting
+                
+                # Add bonus for scheduled pickups
+                if container_id in self.container_pickup_schedules:
+                    if self.container_pickup_schedules[container_id] <= self.current_datetime:
+                        priority += 10  # Overdue
+                    elif self.container_pickup_schedules[container_id] <= self.current_datetime + timedelta(days=1):
+                        priority += 5  # Due soon
+                
+                priority_list.append((priority, container_id))
+        
+        # Sort by priority (highest first) and return top N
+        priority_list.sort(reverse=True, key=lambda x: x[0])
+        return [cid for _, cid in priority_list[:limit]]
+    
+    def _create_import_container(self, source: str, force_type: str = None) -> Container:
+        """Create an import container with appropriate properties."""
+        if force_type:
+            container_type = force_type
+        else:
+            container_types = ['TWEU', 'THEU', 'FEU', 'FFEU']
+            weights = [0.18, 0.02, 0.52, 0.01]
+            container_type = np.random.choice(container_types, p=weights/np.sum(weights))
+        
+        # Determine goods type
+        if random.random() < 0.02:
+            goods_type = 'Dangerous'
+        elif random.random() < 0.01:
+            goods_type = 'Reefer'
+        else:
+            goods_type = 'Regular'
+        
+        container_id = f"{source.upper()}_{self.current_day:03d}_{random.randint(0, 9999):04d}"
+        
+        # Fixed KDE sampling for weight
+        weight = None
+        if self.config and 'container_weight' in self.config.kde_models:
+            weight_samples = self.config.sample_from_kde('container_weight', 1, 1000, 31000)
+            if weight_samples is not None and len(weight_samples) > 0:
+                weight = float(weight_samples[0])
+        
+        return ContainerFactory.create_container(
+            container_id=container_id,
+            container_type=container_type,
+            direction='Import',
+            goods_type=goods_type,
+            arrival_date=self.current_datetime,
+            weight=weight,
+            config=self.config
+        )
+    
+    def _find_suitable_yard_container(self) -> Optional[str]:
+        """Find a suitable container in yard for export."""
+        export_containers = []
+        
+        for container_id in self.logistics.yard_container_index:
+            if container_id not in self.container_destinations:
+                # Check if it's an export container
+                pos = self.logistics.yard_container_index[container_id]
+                row, bay, tier, split = pos
+                
+                try:
+                    container = self.yard.get_container_at(row, bay, tier, split)
+                    if container and container.direction == 'Export':
+                        export_containers.append(container_id)
+                except:
+                    continue
+        
+        return random.choice(export_containers) if export_containers else None
+    
+    def _find_matching_train(self, truck_hour: float, train_times: List[Tuple[float, Any]]) -> Optional[Tuple[float, Any]]:
+        """Find train arriving near truck time."""
+        for train_hour, train in train_times:
+            if abs(truck_hour - train_hour) < 1.0:
+                return (train_hour, train)
+        return None
+    
+    # In ContainerTerminal._process_arrivals:
+    def _process_arrivals(self):
+        """Process vehicle arrivals up to current time."""
+        current_dt = self.current_datetime + timedelta(seconds=self.current_time)
+        
+        # Process train arrivals
+        trains_arrived = 0
+        while self.scheduled_trains and self.scheduled_trains[0][0] <= current_dt:
+            arrival_time, train = self.scheduled_trains.pop(0)
+            self.logistics.add_train_to_queue(train)
+            trains_arrived += 1
+        
+        # Process truck arrivals  
+        trucks_arrived = 0
+        while self.scheduled_trucks and self.scheduled_trucks[0][0] <= current_dt:
+            arrival_time, truck = self.scheduled_trucks.pop(0)
+            self.logistics.add_truck_to_queue(truck)
+            trucks_arrived += 1
+        
+        # Process queues to place vehicles
+        trains_placed = self.logistics.process_current_trains()
+        trucks_placed = self.logistics.process_current_trucks()
+        
+        # CRITICAL: Assign pickups AFTER placement
+        if trains_placed > 0 or trucks_placed > 0:
+            # Get available containers for export
+            available_containers = [
+                cid for cid in self.logistics.yard_container_index.keys()
+                if cid not in self.container_destinations
+            ]
+            
+            # Assign pickups to ALL placed trains (not just empty ones)
+            for track_id, track_trains in self.logistics.trains_on_track.items():
+                for dep_time, pos_range, train in track_trains:
+                    # Update active trains
+                    self.active_trains[train.train_id] = train
+                    
+                    # Check each wagon for available capacity
+                    for wagon_idx, wagon in enumerate(train.wagons):
+                        # Calculate wagon's available capacity
+                        wagon_capacity = 2  # Typical wagon can handle 2 FEU or equivalent
+                        current_load = len(wagon.containers) + len(wagon.pickup_container_ids)
+                        
+                        # Assign pickups if wagon has capacity
+                        if current_load < wagon_capacity and available_containers:
+                            num_pickups = min(wagon_capacity - current_load, len(available_containers))
+                            for _ in range(num_pickups):
+                                container_id = available_containers.pop(random.randint(0, len(available_containers)-1))
+                                wagon.add_pickup_container(container_id)
+                                self.container_destinations[container_id] = train.train_id
+                                self.logistics.pickup_to_train[container_id] = (train.train_id, wagon_idx)
+            
+            # Assign pickups to ALL placed trucks (not just empty ones)
+            for pos, truck in self.logistics.active_trucks.items():
+                # Update active trucks
+                self.active_trucks[truck.truck_id] = truck
+                
+                # Trucks typically handle 1 container at a time
+                # Check if truck has capacity for pickup
+                has_pickups = len(getattr(truck, 'pickup_container_ids', set())) > 0
+                has_containers = len(truck.containers) > 0
+                
+                # Truck can either deliver then pickup, or just pickup if empty
+                if not has_pickups and available_containers:
+                    container_id = available_containers.pop(random.randint(0, len(available_containers)-1))
+                    truck.add_pickup_container_id(container_id)
+                    self.container_destinations[container_id] = truck.truck_id
+                    self.logistics.pickup_to_truck[container_id] = pos
+            
+            # Update all lookups
+            for track_trains in self.logistics.trains_on_track.values():
+                for _, _, train in track_trains:
+                    self.logistics._update_train_lookups(train)
+                    
+            for pos, truck in self.logistics.active_trucks.items():
+                self.logistics._update_truck_lookups(truck, pos)
+        
+        if trains_arrived > 0 or trucks_arrived > 0 or trains_placed > 0 or trucks_placed > 0:
+            print(f"Arrivals: {trains_arrived} trains, {trucks_arrived} trucks -> "
+                f"Placed: {trains_placed} trains, {trucks_placed} trucks")
+            
+            # Debug: Show pickup assignment results
+            total_train_pickups = sum(
+                len(wagon.pickup_container_ids)
+                for train in self.active_trains.values()
+                for wagon in train.wagons
+            )
+            total_truck_pickups = sum(
+                len(getattr(truck, 'pickup_container_ids', set()))
+                for truck in self.logistics.active_trucks.values()
+            )
+            print(f"  Assigned pickups: {total_train_pickups} to trains, {total_truck_pickups} to trucks")
+    
+    def analyze_available_moves(self) -> Dict[str, int]:
+        """Analyze and categorize available moves."""
+        moves = self.logistics.find_moves_optimized()
+        move_categories = defaultdict(int)
+        
+        for move_id, move_data in moves.items():
+            move_type = f"{move_data['source_type']}_to_{move_data['dest_type']}"
+            move_categories[move_type] += 1
+        
+        return dict(move_categories)
+
+    def debug_vehicle_state(self):
+        """Debug current vehicle state."""
+        print(f"\n=== Vehicle State Debug ===")
+        print(f"Active trains: {len(self.active_trains)}")
+        for train_id, train in self.active_trains.items():
+            containers = sum(len(w.containers) for w in train.wagons)
+            pickups = sum(len(w.pickup_container_ids) for w in train.wagons)
+            print(f"  {train_id}: {containers} containers, {pickups} pickups")
+            # Show wagon details
+            for i, wagon in enumerate(train.wagons):
+                if wagon.containers or wagon.pickup_container_ids:
+                    print(f"    Wagon {i}: {len(wagon.containers)} containers, {len(wagon.pickup_container_ids)} pickups")
+        
+        # Check for buried containers
+        if self.active_trains:
+            buried_count = 0
+            for train in self.active_trains.values():
+                for wagon in train.wagons:
+                    for container_id in wagon.pickup_container_ids:
+                        # Check if container is buried
+                        if container_id in self.logistics.yard_container_index:
+                            pos = self.logistics.yard_container_index[container_id]
+                            row, bay, tier, split = pos
+                            if tier > 0:  # Not on ground level
+                                # Check if accessible
+                                above_empty = True
+                                for check_tier in range(tier + 1, self.yard.n_tiers):
+                                    if self.yard.get_container_at(row, bay, check_tier, split):
+                                        above_empty = False
+                                        break
+                                if not above_empty:
+                                    buried_count += 1
+            
+            if buried_count > 0:
+                print(f"  WARNING: {buried_count} requested containers are buried in yard!")
+
+        print(f"Active trucks: {len(self.logistics.active_trucks)}")
+        for pos, truck in self.logistics.active_trucks.items():
+            print(f"  {truck.truck_id} at {pos}: {len(truck.containers)} containers, "
+                f"{len(getattr(truck, 'pickup_container_ids', set()))} pickups")
+        
+        print(f"Scheduled arrivals: {len(self.scheduled_trains)} trains, {len(self.scheduled_trucks)} trucks")
+        if self.scheduled_trains:
+            next_train_time = self.scheduled_trains[0][0]
+            current_dt = self.current_datetime + timedelta(seconds=self.current_time)
+            print(f"  Next train in: {(next_train_time - current_dt).total_seconds()/3600:.1f} hours")
+        
+        # Check pickup mappings vs actual
+        print(f"Pickup mappings: {len(self.logistics.pickup_to_train)} to trains, "
+            f"{len(self.logistics.pickup_to_truck)} to trucks")
+        
+        # Verify consistency
+        actual_train_pickups = sum(
+            len(wagon.pickup_container_ids) 
+            for train in self.active_trains.values() 
+            for wagon in train.wagons
+        )
+        actual_truck_pickups = sum(
+            len(getattr(truck, 'pickup_container_ids', set()))
+            for truck in self.logistics.active_trucks.values()
+        )
+        print(f"Actual pickups: {actual_train_pickups} on trains, {actual_truck_pickups} on trucks")
+
+    def step(self, action: int):
+        """Execute action and advance simulation."""
+        # Get available moves
+        moves = self.logistics.find_moves_optimized()
+        move_list = list(moves.items())
+        
+        # Validate action
+        if action < 0 or action >= len(move_list):
+            # Invalid action - wait
+            reward = -0.1
+            terminated = False
+            truncated = False
+            info = {'error': 'Invalid action', 'move_count': len(move_list)}
+        else:
+            # Execute move
+            move_id, move_data = move_list[action]
+            
+            # Create RMGC controller if needed (lazy loading)
+            if not hasattr(self, 'rmgc'):
+                from simulation.terminal_components.RMGC import RMGC_Controller
+                self.rmgc = RMGC_Controller(self.yard, self.logistics, heads=2)
+            
+            # Debug print for failed moves
+            if hasattr(self, '_debug') and self._debug:
+                print(f"\nAttempting move: {move_id}")
+                print(f"  Type: {move_data['move_type']}")
+                print(f"  Container: {move_data.get('container_id', 'Unknown')}")
+                print(f"  Route: {move_data['source_type']} -> {move_data['dest_type']}")
+            
+            # Execute move
+            distance, time_taken = self.rmgc.execute_move(move_data)
+            
+            if time_taken > 0:
+                # Successful move
+                current_dt = self.current_datetime + timedelta(seconds=self.current_time)
+                
+                # Calculate reward
+                reward = self.reward_calculator.calculate_reward(
+                    move_data,
+                    distance,
+                    time_taken,
+                    current_dt,
+                    self.active_trains,
+                    self.logistics.active_trucks,
+                    self.container_pickup_schedules,
+                    self.logistics
+                )
+                
+                # Advance time
+                self._advance_time(time_taken)
+                
+                # Log move
+                self._log_move(move_data, distance, time_taken, reward)
+                
+                # Update metrics
+                self.episode_metrics['total_moves'] += 1
+                self.episode_metrics['total_distance'] += distance
+                self.episode_metrics['total_time'] += time_taken
+                self.daily_metrics['distances'].append(distance)
+                self.daily_metrics['rewards'].append(reward)
+                
+                # Sync yard index after successful move
+                self.logistics.sync_yard_index()
+            else:
+                # Failed move
+                reward = -1.0
+                self._advance_time(60)  # Penalty wait
+                
+                if hasattr(self, '_debug') and self._debug:
+                    print(f"  FAILED! Distance: {distance}, Time: {time_taken}")
+            
+            terminated = False
+            truncated = self.current_day >= self.max_days
+        
+        # Get next observation
+        obs = self._get_observation()
+        info = self._get_info()
+        info['move_list'] = moves
+        info['day'] = self.current_day
+        info['time_of_day'] = self.current_time / self.seconds_per_day
+        
+        # Add move breakdown
+        info['move_breakdown'] = self.analyze_available_moves()
+        
+        return obs, reward, terminated, truncated, info
+    
+    # In ContainerTerminal._advance_time:
     def _advance_time(self, seconds: float):
-        """Advance simulation time and process arrivals."""
+        """Advance simulation time and handle day transitions."""
         self.current_time += seconds
         
-        # Update vehicle arrivals
-        current_datetime = datetime(2025, 1, 1) + timedelta(
-            days=self.current_day,
-            seconds=self.current_time
-        )
+        # Update simulation datetime
+        current_dt = self.current_datetime + timedelta(seconds=self.current_time)
+        self.logistics.current_datetime = current_dt  # Pass to logistics
         
-        arrived_trains = self.logistics.trains.update(current_datetime)
-        arrived_trucks = self.logistics.trucks.update(current_datetime)
+        # Check for day transition
+        if self.current_time >= self.seconds_per_day:
+            self._end_of_day()
+            self.current_day += 1
+            self.current_time -= self.seconds_per_day
+            self.current_datetime = self.current_datetime + timedelta(days=1)
+            self._generate_daily_schedule()
         
-        # Process new arrivals
-        if arrived_trains or arrived_trucks:
-            print(f"  Time {self.current_time:.0f}s: {len(arrived_trains)} trains and {len(arrived_trucks)} trucks arrived")
-            trains_placed = self.logistics.process_current_trains()
-            trucks_placed = self.logistics.process_current_trucks()
-            self.logistics.sync_yard_index()
-            print(f"    Placed: {trains_placed} trains, {trucks_placed} trucks")
-    
-    def _update_crane_states(self):
-        """Update crane head states."""
-        for head_id, completion_time in enumerate(self.crane_completion_times):
-            if completion_time > 0 and self.current_time >= completion_time:
-                self.rmgc.unlock_head(head_id)
-                self.crane_completion_times[head_id] = 0.0
-    
-    def _get_crane_head_for_move(self, move: Dict) -> Optional[int]:
-        """Get crane head executing move."""
-        for i, head in enumerate(self.rmgc.crane_heads):
-            if head['busy'] and head['current_move'] == move:
-                return i
-        return None
+        # Process arrivals BEFORE reorganization
+        self._process_arrivals()
+        self._update_container_priorities()
+        
+        # Reorganize logistics
+        departures, penalty = self.logistics.reorganize_logistics()
+        
+        # Track metrics
+        if penalty != 0:
+            self.episode_metrics['total_penalties'] += abs(penalty)
+            self.episode_metrics['forced_departures'] += 1
     
     def _end_of_day(self):
         """Process end of day tasks."""
-        # Calculate statistics
-        if self.daily_metrics['moves']:
-            avg_distance = np.mean(self.daily_metrics['distances'])
-            total_reward = sum(self.daily_metrics['rewards'])
-            
-            self.episode_metrics['total_moves'] += len(self.daily_metrics['moves'])
-            self.episode_metrics['total_reward'] += total_reward
+        # Update daily metrics
+        self.daily_metrics['day_end_containers'] = len(self.logistics.yard_container_index)
+        self.daily_metrics['trains_processed'] = len([t for t in self.active_trains.values() if t.status == 'DEPARTED'])
+        self.daily_metrics['trucks_processed'] = sum(1 for _ in self.logistics.truck_positions)
         
-        # Save move history
-        if hasattr(self, 'move_log_file') and self.move_history:
-            import csv
-            with open(self.move_log_file, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    'day', 'move_id', 'container_id', 'source_type', 'source_pos',
-                    'dest_type', 'dest_pos', 'move_type', 'reward', 'distance', 'time'
-                ])
-                if self.current_day == 0:
-                    writer.writeheader()
-                writer.writerows(self.move_history)
-            self.move_history.clear()
-        
-        # Clear daily metrics
-        self.daily_metrics.clear()
-        
-        # Advance day
-        self.current_day += 1
-        self.current_time = 0.0
-        
-        # Generate new traffic
-        if self.current_day < self.max_days:
-            self._generate_daily_traffic()
+        # Log daily summary
+        logger.info(f"Day {self.current_day} complete: "
+                   f"{self.episode_metrics['total_moves']} moves, "
+                   f"{len(self.logistics.yard_container_index)} containers in yard")
     
-    def _get_state(self) -> np.ndarray:
-        """Get current state with all components."""
-        # Yard state
-        yard_state = self.yard.get_full_state_tensor(flatten=True).cpu().numpy()
+    def _update_container_priorities(self):
+        """Update container priorities based on wait time."""
+        current_dt = self.current_datetime + timedelta(seconds=self.current_time)
         
-        # Rail and parking states
+        for container_id in self.logistics.yard_container_index:
+            if container_id in self.container_arrival_times:
+                # Update priority in container object
+                pos = self.logistics.yard_container_index[container_id]
+                row, bay, tier, split = pos
+                
+                try:
+                    container = self.yard.get_container_at(row, bay, tier, split)
+                    if container:
+                        container.update_priority()
+                except:
+                    continue
+    
+    def _get_observation(self) -> np.ndarray:
+        """Get current state observation."""
+        obs_parts = []
+        
+        # 1. Yard state (flattened)
+        yard_state = self.yard.get_full_state_tensor(flatten=True)
+        obs_parts.append(yard_state.cpu().numpy())
+        
+        # 2. Rail and parking states
         rail_state = self.logistics.get_rail_state_tensor(as_tensor=False).flatten()
         parking_state = self.logistics.get_parking_state_tensor(as_tensor=False).flatten()
+        obs_parts.append(np.concatenate([rail_state, parking_state]))
         
-        # Vehicle properties
+        # 3. Vehicle properties
         train_props = self.logistics.get_train_properties_tensor(as_tensor=False).flatten()
         truck_props = self.logistics.get_truck_properties_tensor(as_tensor=False).flatten()
+        obs_parts.append(np.concatenate([train_props, truck_props]))
         
-        # Queue state
+        # 4. Queue states
         queue_state = self.logistics.get_queue_state_tensor(as_tensor=False)
+        obs_parts.append(queue_state)
         
-        # Time state
-        time_state = np.array([
-            self.current_time / self.time_per_day,
-            self.current_day / self.max_days,
-            (self.time_per_day - self.current_time) / self.time_per_day
-        ], dtype=np.float32)
-        
-        # Temporal features
-        all_trains = {t.train_id: t for track_trains in self.logistics.trains_on_track.values() 
-                      for _, _, t in track_trains}
-        
+        # 5. Temporal features
+        current_dt = self.current_datetime + timedelta(seconds=self.current_time)
         temporal_features = self.temporal_encoder.encode_daily_schedule(
-            current_time=self.current_time,
-            current_day=self.current_day,
-            trains=all_trains,
-            trucks=self.logistics.active_trucks,
-            train_queue=self.logistics.trains,
-            truck_queue=self.logistics.trucks,
-            container_pickup_schedules=self.container_pickup_schedules,
-            container_arrival_times=self.container_arrival_times
+            self.current_time,
+            self.current_day,
+            self.active_trains,
+            self.logistics.active_trucks,
+            self.logistics.trains,
+            self.logistics.trucks,
+            self.container_pickup_schedules,
+            self.container_arrival_times
         )
+        obs_parts.append(temporal_features)
         
-        # Concatenate all
-        state = np.concatenate([
-            yard_state,
-            rail_state,
-            parking_state,
-            train_props,
-            truck_props,
-            queue_state,
-            time_state,
-            temporal_features
-        ])
+        # Concatenate all parts
+        observation = np.concatenate(obs_parts).astype(np.float32)
         
-        return state.astype(np.float32)
+        return observation
     
     def _get_info(self) -> Dict[str, Any]:
-        """Get environment info."""
+        """Get additional information."""
+        current_dt = self.current_datetime + timedelta(seconds=self.current_time)
+        
+        # Get moves and rank them by urgency
         moves = self.logistics.find_moves_optimized()
-        eligible_moves = self.rmgc.mask_moves(moves)
+        ranked_moves = []
         
-        # Count trains
-        total_trains = sum(len(trains) for trains in self.logistics.trains_on_track.values())
+        for move_id, move_data in moves.items():
+            urgency, value = self.move_evaluator.evaluate_move_urgency(
+                move_data,
+                current_dt,
+                self.active_trains,
+                self.logistics.active_trucks,
+                self.container_pickup_schedules,
+                self.logistics
+            )
+            ranked_moves.append((urgency * value, move_id))
         
-        return {
+        ranked_moves.sort(reverse=True)
+        ranked_move_list = [move_id for _, move_id in ranked_moves]
+        
+        info = {
+            'move_list': moves,
+            'ranked_move_list': ranked_move_list,
+            'containers_in_yard': len(self.logistics.yard_container_index),
+            'trains_in_terminal': len(self.active_trains),
+            'trucks_in_terminal': len(self.logistics.active_trucks),
+            'train_queue_size': self.logistics.trains.size(),
+            'truck_queue_size': self.logistics.trucks.size(),
+            'time_of_day': self.current_time / self.seconds_per_day,
+            'day': self.current_day,
+            'metrics': dict(self.episode_metrics)
+        }
+        
+        return info
+    
+    def _log_move(self, move_data: Dict, distance: float, time: float, reward: float):
+        """Log move to history."""
+        move_record = {
             'day': self.current_day,
             'time': self.current_time,
-            'available_moves': len(eligible_moves),
-            'move_list': list(eligible_moves.keys()),
-            'trains_in_terminal': total_trains,
-            'trucks_in_terminal': len(self.logistics.active_trucks),
-            'containers_in_yard': len(self.logistics.yard_container_index),
-            'episode_metrics': dict(self.episode_metrics)
+            'container_id': move_data.get('container_id'),
+            'move_type': move_data.get('move_type'),
+            'source_type': move_data.get('source_type'),
+            'dest_type': move_data.get('dest_type'),
+            'distance': distance,
+            'time': time,
+            'reward': reward
         }
+        
+        self.move_history.append(move_record)
+        
+        # Write to log file if specified
+        if self.move_log_file:
+            import csv
+            with open(self.move_log_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=move_record.keys())
+                if f.tell() == 0:  # Write header if file is empty
+                    writer.writeheader()
+                writer.writerow(move_record)
     
-    def render(self):
-        """Render terminal state."""
-        total_trains = sum(len(trains) for trains in self.logistics.trains_on_track.values())
-        
-        print(f"\n=== Day {self.current_day}, Time: {self.current_time:.0f}s ===")
-        print(f"Trains: {total_trains}, Trucks: {len(self.logistics.active_trucks)}")
-        print(f"Yard containers: {len(self.logistics.yard_container_index)}")
-        print(f"Queues - Trains: {self.logistics.trains.size()}, Trucks: {self.logistics.trucks.size()}")
-        
-        if self.daily_metrics['moves']:
-            print(f"Today's moves: {len(self.daily_metrics['moves'])}")
-            print(f"Avg distance: {np.mean(self.daily_metrics['distances']):.1f}m")
+    def render(self, mode='human'):
+        """Render the environment."""
+        if mode == 'human':
+            print(f"\n=== Day {self.current_day}, Time: {self.current_time/3600:.1f}h ===")
+            print(f"Containers in yard: {len(self.logistics.yard_container_index)}")
+            print(f"Active trains: {len(self.active_trains)}")
+            print(f"Active trucks: {len(self.logistics.active_trucks)}")
+            print(f"Available moves: {len(self.logistics.available_moves_cache)}")
+            print(f"Total moves today: {self.episode_metrics['total_moves']}")
+            print(f"Total penalties: {self.episode_metrics['total_penalties']}")
+            
+        return None
+    
+    def close(self):
+        """Clean up resources."""
+        pass
 
+
+# Update the test section:
 if __name__ == '__main__':
-    """
-    Test container terminal generation and natural processes over 60 days.
-    Monitors container lifecycle, slot filling, and move availability.
-    """
-    import matplotlib.pyplot as plt
-    from collections import defaultdict
-    import pandas as pd
+    print("Testing ContainerTerminal Environment")
+    print("=" * 60)
     
-    print("="*80)
-    print("CONTAINER TERMINAL 60-DAY NATURAL PROCESS TEST")
-    print("="*80)
-    
-    # Create terminal
-    terminal = ContainerTerminal(
-        n_rows=10,
-        n_bays=20,
-        n_tiers=5,
+    # Create environment with debug enabled
+    env = ContainerTerminal(
+        n_rows=5,
+        n_bays=15,
+        n_tiers=4,
         n_railtracks=4,
         split_factor=4,
-        max_days=60
+        max_days=3,
+        seed=42
     )
+    env._debug = True  # Enable debug printing
     
-    # Tracking metrics
-    daily_stats = defaultdict(list)
-    move_distribution = defaultdict(int)
-    container_lifecycle = defaultdict(int)
-    hourly_activity = defaultdict(lambda: defaultdict(int))
-    
-    # Tracking for warnings
-    days_without_moves = 0
-    min_containers = float('inf')
-    max_containers = 0
-    
-    print("\nStarting 60-day simulation...")
-    print("-" * 60)
+    print(f"Environment created")
+    print(f"Observation space: {env.observation_space.shape}")
+    print(f"Action space: {env.action_space.n}")
     
     # Reset environment
-    state, info = terminal.reset()
+    obs, info = env.reset()
+    print(f"\nInitial state:")
+    print(f"Observation shape: {obs.shape}")
+    print(f"Containers in yard: {info['containers_in_yard']}")
+    print(f"Available moves: {len(info['move_list'])}")
     
-    # Run for 60 days
-    for day in range(60):
-        print(f"\nDay {day + 1}:")
+    # Analyze initial moves
+    print("\nInitial move breakdown:")
+    move_breakdown = env.analyze_available_moves()
+    for move_type, count in sorted(move_breakdown.items()):
+        print(f"  {move_type}: {count}")
+    
+    # Check for vehicle moves specifically
+    vehicle_moves = 0
+    moves = info['move_list']
+    for move_id, move_data in moves.items():
+        if move_data['source_type'] in ['train', 'truck'] or move_data['dest_type'] in ['train', 'truck']:
+            vehicle_moves += 1
+            if vehicle_moves <= 5:  # Show first 5 vehicle moves
+                print(f"\nVehicle move example {vehicle_moves}:")
+                print(f"  ID: {move_id}")
+                print(f"  Container: {move_data.get('container_id', 'Unknown')}")
+                print(f"  Type: {move_data['move_type']}")
+                print(f"  Route: {move_data['source_type']} -> {move_data['dest_type']}")
+    
+    print(f"\nTotal vehicle-related moves: {vehicle_moves}/{len(moves)}")
+    
+    # Run a few steps with better action selection
+    print("\nRunning 10 steps with prioritized actions...")
+    total_reward = 0
+    
+    for step in range(1300):
+
+        # Debug every 3 steps
+        if step % 3 == 0:
+            env.debug_vehicle_state()
+
+        # Try to select vehicle-related moves first
+        moves = info.get('move_list', {})
+        move_list = list(moves.items())
         
-        # Daily tracking
-        day_start_containers = len(terminal.logistics.yard_container_index)
-        day_moves = 0
-        move_types_today = defaultdict(int)
-        containers_imported = 0
-        containers_exported = 0
-        trains_processed = 0
-        trucks_processed = 0
+        # Find a vehicle move
+        vehicle_action = None
+        for i, (move_id, move_data) in enumerate(move_list):
+            if move_data['source_type'] in ['train', 'truck'] or move_data['dest_type'] in ['train', 'truck']:
+                vehicle_action = i
+                break
         
-        # Track hourly patterns
-        hourly_moves = defaultdict(int)
+        # Use vehicle move if found, otherwise random
+        if vehicle_action is not None and step < 5:
+            action = vehicle_action
+        else:
+            action = random.randint(0, max(0, len(move_list) - 1)) if move_list else 0
         
-        # Run until day ends
-        while terminal.current_day == day:
-            # Get current hour
-            current_hour = int((terminal.current_time / 3600) % 24)
-            
-            # Get available moves
-            moves = terminal.logistics.find_moves_optimized()
-            eligible_moves = terminal.rmgc.mask_moves(moves)
-            
-            if not eligible_moves:
-                # No moves available - advance time
-                terminal._advance_time(60.0)  # 1 minute
-                
-                # Check if this persists
-                if terminal.current_time > 3600:  # After 1 hour
-                    days_without_moves += 1
-                    print(f"  WARNING: No moves available for extended period!")
-            else:
-                # Categorize available moves
-                for move_id, move in eligible_moves.items():
-                    move_distribution[move['move_type']] += 1
-                
-                # Execute random move (simulating agent)
-                action = random.randint(0, len(eligible_moves) - 1)
-                state, reward, terminated, truncated, info = terminal.step(action)
-                
-                # Track move
-                if terminal.daily_metrics['moves']:
-                    last_move = list(eligible_moves.values())[action]
-                    move_types_today[last_move['move_type']] += 1
-                    hourly_moves[current_hour] += 1
-                    hourly_activity[current_hour][last_move['move_type']] += 1
-                    day_moves += 1
-                    
-                    # Track import/export
-                    if last_move['move_type'] == 'to_yard':
-                        containers_imported += 1
-                        container_lifecycle['imported'] += 1
-                    elif last_move['source_type'] == 'yard' and last_move['dest_type'] != 'yard':
-                        containers_exported += 1
-                        container_lifecycle['exported'] += 1
-            
-            # Count active vehicles periodically
-            if terminal.current_time % 3600 < 60:  # Once per hour
-                trains_in_terminal = sum(len(trains) for trains in terminal.logistics.trains_on_track.values())
-                trucks_in_terminal = len(terminal.logistics.active_trucks)
-                
-                if trains_in_terminal > trains_processed:
-                    trains_processed = trains_in_terminal
-                if trucks_in_terminal > trucks_processed:
-                    trucks_processed = trucks_in_terminal
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
         
-        # End of day statistics
-        day_end_containers = len(terminal.logistics.yard_container_index)
-        container_change = day_end_containers - day_start_containers
+        print(f"\nStep {step + 1}: Action={action}, Reward={reward:.2f}, Time={env.current_time:.2f} "
+              f"Moves available={len(info.get('move_list', {}))}")
         
-        # Update min/max
-        min_containers = min(min_containers, day_end_containers)
-        max_containers = max(max_containers, day_end_containers)
+        # Show move breakdown change
+        if 'move_breakdown' in info:
+            print("  Move types:", ", ".join(f"{k}:{v}" for k, v in info['move_breakdown'].items()))
         
-        # Calculate yard utilization
-        total_slots = terminal.n_rows * terminal.n_bays * terminal.n_tiers
-        utilization = (day_end_containers / total_slots) * 100
-        
-        # Store daily stats
-        daily_stats['day'].append(day + 1)
-        daily_stats['containers_in_yard'].append(day_end_containers)
-        daily_stats['container_change'].append(container_change)
-        daily_stats['total_moves'].append(day_moves)
-        daily_stats['imports'].append(containers_imported)
-        daily_stats['exports'].append(containers_exported)
-        daily_stats['utilization'].append(utilization)
-        daily_stats['trains'].append(trains_processed)
-        daily_stats['trucks'].append(trucks_processed)
-        
-        # Print summary
-        print(f"  Containers: {day_start_containers} → {day_end_containers} ({container_change:+d})")
-        print(f"  Moves: {day_moves} (Import: {containers_imported}, Export: {containers_exported})")
-        print(f"  Vehicles: {trains_processed} trains, {trucks_processed} trucks")
-        print(f"  Yard utilization: {utilization:.1f}%")
-        
-        # Move breakdown
-        if move_types_today:
-            print("  Move types:", end="")
-            for mtype, count in sorted(move_types_today.items()):
-                print(f" {mtype}:{count}", end="")
-            print()
-        
-        # Warnings
-        if day_end_containers < 10:
-            print("  ⚠️  CRITICAL: Very low container count!")
-        elif day_end_containers < 30:
-            print("  ⚠️  WARNING: Low container count")
-        
-        if day_moves < 50:
-            print("  ⚠️  WARNING: Low activity level")
-        
-        if abs(containers_imported - containers_exported) > 20:
-            print("  ⚠️  WARNING: Import/Export imbalance")
+        if terminated or truncated:
+            break
     
-    # Final Analysis
-    print("\n" + "="*80)
-    print("60-DAY SIMULATION ANALYSIS")
-    print("="*80)
-    
-    # Convert to DataFrame for analysis
-    df = pd.DataFrame(daily_stats)
-    
-    print("\nContainer Population Statistics:")
-    print(f"  Average containers in yard: {df['containers_in_yard'].mean():.1f}")
-    print(f"  Min containers: {min_containers}")
-    print(f"  Max containers: {max_containers}")
-    print(f"  Standard deviation: {df['containers_in_yard'].std():.1f}")
-    
-    print("\nActivity Statistics:")
-    print(f"  Total moves: {df['total_moves'].sum()}")
-    print(f"  Average moves per day: {df['total_moves'].mean():.1f}")
-    print(f"  Total imports: {df['imports'].sum()}")
-    print(f"  Total exports: {df['exports'].sum()}")
-    print(f"  Import/Export ratio: {df['imports'].sum() / max(1, df['exports'].sum()):.2f}")
-    
-    print("\nMove Type Distribution:")
-    total_moves = sum(move_distribution.values())
-    for move_type, count in sorted(move_distribution.items(), key=lambda x: x[1], reverse=True):
-        percentage = (count / total_moves) * 100
-        print(f"  {move_type}: {count} ({percentage:.1f}%)")
-    
-    print("\nYard Utilization:")
-    print(f"  Average utilization: {df['utilization'].mean():.1f}%")
-    print(f"  Min utilization: {df['utilization'].min():.1f}%")
-    print(f"  Max utilization: {df['utilization'].max():.1f}%")
-    
-    print("\nNatural Process Health:")
-    # Check if system is self-sustaining
-    if days_without_moves > 0:
-        print(f"  ❌ System had {days_without_moves} days with move shortages")
-    else:
-        print(f"  ✅ System maintained continuous operations")
-    
-    # Check container stability
-    container_variance = df['containers_in_yard'].std() / df['containers_in_yard'].mean()
-    if container_variance < 0.3:
-        print(f"  ✅ Container population stable (CV: {container_variance:.2f})")
-    else:
-        print(f"  ⚠️  Container population unstable (CV: {container_variance:.2f})")
-    
-    # Check import/export balance
-    total_imports = df['imports'].sum()
-    total_exports = df['exports'].sum()
-    imbalance = abs(total_imports - total_exports) / max(total_imports, total_exports)
-    if imbalance < 0.1:
-        print(f"  ✅ Import/Export well balanced ({imbalance*100:.1f}% difference)")
-    else:
-        print(f"  ⚠️  Import/Export imbalanced ({imbalance*100:.1f}% difference)")
-    
-    # Hourly activity patterns
-    print("\nHourly Activity Patterns:")
-    hourly_totals = {}
-    for hour in range(24):
-        total = sum(hourly_activity[hour].values())
-        hourly_totals[hour] = total
-    
-    peak_hours = sorted(hourly_totals.items(), key=lambda x: x[1], reverse=True)[:3]
-    print(f"  Peak hours: {', '.join([f'{h}:00 ({c} moves)' for h, c in peak_hours])}")
-    
-    # Create visualizations
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle('Container Terminal 60-Day Natural Process Analysis', fontsize=16)
-    
-    # 1. Container population over time
-    axes[0, 0].plot(df['day'], df['containers_in_yard'], 'b-', linewidth=2)
-    axes[0, 0].axhline(y=df['containers_in_yard'].mean(), color='r', linestyle='--', label='Average')
-    axes[0, 0].fill_between(df['day'], min_containers, max_containers, alpha=0.2)
-    axes[0, 0].set_xlabel('Day')
-    axes[0, 0].set_ylabel('Containers in Yard')
-    axes[0, 0].set_title('Container Population')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # 2. Daily moves
-    axes[0, 1].bar(df['day'], df['total_moves'], color='green', alpha=0.7)
-    axes[0, 1].set_xlabel('Day')
-    axes[0, 1].set_ylabel('Number of Moves')
-    axes[0, 1].set_title('Daily Move Activity')
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # 3. Import/Export balance
-    width = 0.35
-    x = np.arange(len(df['day']))
-    axes[0, 2].bar(x - width/2, df['imports'], width, label='Imports', color='blue', alpha=0.7)
-    axes[0, 2].bar(x + width/2, df['exports'], width, label='Exports', color='red', alpha=0.7)
-    axes[0, 2].set_xlabel('Day')
-    axes[0, 2].set_ylabel('Containers')
-    axes[0, 2].set_title('Import/Export Flow')
-    axes[0, 2].legend()
-    axes[0, 2].grid(True, alpha=0.3)
-    
-    # 4. Yard utilization
-    axes[1, 0].plot(df['day'], df['utilization'], 'g-', linewidth=2)
-    axes[1, 0].axhline(y=50, color='orange', linestyle='--', label='50% Target')
-    axes[1, 0].fill_between(df['day'], 0, df['utilization'], alpha=0.3, color='green')
-    axes[1, 0].set_xlabel('Day')
-    axes[1, 0].set_ylabel('Utilization %')
-    axes[1, 0].set_title('Yard Utilization')
-    axes[1, 0].set_ylim(0, 100)
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # 5. Container change rate
-    axes[1, 1].plot(df['day'], df['container_change'], 'purple', linewidth=2)
-    axes[1, 1].axhline(y=0, color='black', linestyle='-', alpha=0.5)
-    positive_changes = df[df['container_change'] > 0]['container_change'].sum()
-    negative_changes = abs(df[df['container_change'] < 0]['container_change'].sum())
-    axes[1, 1].fill_between(df['day'], 0, df['container_change'], 
-                           where=(df['container_change'] >= 0), alpha=0.3, color='green', label=f'+{positive_changes}')
-    axes[1, 1].fill_between(df['day'], 0, df['container_change'], 
-                           where=(df['container_change'] < 0), alpha=0.3, color='red', label=f'-{negative_changes}')
-    axes[1, 1].set_xlabel('Day')
-    axes[1, 1].set_ylabel('Daily Change')
-    axes[1, 1].set_title('Container Population Change')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True, alpha=0.3)
-    
-    # 6. Move type distribution pie chart
-    move_types = list(move_distribution.keys())
-    move_counts = list(move_distribution.values())
-    axes[1, 2].pie(move_counts, labels=move_types, autopct='%1.1f%%', startangle=90)
-    axes[1, 2].set_title('Move Type Distribution')
-    
-    plt.tight_layout()
-    plt.savefig('terminal_60day_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    # Print final verdict
-    print("\n" + "="*80)
-    print("FINAL VERDICT:")
-    if (days_without_moves == 0 and 
-        container_variance < 0.3 and 
-        imbalance < 0.15 and
-        df['containers_in_yard'].min() > 20):
-        print("✅ PASS: Terminal demonstrates healthy natural processes!")
-        print("   The system is self-sustaining without artificial intervention.")
-    else:
-        print("❌ FAIL: Terminal requires artificial intervention to maintain operations.")
-        print("   Natural processes alone are insufficient for stable operation.")
-    
-    print("\nRecommendations:")
-    if days_without_moves > 0:
-        print("  - Adjust import/export ratios to prevent move shortages")
-    if container_variance > 0.3:
-        print("  - Implement better balance between arrivals and departures")
-    if imbalance > 0.15:
-        print("  - Fine-tune vehicle generation to balance import/export flows")
-    if df['containers_in_yard'].min() < 30:
-        print("  - Increase safety buffer of containers in yard")
-    
-    print("="*80)
+    print(f"\nTotal reward: {total_reward:.2f}")
+    print(f"Final metrics: {info['metrics']}")
