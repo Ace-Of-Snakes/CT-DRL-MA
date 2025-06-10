@@ -692,57 +692,48 @@ class ContainerTerminal(gym.Env):
                 if cid not in self.container_destinations
             ]
             
-            # Assign pickups to ALL placed trains (not just empty ones)
+            # Assign pickups to placed trains
             for track_id, track_trains in self.logistics.trains_on_track.items():
                 for dep_time, pos_range, train in track_trains:
                     # Update active trains
                     self.active_trains[train.train_id] = train
                     
-                    # Check each wagon for available capacity
+                    # Assign pickups to wagons
                     for wagon_idx, wagon in enumerate(train.wagons):
-                        # Calculate wagon's available capacity
-                        wagon_capacity = 2  # Typical wagon can handle 2 FEU or equivalent
+                        wagon_capacity = 2  # Typical wagon capacity
                         current_load = len(wagon.containers) + len(wagon.pickup_container_ids)
                         
-                        # Assign pickups if wagon has capacity
                         if current_load < wagon_capacity and available_containers:
                             num_pickups = min(wagon_capacity - current_load, len(available_containers))
                             for _ in range(num_pickups):
                                 container_id = available_containers.pop(random.randint(0, len(available_containers)-1))
                                 wagon.add_pickup_container(container_id)
                                 self.container_destinations[container_id] = train.train_id
-                                self.logistics.pickup_to_train[container_id] = (train.train_id, wagon_idx)
             
-            # Assign pickups to ALL placed trucks (not just empty ones)
+            # Assign pickups to placed trucks
             for pos, truck in self.logistics.active_trucks.items():
-                # Update active trucks
                 self.active_trucks[truck.truck_id] = truck
                 
-                # Trucks typically handle 1 container at a time
-                # Check if truck has capacity for pickup
                 has_pickups = len(getattr(truck, 'pickup_container_ids', set())) > 0
                 has_containers = len(truck.containers) > 0
                 
-                # Truck can either deliver then pickup, or just pickup if empty
                 if not has_pickups and available_containers:
                     container_id = available_containers.pop(random.randint(0, len(available_containers)-1))
                     truck.add_pickup_container_id(container_id)
                     self.container_destinations[container_id] = truck.truck_id
-                    self.logistics.pickup_to_truck[container_id] = pos
             
-            # Update all lookups
-            for track_trains in self.logistics.trains_on_track.values():
-                for _, _, train in track_trains:
-                    self.logistics._update_train_lookups(train)
-                    
-            for pos, truck in self.logistics.active_trucks.items():
-                self.logistics._update_truck_lookups(truck, pos)
+            # CRITICAL FIX: Force sync of all pickup mappings after assignment
+            # This ensures the mappings are correctly populated
+            self.logistics.sync_pickup_mappings()
+            
+            # Clear and rebuild the move cache to reflect new pickups
+            self.logistics.available_moves_cache = self.logistics.find_moves_optimized()
         
         if trains_arrived > 0 or trucks_arrived > 0 or trains_placed > 0 or trucks_placed > 0:
             print(f"Arrivals: {trains_arrived} trains, {trucks_arrived} trucks -> "
                 f"Placed: {trains_placed} trains, {trucks_placed} trucks")
             
-            # Debug: Show pickup assignment results
+            # Debug: Verify mappings are correct
             total_train_pickups = sum(
                 len(wagon.pickup_container_ids)
                 for train in self.active_trains.values()
@@ -753,6 +744,8 @@ class ContainerTerminal(gym.Env):
                 for truck in self.logistics.active_trucks.values()
             )
             print(f"  Assigned pickups: {total_train_pickups} to trains, {total_truck_pickups} to trucks")
+            print(f"  Mapping sizes: {len(self.logistics.pickup_to_train)} train mappings, "
+                f"{len(self.logistics.pickup_to_truck)} truck mappings")
     
     def analyze_available_moves(self) -> Dict[str, int]:
         """Analyze and categorize available moves."""
@@ -935,7 +928,10 @@ class ContainerTerminal(gym.Env):
         self._process_arrivals()
         self._update_container_priorities()
         
-        # Reorganize logistics
+        # CRITICAL: Ensure mappings are synced before reorganization
+        self.logistics.sync_pickup_mappings()
+        
+        # Reorganize logistics (this will also sync mappings internally)
         departures, penalty = self.logistics.reorganize_logistics()
         
         # Track metrics
@@ -1146,7 +1142,7 @@ if __name__ == '__main__':
     print("\nRunning 10 steps with prioritized actions...")
     total_reward = 0
     
-    for step in range(1300):
+    for step in range(10):
 
         # Debug every 3 steps
         if step % 3 == 0:
