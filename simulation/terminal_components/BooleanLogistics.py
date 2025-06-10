@@ -689,7 +689,11 @@ class BooleanLogistics:
         self.process_current_trains()
         self.process_current_trucks()
         
-        # Update move cache
+        # CRITICAL FIX: Synchronize pickup mappings after placing new vehicles
+        # This ensures the mappings reflect the current state of all vehicles
+        self.sync_pickup_mappings()
+        
+        # Update move cache AFTER syncing mappings
         self.available_moves_cache = self.find_moves_optimized()
         
         return np.array([trains_departed_early, trains_departed_late, trucks_departed]), total_penalty
