@@ -45,7 +45,8 @@ class ContainerTerminal(gym.Env):
         max_days: int = 365,
         config_path: str = None,
         seed: int = None,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        validate: bool = False
     ):
         super().__init__()
         
@@ -57,7 +58,8 @@ class ContainerTerminal(gym.Env):
         self.split_factor = split_factor
         self.max_days = max_days
         self.device = device
-        
+        self.validate = validate
+
         # Set random seed
         if seed is not None:
             np.random.seed(seed)
@@ -730,8 +732,9 @@ class ContainerTerminal(gym.Env):
             self.logistics.available_moves_cache = self.logistics.find_moves_optimized()
         
         if trains_arrived > 0 or trucks_arrived > 0 or trains_placed > 0 or trucks_placed > 0:
-            print(f"Arrivals: {trains_arrived} trains, {trucks_arrived} trucks -> "
-                f"Placed: {trains_placed} trains, {trucks_placed} trucks")
+            if self.validate:
+                print(f"Arrivals: {trains_arrived} trains, {trucks_arrived} trucks -> "
+                    f"Placed: {trains_placed} trains, {trucks_placed} trucks")
             
             # Debug: Verify mappings are correct
             total_train_pickups = sum(
@@ -743,10 +746,12 @@ class ContainerTerminal(gym.Env):
                 len(getattr(truck, 'pickup_container_ids', set()))
                 for truck in self.logistics.active_trucks.values()
             )
-            print(f"  Assigned pickups: {total_train_pickups} to trains, {total_truck_pickups} to trucks")
-            print(f"  Mapping sizes: {len(self.logistics.pickup_to_train)} train mappings, "
-                f"{len(self.logistics.pickup_to_truck)} truck mappings")
-    
+
+            if self.validate:
+                print(f"  Assigned pickups: {total_train_pickups} to trains, {total_truck_pickups} to trucks")
+                print(f"  Mapping sizes: {len(self.logistics.pickup_to_train)} train mappings, "
+                    f"{len(self.logistics.pickup_to_truck)} truck mappings")
+        
     def analyze_available_moves(self) -> Dict[str, int]:
         """Analyze and categorize available moves."""
         moves = self.logistics.find_moves_optimized()
@@ -868,7 +873,7 @@ class ContainerTerminal(gym.Env):
                     self.container_pickup_schedules,
                     self.logistics
                 )
-                
+
                 # Advance time
                 self._advance_time(time_taken)
                 
@@ -902,6 +907,8 @@ class ContainerTerminal(gym.Env):
         info['day'] = self.current_day
         info['time_of_day'] = self.current_time / self.seconds_per_day
         
+        if time_taken > 0:
+            info['last_move_time'] = time_taken
         # Add move breakdown
         info['move_breakdown'] = self.analyze_available_moves()
         
