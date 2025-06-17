@@ -907,7 +907,7 @@ class ContainerTerminal(gym.Env):
         info['day'] = self.current_day
         info['time_of_day'] = self.current_time / self.seconds_per_day
         
-        if time_taken > 0:
+        if not(action < 0 or action >= len(move_list)) and time_taken > 0:
             info['last_move_time'] = time_taken
         # Add move breakdown
         info['move_breakdown'] = self.analyze_available_moves()

@@ -30,9 +30,9 @@ class ContinuousAdaptiveTrainer:
         if terminal_config is None:
             terminal_config = {
                 'n_rows': 5,
-                'n_bays': 10,
-                'n_tiers': 3,
-                'n_railtracks': 3,
+                'n_bays': 50,
+                'n_tiers': 5,
+                'n_railtracks': 6,
                 'split_factor': 4,
                 'max_days': 365 * 5  # 5 years of operation
             }
@@ -500,7 +500,7 @@ def main():
         'n_rows': args.rows,
         'n_bays': args.bays,
         'n_tiers': args.tiers,
-        'n_railtracks': 3,
+        'n_railtracks': 6,
         'split_factor': 4,
         'max_days': args.days + 1
     }

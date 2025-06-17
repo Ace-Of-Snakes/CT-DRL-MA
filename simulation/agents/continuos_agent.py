@@ -1,14 +1,16 @@
-import numpy as np
+# agents/continuous_terminal_agent.py - Complete version
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from collections import deque, namedtuple
+import torch.optim as optim
+import numpy as np
 import random
-from typing import Dict, Tuple, List, Optional, Any
 import copy
+from typing import Dict, List, Tuple, Optional, Any
+from collections import deque, namedtuple
+from simulation.agents.base_agent import BaseTransferableAgent, MoveEmbedder
 
-
+# Define Experience tuple
 Experience = namedtuple('Experience', 
     ['state', 'action', 'reward', 'next_state', 'done', 'info', 'td_error', 'day'])
 
@@ -31,9 +33,8 @@ class PrioritizedReplayBuffer:
         self.day_weights = {}  # Maps day -> weight multiplier
         
     def add(self, experience: Experience):
-        """Add experience with initial high priority (with overflow protection)."""
+        """Add experience with initial high priority."""
         # Use reward magnitude to influence initial priority
-        # Clip reward to prevent overflow
         reward_influence = min(abs(experience.reward), 100.0) + 1.0
         
         if self.priorities:
@@ -42,8 +43,7 @@ class PrioritizedReplayBuffer:
             max_priority = 1.0
             
         # Higher priority for experiences with significant rewards
-        # Ensure priority doesn't overflow
-        initial_priority = min(max_priority * reward_influence, 1e6)  # Cap at 1 million
+        initial_priority = min(max_priority * reward_influence, 1e6)
         
         if len(self.buffer) < self.capacity:
             self.buffer.append(experience)
@@ -60,7 +60,7 @@ class PrioritizedReplayBuffer:
         
         # Calculate priorities with stronger recency bias
         priorities = []
-        for exp in self.buffer:
+        for i, exp in enumerate(self.buffer):
             # Base priority from TD error
             td_priority = np.clip(abs(exp.td_error), 0.01, 100.0) ** self.alpha
             
@@ -120,7 +120,7 @@ class PrioritizedReplayBuffer:
         return states, actions, rewards, next_states, dones, infos, indices
     
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        """Update priorities based on combined TD errors and rewards."""
+        """Update priorities based on TD errors."""
         for idx, priority in zip(indices, priorities):
             # Ensure priority is positive and not too small
             priority = max(abs(priority), 1e-6) ** self.alpha
@@ -129,64 +129,47 @@ class PrioritizedReplayBuffer:
     def soft_reset(self, current_day: int):
         """Soft reset: reduce influence of old negative experiences."""
         self.current_day = current_day
-        # This is handled in the sample method with day-based weighting
-
-    def __len__(self):
-        return len(self.buffer)  # or whatever the internal storage is called
-
-class ContinuousTerminalAgent(nn.Module):
-    """
-    DRL agent optimized for continuous terminal operations.
-    Features:
-    - Dueling DQN architecture
-    - Prioritized experience replay
-    - Day-based soft reset mechanism
-    - Action masking for valid moves
-    - Adaptive exploration
-    """
     
-    def __init__(
-        self,
-        state_dim: int,
-        hidden_dims: List[int] = [512, 512, 256],
-        learning_rate: float = 0.0001,
-        gamma: float = 0.99,
-        tau: float = 0.005,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ):
-        super().__init__()
+    def __len__(self):
+        return len(self.buffer)
+
+
+class ContinuousTerminalAgent(BaseTransferableAgent):
+    """Adapted ContinuousTerminalAgent for the transferable training pipeline."""
+    
+    def __init__(self, state_dim: int, 
+                 learning_rate: float = 0.0001,
+                 gamma: float = 0.99,
+                 tau: float = 0.005,
+                 device: str = 'cuda'):
+        super().__init__(state_dim, device)
         
-        self.state_dim = state_dim
-        self.device = device
         self.gamma = gamma
         self.tau = tau
         
-        # Build network architecture
-        self._build_network(hidden_dims)
+        # Build dueling network architecture
+        self._build_network([512, 512, 256])
         
-        # Move to device
-        self.to(device)
-        
-        # Create target network as a deep copy
+        # Create target network
         self.target_net = copy.deepcopy(self)
         self.target_net.eval()
         
-        # Optimizer with gradient clipping
+        # Optimizer
         self.optimizer = optim.AdamW(self.parameters(), lr=learning_rate, weight_decay=0.0001)
         
-        # Experience replay
-        self.replay_buffer = PrioritizedReplayBuffer(capacity=20000)  # Reduced from 100k
+        # Replace memory with prioritized replay buffer
+        self.memory = PrioritizedReplayBuffer(capacity=20000)
         
         # Training parameters
         self.batch_size = 64
         self.update_every = 4
         self.step_count = 0
+        self.current_day = 0
         
-        # Exploration parameters with day-based adaptation
+        # Exploration parameters
         self.epsilon = 1.0
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.05
-        self.current_day = 0
         
         # Performance tracking
         self.training_stats = {
@@ -198,15 +181,16 @@ class ContinuousTerminalAgent(nn.Module):
         
     def _build_network(self, hidden_dims: List[int]):
         """Build dueling DQN architecture."""
-        # Shared feature extractor
         layers = []
         input_dim = self.state_dim
         
-        for i, hidden_dim in enumerate(hidden_dims):
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(0.1))
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(input_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            ])
             input_dim = hidden_dim
             
         self.feature_extractor = nn.Sequential(*layers)
@@ -218,7 +202,7 @@ class ContinuousTerminalAgent(nn.Module):
             nn.Linear(256, 1)
         )
         
-        # Advantage stream
+        # Advantage stream - dynamic size based on moves
         self.advantage_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], 256),
             nn.ReLU(),
@@ -234,137 +218,119 @@ class ContinuousTerminalAgent(nn.Module):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
-                
+    
     def forward(self, state: torch.Tensor, action_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass with dueling architecture and action masking."""
+        """Forward pass with dueling architecture."""
         features = self.feature_extractor(state)
         
-        # Compute value and advantages
         value = self.value_head(features)
         advantages = self.advantage_head(features)
         
-        # Combine into Q-values (dueling formula)
+        # Dueling formula
         q_values = value + advantages - advantages.mean(dim=-1, keepdim=True)
         
-        # Apply action mask if provided
+        # Apply action mask
         if action_mask is not None:
-            # Set invalid actions to large negative value
             q_values = q_values.masked_fill(~action_mask, -1e9)
             
         return q_values
     
-    def select_action(
-        self, 
-        state: np.ndarray, 
-        available_actions: List[int],
-        epsilon: Optional[float] = None,
-        training: bool = True,
-        ranked_actions: List[int] = None  # NEW: Pre-ranked actions by urgency
-    ) -> int:
-        """
-        Select action with preference for high-urgency moves.
-        No waiting when actions are available.
-        """
-        if epsilon is None:
-            epsilon = self.epsilon if training else 0.0
+    def select_action(self, state: torch.Tensor,
+                     available_moves: Dict[str, Dict],
+                     move_embeddings: torch.Tensor,
+                     epsilon: float = 0.0,
+                     ranked_actions: List[int] = None) -> Tuple[int, Dict]:
+        """Select action compatible with new pipeline."""
+        # Convert state to numpy for compatibility
+        if isinstance(state, torch.Tensor):
+            state_np = state.cpu().numpy()
+        else:
+            state_np = state
+            
+        # Get available action indices
+        available_actions = list(range(len(available_moves)))
         
-        # CHANGED: No action = wait. Force selection from available actions
         if not available_actions:
-            return 0  # Default action when truly no moves
+            return 0, {'move_id': 'wait', 'move_data': {'move_type': 'wait'}}
         
-        # Exploration with smart bias
-        if training and random.random() < epsilon:
-            if ranked_actions and random.random() < 0.7:  # 70% chance to explore high-priority moves
-                # Select from top 25% of ranked moves
+        # Use epsilon if not provided
+        if epsilon == 0.0 and self.training:
+            epsilon = self.epsilon
+        
+        # Exploration
+        if self.training and np.random.random() < epsilon:
+            if ranked_actions and np.random.random() < 0.7:
                 top_k = max(1, len(ranked_actions) // 4)
-                return random.choice(ranked_actions[:top_k])
+                action = random.choice(ranked_actions[:top_k])
             else:
-                # Random exploration
-                return random.choice(available_actions)
-        
-        # Exploitation
-        with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            
-            # Create action mask
-            action_mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
-            action_mask[available_actions] = True
-            action_mask = action_mask.unsqueeze(0)
-            
-            # Get Q-values
-            q_values = self.forward(state_tensor, action_mask)
-            
-            # Select best available action
-            valid_q_values = q_values[0, available_actions]
-            best_idx = valid_q_values.argmax().item()
-            
-            # NEW: Apply small bonus to high-urgency moves during learning
-            if training and ranked_actions:
-                # Create urgency bonus based on ranking
-                urgency_bonus = torch.zeros_like(valid_q_values)
-                for i, action in enumerate(available_actions):
-                    if action in ranked_actions[:5]:  # Top 5 urgent moves
-                        rank = ranked_actions.index(action)
-                        urgency_bonus[i] = (5 - rank) * 0.1  # Small bonus
+                action = random.choice(available_actions)
+        else:
+            # Exploitation
+            with torch.no_grad():
+                if not isinstance(state, torch.Tensor):
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                else:
+                    state_tensor = state.unsqueeze(0) if state.dim() == 1 else state
                 
-                # Add bonus and reselect
-                adjusted_q_values = valid_q_values + urgency_bonus
-                best_idx = adjusted_q_values.argmax().item()
-            
-            return available_actions[best_idx]
+                # Create action mask
+                action_mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
+                action_mask[available_actions] = True
+                action_mask = action_mask.unsqueeze(0)
+                
+                # Get Q-values
+                q_values = self.forward(state_tensor, action_mask)
+                
+                # Apply urgency bonus if provided
+                if ranked_actions and self.training:
+                    valid_q_values = q_values[0, available_actions].clone()
+                    for i, act in enumerate(available_actions):
+                        if act in ranked_actions[:5]:
+                            rank = ranked_actions.index(act)
+                            valid_q_values[i] += (5 - rank) * 0.1
+                    best_idx = valid_q_values.argmax().item()
+                    action = available_actions[best_idx]
+                else:
+                    action = available_actions[q_values[0, available_actions].argmax().item()]
+        
+        # Get move info
+        move_list = list(available_moves.items())
+        move_id, move_data = move_list[action]
+        
+        return action, {'move_id': move_id, 'move_data': move_data}
     
-    def store_experience(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-        info: Dict[str, Any]
-    ):
-        """Store experience with enhanced priority for high-reward moves."""
-        # Calculate initial TD error for prioritization
+    def store_transition(self, state, action, reward, next_state, done, info):
+        """Store experience with prioritization."""
+        # Ensure info contains move_list
+        if 'available_moves' in info and 'move_list' not in info:
+            info['move_list'] = list(info['available_moves'].keys())
+        
+        # Calculate TD error for prioritization
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(self.device)
             
             # Current Q-value
-            # print(action)
-            if type(action) == str:
-                action = int(str(action).replace('move_', ''))
             current_q = self.forward(state_tensor)[0, action].item()
             
-            # Next state value (double DQN)
-            move_list = info.get('move_list', [])
-            if move_list and not done:
-                next_actions = list(range(len(move_list)))
-                
-                # Create mask for next state
+            # Next state value
+            next_moves = info.get('available_moves', {})
+            if next_moves and not done:
+                next_actions = list(range(len(next_moves)))
                 next_mask = torch.zeros(1000, dtype=torch.bool, device=self.device)
                 next_mask[next_actions] = True
                 next_mask = next_mask.unsqueeze(0)
                 
-                # Select action using main network
                 next_q_values = self.forward(next_state_tensor, next_mask)
                 next_action = next_q_values.argmax(dim=1).item()
                 
-                # Evaluate using target network
                 target_q_values = self.target_net.forward(next_state_tensor)
                 next_value = target_q_values[0, next_action].item()
             else:
                 next_value = 0.0
             
-            # TD error
             td_error = reward + self.gamma * next_value * (1 - done) - current_q
         
-        # NEW: Boost priority for high-reward experiences
-        priority_boost = 1.0
-        if reward > 10.0:  # High-value move
-            priority_boost = 2.0
-        elif reward > 5.0:  # Good move
-            priority_boost = 1.5
-        
-        # Create experience with boosted TD error
+        # Create experience
         experience = Experience(
             state=state,
             action=action,
@@ -372,26 +338,26 @@ class ContinuousTerminalAgent(nn.Module):
             next_state=next_state,
             done=done,
             info=info,
-            td_error=td_error * priority_boost,
-            day=info.get('day', 0)
+            td_error=td_error,
+            day=info.get('day', self.current_day)
         )
         
-        # Add to buffer
-        self.replay_buffer.add(experience)
-        
-        # Track reward
+        self.memory.add(experience)
         self.training_stats['rewards'].append(reward)
+    
+    def update(self, batch_size: int = 32) -> Dict[str, float]:
+        """Perform training update compatible with pipeline."""
+        if len(self.memory) < batch_size:
+            return {}
         
-    def update(self, current_day=0):
-        """Update Q-network from sampled experiences."""
-        # Only update after sufficient experiences
-        if len(self.replay_buffer.buffer) < self.batch_size:
-            return None
+        # Use the actual batch size from the agent
+        batch_size = self.batch_size
+        
+        # Sample from prioritized replay buffer
+        batch_data = self.memory.sample(batch_size, self.current_day)
+        if batch_data is None:
+            return {}
             
-        # Sample batch - returns a tuple
-        batch_data = self.replay_buffer.sample(self.batch_size, current_day)
-        
-        # Unpack the tuple
         states, actions, rewards, next_states, dones, infos, indices = batch_data
         
         # Convert to tensors
@@ -412,8 +378,7 @@ class ContinuousTerminalAgent(nn.Module):
             
             for i in range(batch_size):
                 if not dones[i]:
-                    # FIX: Convert move_list strings to integer indices
-                    move_list = infos[i].get('move_list', [])
+                    move_list = infos[i].get('available_moves', {})
                     if move_list:
                         next_actions = list(range(len(move_list)))
                         next_masks[i, next_actions] = True
@@ -438,12 +403,12 @@ class ContinuousTerminalAgent(nn.Module):
         torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         self.optimizer.step()
         
-        # Update priorities in replay buffer
+        # Update priorities
         with torch.no_grad():
             td_errors = (targets - current_q_values).squeeze().cpu().numpy()
-            self.replay_buffer.update_priorities(indices, np.abs(td_errors))
+            self.memory.update_priorities(indices, np.abs(td_errors))
         
-        # Update target network periodically
+        # Update target network
         self.step_count += 1
         if self.step_count % self.update_every == 0:
             self._soft_update_target()
@@ -456,61 +421,67 @@ class ContinuousTerminalAgent(nn.Module):
         # Decay epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         
-        return loss.item()
-        
+        return {
+            'loss': loss.item(),
+            'epsilon': self.epsilon,
+            'q_values': current_q_values.mean().item(),
+            'td_error': np.mean(np.abs(td_errors))
+        }
+    
     def _soft_update_target(self):
-        """Soft update target network parameters."""
+        """Soft update target network."""
         for target_param, param in zip(self.target_net.parameters(), self.parameters()):
             target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
-            
+    
     def day_end_update(self, day: int, daily_reward: float):
         """Enhanced day-end update with performance-based exploration adjustment."""
         self.current_day = day
         
         # Soft reset in replay buffer
-        self.replay_buffer.soft_reset(day)
+        self.memory.soft_reset(day)
         
-        # NEW: More aggressive exploration adjustment
+        # Adjust exploration based on performance
         if daily_reward > 100:  # Excellent day
-            # Reduce exploration significantly
             self.epsilon *= 0.95
         elif daily_reward > 50:  # Good day
-            # Reduce exploration moderately
             self.epsilon *= 0.97
         elif daily_reward > 0:  # Positive day
-            # Small reduction
             self.epsilon *= 0.99
         else:  # Bad day
-            # Increase exploration to find better strategies
             self.epsilon = min(self.epsilon * 1.05, 0.4)
         
         # Ensure minimum exploration
         self.epsilon = max(self.epsilon, self.epsilon_min)
         
-        # Extra training at day end with focus on recent experiences
-        for _ in range(20):  # More training iterations
-            self.update(current_day=day)
-            
-    def save(self, filepath: str):
-        """Save agent state."""
+        # Extra training at day end
+        for _ in range(20):
+            self.update()
+    
+    def save(self, path: str):
+        """Save model weights."""
         torch.save({
             'model_state': self.state_dict(),
             'target_state': self.target_net.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
             'epsilon': self.epsilon,
             'current_day': self.current_day,
+            'steps': self.steps,
+            'episodes': self.episodes,
             'training_stats': dict(self.training_stats)
-        }, filepath)
-        
-    def load(self, filepath: str):
-        """Load agent state."""
-        checkpoint = torch.load(filepath, map_location=self.device)
+        }, path)
+    
+    def load(self, path: str):
+        """Load model weights."""
+        checkpoint = torch.load(path, map_location=self.device)
         self.load_state_dict(checkpoint['model_state'])
         self.target_net.load_state_dict(checkpoint['target_state'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        self.epsilon = checkpoint['epsilon']
-        self.current_day = checkpoint['current_day']
+        self.epsilon = checkpoint.get('epsilon', 0.1)
+        self.current_day = checkpoint.get('current_day', 0)
+        self.steps = checkpoint.get('steps', 0)
+        self.episodes = checkpoint.get('episodes', 0)
         
-        # Restore training stats
-        for key, value in checkpoint['training_stats'].items():
-            self.training_stats[key] = deque(value, maxlen=1000)
+        # Restore training stats if available
+        if 'training_stats' in checkpoint:
+            for key, value in checkpoint['training_stats'].items():
+                self.training_stats[key] = deque(value, maxlen=1000)
