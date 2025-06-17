@@ -334,7 +334,7 @@ class MoveEvaluator:
                         
         # 5. Yard to yard (LOWEST PRIORITY - reshuffling)
         else:  # yard_to_yard
-            value = 2.0
+            value = 0.5
             urgency = 1.0
             
             # Check if it's an optimization move

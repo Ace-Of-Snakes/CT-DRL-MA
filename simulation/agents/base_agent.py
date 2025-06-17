@@ -137,6 +137,14 @@ class BaseTransferableAgent(ABC):
         self.steps = 0
         self.episodes = 0
         
+    def store_experience(self, state, action, reward, next_state, done, info):
+        """Store experience with additional move information."""
+        # Ensure info contains move_list for proper Q-value calculation
+        if 'available_moves' in info and 'move_list' not in info:
+            info['move_list'] = list(info['available_moves'].keys())
+        
+        self.memory.append((state, action, reward, next_state, done, info))
+
     @abstractmethod
     def select_action(self, state: torch.Tensor, 
                      available_moves: Dict[str, Dict],
