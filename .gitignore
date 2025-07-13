@@ -201,5 +201,5 @@ precomputed/
 *.csv
 
 # unnecessary folders
-data/*
-deprecated_components/*
+data/
+deprecated_components/
