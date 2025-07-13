@@ -199,3 +199,7 @@ precomputed/
 # random data
 *.json
 *.csv
+
+# unnecessary folders
+data/*
+deprecated_components/*
