@@ -7,7 +7,7 @@ from typing import List, Dict, Tuple
 from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 
 # Import your BooleanStorageYard class
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
 
 class ContainerPlacementStressTest:
     """
@@ -70,7 +70,7 @@ class ContainerPlacementStressTest:
         for bay in range(sb_start, sb_end + 1):
             coordinates.append((bay, 1, "sb_t"))
         
-        from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+        from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
         return BooleanStorageYard(
             n_rows=n_rows,
             n_bays=n_bays,
@@ -636,7 +636,7 @@ def stress_test_ultra_optimized():
 
 def create_test_yard(config):
     """Create a test yard with the given configuration."""
-    from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+    from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
     
     rows, bays, tiers = config['rows'], config['bays'], config['tiers']
     

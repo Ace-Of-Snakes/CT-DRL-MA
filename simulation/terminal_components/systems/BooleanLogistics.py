@@ -4,7 +4,7 @@ from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.storage_units.Wagon import Wagon
 from simulation.terminal_components.vehicles.Vehicle_Queue import VehicleQueue
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
 import numpy as np
 import torch
 from collections import defaultdict, deque
@@ -1007,7 +1007,7 @@ class BooleanLogistics:
 
 if __name__ == '__main__':
     # Test the implementation
-    from simulation.terminal_components.BooleanStorage import BooleanStorageYard
+    from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
     from datetime import datetime, timedelta
     
     print("="*80)

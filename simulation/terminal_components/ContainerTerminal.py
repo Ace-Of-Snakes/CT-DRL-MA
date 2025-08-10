@@ -9,8 +9,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import random
 
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.BooleanLogistics import BooleanLogistics
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
 from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
@@ -845,7 +845,7 @@ class ContainerTerminal(gym.Env):
             
             # Create RMGC controller if needed (lazy loading)
             if not hasattr(self, 'rmgc'):
-                from simulation.terminal_components.RMGC import RMGC_Controller
+                from simulation.terminal_components.systems.RMGC import RMGC_Controller
                 self.rmgc = RMGC_Controller(self.yard, self.logistics, heads=2)
             
             # Debug print for failed moves

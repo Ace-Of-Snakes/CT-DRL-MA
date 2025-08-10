@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.BooleanLogistics import BooleanLogistics
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
 
 class BoolLogisticsStressTest:
     """

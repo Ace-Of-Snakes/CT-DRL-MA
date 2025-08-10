@@ -1,7 +1,7 @@
 from typing import Dict, Tuple, List, Optional, Set
 from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.BooleanLogistics import BooleanLogistics
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
 from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.storage_units.Wagon import Wagon
 from simulation.terminal_components.vehicles.Train import Train

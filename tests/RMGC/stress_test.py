@@ -14,9 +14,9 @@ import threading
 from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.BooleanLogistics import BooleanLogistics
-from simulation.terminal_components.RMGC import RMGC_Controller
+from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
+from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
+from simulation.terminal_components.systems.RMGC import RMGC_Controller
 
 class RMGC_StressTest:
     """
@@ -1033,8 +1033,8 @@ def run_physics_validation():
     print("=" * 60)
     
     # Create minimal RMGC for physics testing
-    from simulation.terminal_components.BooleanStorage import BooleanStorageYard
-    from simulation.terminal_components.BooleanLogistics import BooleanLogistics
+    from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
+    from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
     
     yard = BooleanStorageYard(5, 10, 3, [], 4, False)
     logistics = BooleanLogistics(5, 2, 4, yard, False)
