@@ -71,6 +71,7 @@ class Train:
         # Timing and status
         self.arrival_time = arrival_time
         self.departure_time = departure_time
+        self.realised_departure_time: Optional[datetime] = None
         self.loading_start_time: Optional[datetime] = None
         self.loading_complete_time: Optional[datetime] = None
         self.rail_track = rail_track
@@ -252,7 +253,7 @@ class Train:
     def depart(self, current_time: datetime) -> None:
         if not current_time:
             raise ValueError("current_time must be provided")
-        self.departure_time = current_time
+        self.realised_departure_time = current_time
         self.status = TRAIN_STATUS_DEPARTED
     
     def get_stats(self) -> Dict[str, any]:
@@ -269,5 +270,6 @@ class Train:
             'used_capacity': used_capacity,
             'utilization_rate': used_capacity / total_capacity if total_capacity > 0 else 0,
             'status': self.status,
-            'rail_track': self.rail_track
+            'rail_track': self.rail_track,
+            'departed_on_time': True if self.realised_departure_time < self.departure_time else False
         }
