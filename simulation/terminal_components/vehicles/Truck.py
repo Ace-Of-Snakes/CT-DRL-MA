@@ -55,7 +55,9 @@ class Truck:
                  max_length: float = TRUCK_MAX_LENGTH_STANDARD,
                  containers: Optional[List[Container]] = None,
                  arrival_time: Optional[datetime] = None,
-                 parking_spot: Optional[str] = None):
+                 parking_spot: Optional[str] = None,
+                 prefix: str = TRUCK_ID_PREFIX
+                 ):
         """
         Initialize a new truck.
         
@@ -71,7 +73,7 @@ class Truck:
             raise ValueError(f"max_length must be positive, got {max_length}")
         
         # Core attributes
-        self.truck_id = truck_id or self._generate_truck_id()
+        self.truck_id = truck_id or self._generate_truck_id(prefix)
         self.max_length = max_length
         self.parking_spot = parking_spot
         
@@ -98,10 +100,10 @@ class Truck:
         self.is_delivery_truck = len(self.containers) > 0
     
     @staticmethod
-    def _generate_truck_id() -> str:
+    def _generate_truck_id(prefix: str) -> str:
         """Generate a unique truck ID."""
         random_num = random.randint(TRUCK_ID_MIN_RANDOM, TRUCK_ID_MAX_RANDOM)
-        return f"{TRUCK_ID_PREFIX}{random_num}"
+        return f"{prefix}{random_num}"
     
     def add_container(self, container: Container) -> bool:
         """

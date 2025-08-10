@@ -28,7 +28,7 @@ class Train:
     def __init__(self, 
                  train_id: str = None, 
                  num_wagons: int = 10, 
-                 wagon_length: float = 20.0,
+                 wagon_length: float = 24.4,
                  arrival_time: datetime = None,
                  departure_time: datetime = None,
                  rail_track: str = None):

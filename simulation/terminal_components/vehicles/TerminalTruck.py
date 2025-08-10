@@ -1,101 +1,206 @@
 # simulation/terminal_components/TerminalTruck.py
+
 from datetime import datetime, timedelta
 import random
-from typing import List, Dict, Optional, Tuple, Set
+from typing import Optional, Dict, Any
 from simulation.terminal_components.storage_units.Container import Container
+from simulation.terminal_components.vehicles.Truck import Truck
 
-class TerminalTruck:
+# ==================== TERMINAL TRUCK CONSTANTS ====================
+
+# Physical dimensions (meters)
+TERMINAL_TRUCK_MAX_LENGTH = 24.4  # Specialized length for terminal trucks
+
+# Terminal truck statuses (extends parent truck statuses)
+TERMINAL_TRUCK_STATUS_IDLE = "idle"              # Available for use
+TERMINAL_TRUCK_STATUS_BUSY = "busy"              # Currently performing a task
+
+VALID_TERMINAL_TRUCK_STATUSES = {
+    TERMINAL_TRUCK_STATUS_IDLE,
+    TERMINAL_TRUCK_STATUS_BUSY
+}
+
+# ID generation constants
+TERMINAL_TRUCK_ID_PREFIX = "TTR"
+TERMINAL_TRUCK_ID_MIN_RANDOM = 10000
+TERMINAL_TRUCK_ID_MAX_RANDOM = 99999
+
+# Container type restrictions
+TERMINAL_TRUCK_ALLOWED_TYPES = {"Trailer", "Swap Body"}  # Only these types allowed
+
+# Task time limits (seconds)
+TERMINAL_TRUCK_MIN_TASK_TIME = 0.0
+TERMINAL_TRUCK_MAX_TASK_TIME = 300.0  # 5 minutes max for internal moves
+
+
+class TerminalTruck(Truck):
     """
     Represents a terminal-owned truck for moving containers within the terminal.
     
     These trucks are specialized for moving swap bodies and trailers between
     storage positions, freeing up valuable specialized storage areas.
+    
+    Inherits from Truck but adds terminal-specific functionality and constraints.
     """
     
-    # Possible terminal truck statuses
-    IDLE = "idle"           # Available for use
-    BUSY = "busy"           # Currently performing a task
-    MAINTENANCE = "maint"   # Unavailable due to maintenance
-    
-    def __init__(self, 
-                 truck_id: str = None, 
-                 max_length: float = 15.0,
-                 max_weight: float = 60000):
-        """Initialize a new terminal truck."""
-        self.truck_id = truck_id or f"TTR{random.randint(10000, 99999)}"
-        self.max_length = max_length
-        self.max_weight = max_weight
-        self.containers = []  # List of Container objects currently loaded
-        self.status = self.IDLE
-        self.current_source = None  # Current source position
-        self.current_destination = None  # Current destination position
-        self.task_start_time = None  # When current task started
-        self.task_completion_time = None  # When current task will complete
+    def __init__(self,
+                 truck_id: Optional[str] = None,
+                 max_length: float = TERMINAL_TRUCK_MAX_LENGTH,
+                 arrival_time: Optional[datetime] = None):
+        """
+        Initialize a new terminal truck.
+        
+        Args:
+            truck_id: Unique identifier (auto-generated if None)
+            max_length: Maximum container length capacity in meters
+            arrival_time: When the truck enters service
+        """
+        
+        # Initialize parent class
+        super().__init__(
+            truck_id=truck_id,
+            max_length=max_length,
+            arrival_time=arrival_time,
+            parking_spot=None,  # Terminal trucks don't use regular parking
+            prefix= TERMINAL_TRUCK_ID_PREFIX
+        )
+        
+        # Override status to use terminal truck statuses
+        self.status = TERMINAL_TRUCK_STATUS_IDLE
+        
+        # Terminal truck specific attributes
+        self.current_source: Optional[str] = None
+        self.current_destination: Optional[str] = None
+        self.task_start_time: Optional[datetime] = None
+        self.task_completion_time: Optional[datetime] = None
+        
+        # Terminal trucks are always for internal moves
+        self.is_pickup_truck = False
+        self.is_delivery_truck = False
+        self.is_terminal_truck = True
     
     def add_container(self, container: Container) -> bool:
         """
-        Add a container to the truck if it's a swap body or trailer.
+        Add a container to the terminal truck.
+        Only swap bodies and trailers are allowed, and only one at a time.
         
         Args:
             container: Container object to add
             
         Returns:
-            bool: True if container was added successfully, False otherwise
+            True if container was added successfully, False otherwise
         """
-        # Only allow swap bodies and trailers
-        if container.container_type not in ["Trailer", "Swap Body"]:
+        # Dissalow to
+        assert type(container) is not Container, "No container passed to TerminalTruck.add_container"
+        
+        # Only allow specific container types
+        if container.container_type not in TERMINAL_TRUCK_ALLOWED_TYPES:
             return False
         
-        # Don't allow multiple containers
+        # Don't allow multiple containers (terminal trucks carry one at a time)
         if self.containers:
             return False
         
-        # Check weight
-        if container.weight > self.max_weight:
-            return False
-        
-        self.containers.append(container)
-        return True
+        # Use parent's add_container which already handles exclusive types
+        return super().add_container(container)
     
-    def remove_container(self) -> Optional[Container]:
-        """
-        Remove the container from the truck.
-        
-        Returns:
-            Container or None: The removed container, or None if truck is empty
-        """
-        if not self.containers:
-            return None
-        
-        return self.containers.pop(0)
-    
-    def assign_task(self, source: str, destination: str, task_time: float):
+    def assign_task(self, 
+                   source: str, 
+                   destination: str, 
+                   task_time: float,
+                   current_time: datetime) -> None:
         """
         Assign a transport task to the terminal truck.
         
         Args:
-            source: Source position
-            destination: Destination position
+            source: Source position identifier
+            destination: Destination position identifier
             task_time: Time in seconds the task will take
+            current_time: Current simulation time
+            
+        Raises:
+            ValueError: If parameters are invalid
         """
-        self.status = self.BUSY
+        if not source:
+            raise ValueError("Source position must be provided")
+        if not destination:
+            raise ValueError("Destination position must be provided")
+        if not current_time:
+            raise ValueError("Current time must be provided")
+        
+        # If not given set to max
+        if not task_time:
+            task_time = TERMINAL_TRUCK_MAX_TASK_TIME
+        if task_time < TERMINAL_TRUCK_MIN_TASK_TIME:
+            raise ValueError(f"Task time must be non-negative, got {task_time}")
+        if task_time > TERMINAL_TRUCK_MAX_TASK_TIME:
+            raise ValueError(
+                f"Task time exceeds maximum of {TERMINAL_TRUCK_MAX_TASK_TIME} seconds"
+            )
+        
+        self.status = TERMINAL_TRUCK_STATUS_BUSY
         self.current_source = source
         self.current_destination = destination
-        self.task_start_time = datetime.now()
-        self.task_completion_time = self.task_start_time + timedelta(seconds=task_time)
+        self.task_start_time = current_time
+        self.task_completion_time = current_time + timedelta(seconds=task_time)
     
-    def complete_task(self):
-        """Mark the current task as completed."""
-        self.status = self.IDLE
+    def complete_task(self, current_time: datetime) -> None:
+        """
+        Mark the current task as completed.
+        
+        Args:
+            current_time: Current simulation time
+            
+        Raises:
+            ValueError: If current_time is not provided
+        """
+        if not current_time:
+            raise ValueError("Current time must be provided")
+        
+        # Store completion time for stats
+        if not self.loading_complete_time:
+            self.loading_complete_time = current_time
+        
+        # Reset task-specific attributes
+        self.status = TERMINAL_TRUCK_STATUS_IDLE
         self.current_source = None
         self.current_destination = None
         self.task_start_time = None
         self.task_completion_time = None
         self.containers = []  # Empty the truck
     
+    def set_idle(self, current_time: datetime) -> None:
+        """
+        Return the terminal truck to idle status from maintenance.
+        
+        Args:
+            current_time: Current simulation time
+        """
+        if not current_time:
+            raise ValueError("Current time must be provided")
+        
+        self.status = TERMINAL_TRUCK_STATUS_IDLE
+    
     def is_available(self) -> bool:
-        """Check if the terminal truck is available for a new task."""
-        return self.status == self.IDLE and not self.containers
+        """
+        Check if the terminal truck is available for a new task.
+        
+        Returns:
+            True if truck is idle and empty
+        """
+        return (
+            self.status == TERMINAL_TRUCK_STATUS_IDLE and 
+            len(self.containers) == 0
+        )
+    
+    def is_busy(self) -> bool:
+        """
+        Check if the terminal truck is currently busy.
+        
+        Returns:
+            True if truck is performing a task
+        """
+        return self.status == TERMINAL_TRUCK_STATUS_BUSY
     
     def get_remaining_task_time(self, current_time: datetime) -> float:
         """
@@ -105,19 +210,82 @@ class TerminalTruck:
             current_time: Current simulation time
             
         Returns:
-            float: Remaining time in seconds, or 0 if no task
+            Remaining time in seconds, or 0 if no task
+            
+        Raises:
+            ValueError: If current_time is not provided
         """
-        if self.status != self.BUSY or not self.task_completion_time:
+        if not current_time:
+            raise ValueError("Current time must be provided")
+        
+        if (self.status != TERMINAL_TRUCK_STATUS_BUSY or 
+            not self.task_completion_time):
             return 0.0
         
         remaining = (self.task_completion_time - current_time).total_seconds()
         return max(0.0, remaining)
     
-    def __str__(self):
-        if not self.containers:
-            status_str = "Empty"
-        else:
-            container_str = ", ".join(c.container_id for c in self.containers)
-            status_str = f"Carrying: {container_str}"
+    def get_task_progress(self, current_time: datetime) -> float:
+        """
+        Get the progress of the current task as a percentage.
         
-        return f"Terminal Truck {self.truck_id}: {status_str}, status: {self.status}"
+        Args:
+            current_time: Current simulation time
+            
+        Returns:
+            Progress as a float between 0.0 and 1.0
+        """
+        if not current_time:
+            raise ValueError("Current time must be provided")
+        
+        if (self.status != TERMINAL_TRUCK_STATUS_BUSY or 
+            not self.task_start_time or 
+            not self.task_completion_time):
+            return 0.0
+        
+        total_time = (self.task_completion_time - self.task_start_time).total_seconds()
+        if total_time <= 0:
+            return 1.0
+        
+        elapsed_time = (current_time - self.task_start_time).total_seconds()
+        progress = elapsed_time / total_time
+        
+        return min(1.0, max(0.0, progress))
+    
+    def validate_container_type(self, container: Container) -> bool:
+        """
+        Validate if a container type is allowed for terminal trucks.
+        
+        Args:
+            container: Container to validate
+            
+        Returns:
+            True if container type is allowed
+        """
+        return (
+            container is not None and 
+            container.container_type in TERMINAL_TRUCK_ALLOWED_TYPES
+        )
+    
+    def __str__(self) -> str:
+        """String representation of the terminal truck."""
+        if not self.containers:
+            container_str = "Empty"
+        else:
+            container_ids = ", ".join(c.container_id for c in self.containers)
+            container_str = f"Carrying: {container_ids}"
+        
+        status_str = f"status: {self.status}"
+        
+        if self.status == TERMINAL_TRUCK_STATUS_BUSY and self.current_source:
+            status_str += f" ({self.current_source} → {self.current_destination})"
+        
+        return f"Terminal Truck {self.truck_id}: {container_str}, {status_str}"
+    
+    def __repr__(self) -> str:
+        """Developer-friendly representation."""
+        return (
+            f"TerminalTruck(id={self.truck_id}, "
+            f"containers={len(self.containers)}, "
+            f"status={self.status})"
+        )
