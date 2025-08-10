@@ -11,9 +11,9 @@ import concurrent.futures
 import threading
 
 # Import required components
-from simulation.terminal_components.Container import Container, ContainerFactory
-from simulation.terminal_components.Train import Train
-from simulation.terminal_components.Truck import Truck
+from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
+from simulation.terminal_components.vehicles.Train import Train
+from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
 from simulation.terminal_components.BooleanLogistics import BooleanLogistics
 from simulation.terminal_components.RMGC import RMGC_Controller

@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 # Import Container and constants from the separated modules
-from simulation.terminal_components.Container import (
+from simulation.terminal_components.storage_units.Container import (
     Container, 
     MIN_ACCURACY_DAYS, 
     MAX_HOLDING_DAYS, 
@@ -11,7 +11,7 @@ from simulation.terminal_components.Container import (
     LATE_ACCURACY_PERCENT, 
     PEAK_UNCERTAINTY_DAY
 )
-from simulation.terminal_components.ContainerFactory import ContainerFactory
+from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
 
 
 def plot_accuracy_function():

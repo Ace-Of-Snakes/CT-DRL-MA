@@ -1,8 +1,8 @@
 from typing import Dict, Tuple, List, Optional, Set, Any
-from simulation.terminal_components.Container import Container, ContainerFactory
-from simulation.terminal_components.Train import Train
-from simulation.terminal_components.Truck import Truck
-from simulation.terminal_components.Wagon import Wagon
+from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
+from simulation.terminal_components.vehicles.Train import Train
+from simulation.terminal_components.vehicles.Truck import Truck
+from simulation.terminal_components.storage_units.Wagon import Wagon
 from simulation.terminal_components.Vehicle_Queue import VehicleQueue
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
 import numpy as np

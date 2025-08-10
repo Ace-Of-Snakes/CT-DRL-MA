@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 import random
 from typing import List, Dict, Optional, Tuple, Set
-from simulation.terminal_components.Container import Container
+from simulation.terminal_components.storage_units.Container import Container
 
 class TerminalTruck:
     """

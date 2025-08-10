@@ -4,7 +4,7 @@ import numpy as np
 import sys
 import tracemalloc
 from typing import List, Dict, Tuple
-from simulation.terminal_components.Container import Container, ContainerFactory
+from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 
 # Import your BooleanStorageYard class
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
@@ -573,7 +573,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import random
-from simulation.terminal_components.Container import Container, ContainerFactory
+from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
 
 def stress_test_ultra_optimized():
     """

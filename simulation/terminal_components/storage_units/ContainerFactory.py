@@ -4,7 +4,7 @@ import numpy as np
 import random
 
 # CUSTOM DEPENDANCIES
-from simulation.terminal_components.Container import *
+from simulation.terminal_components.storage_units.Container import *
 
 # ==================== CONTAINER FACTORY CONSTANTS ====================
 # Probability distributions

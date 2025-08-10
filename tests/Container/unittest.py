@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta
 import numpy as np
-from simulation.terminal_components.Container import Container, ONLY_SELF_STACKABLE, MIN_ACCURACY_DAYS, MAX_HOLDING_DAYS
+from simulation.terminal_components.storage_units.Container import Container, ONLY_SELF_STACKABLE, MIN_ACCURACY_DAYS, MAX_HOLDING_DAYS
 
 
 class TestContainer(unittest.TestCase):

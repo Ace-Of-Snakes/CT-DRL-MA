@@ -14,7 +14,7 @@ def main():
         sys.path.append(repo_root)
     
     # Import the Container class and ContainerFactory from the repository
-    from simulation.terminal_components.Container import Container, ContainerFactory
+    from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
     from simulation.deprecated_components.BitmapYard import BitmapStorageYard 
     
     # Determine compute device - use GPU if available
