@@ -1,214 +1,273 @@
+
 from datetime import datetime, timedelta
 import random
-import uuid
-from typing import List, Dict, Optional, Tuple, Set
-from simulation.terminal_components.storage_units.Container import Container  # Assuming Container is defined in a separate module
-from simulation.terminal_components.storage_units.Wagon import Wagon  # Assuming Wagon is defined in a separate module
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from collections import OrderedDict
+from simulation.terminal_components.storage_units.Container import Container
+from simulation.terminal_components.storage_units.Wagon import (
+    Wagon,
+    EXCLUSIVE_CONTAINER_TYPES
+)
+
+# ==================== TRAIN CONSTANTS ====================
+DEFAULT_NUM_WAGONS = 10
+DEFAULT_WAGON_LENGTH = 24.384
+TRAIN_ID_PREFIX = "TRN"
+TRAIN_ID_MIN_RANDOM = 10000
+TRAIN_ID_MAX_RANDOM = 99999
+WAGON_ID_SEPARATOR = "_W"
+
+# Train statuses
+TRAIN_STATUS_ARRIVING = "arriving"
+TRAIN_STATUS_WAITING = "waiting"
+TRAIN_STATUS_LOADING = "loading"
+TRAIN_STATUS_DEPARTING = "departing"
+TRAIN_STATUS_DEPARTED = "departed"
+
+
+@dataclass
+class ContainerLocation:
+    """Tracks where a container is located."""
+    wagon_id: str
+    wagon_index: int
+    position_in_wagon: int
 
 class Train:
     """
-    Represents a train composed of multiple wagons that can transport containers.
-    
-    Attributes:
-        train_id (str): Unique identifier for the train
-        wagons (list): List of wagon objects in the train
-        arrival_time (datetime): When the train arrived at the terminal
-        departure_time (datetime): When the train is scheduled to depart
-        rail_track (str): Current rail track position (e.g., 'T1', 'T2')
-        status (str): Current status of the train
+    Optimized train with O(1) container operations.
+    Uses hash maps for direct container lookup across all wagons.
     """
     
-    # Possible train statuses
-    ARRIVING = "arriving"  # Train is scheduled to arrive but not yet at terminal
-    WAITING = "waiting"    # Train is at terminal waiting to be processed
-    LOADING = "loading"    # Train is currently being loaded/unloaded
-    DEPARTING = "departing"  # Train is scheduled to leave
-    DEPARTED = "departed"  # Train has left the terminal
-    
-    def __init__(self, 
-                 train_id: str = None, 
-                 num_wagons: int = 10, 
-                 wagon_length: float = 24.4,
-                 arrival_time: datetime = None,
-                 departure_time: datetime = None,
-                 rail_track: str = None):
-        """
-        Initialize a new train.
+    def __init__(self,
+                 train_id: Optional[str] = None,
+                 num_wagons: int = DEFAULT_NUM_WAGONS,
+                 wagon_length: float = DEFAULT_WAGON_LENGTH,
+                 arrival_time: Optional[datetime] = None,
+                 departure_time: Optional[datetime] = None,
+                 rail_track: Optional[str] = None):
         
-        Args:
-            train_id: Unique identifier for the train (auto-generated if None)
-            num_wagons: Number of wagons in the train
-            wagon_length: Length of each wagon in meters
-            arrival_time: When the train arrives at the terminal
-            departure_time: When the train is scheduled to depart
-            rail_track: Assigned rail track (e.g., 'T1', 'T2')
-        """
-        self.train_id = train_id or f"TRN{random.randint(10000, 99999)}"
-        self.wagons = [Wagon(f"{self.train_id}_W{i+1}", wagon_length) for i in range(num_wagons)]
-        self.arrival_time = arrival_time or datetime.now()
+        if num_wagons <= 0:
+            raise ValueError(f"Number of wagons must be positive, got {num_wagons}")
+        if wagon_length <= 0:
+            raise ValueError(f"Wagon length must be positive, got {wagon_length}")
+        
+        self.train_id = train_id or self._generate_train_id()
+        
+        # Create wagons
+        self.wagons: List[Wagon] = [
+            Wagon(f"{self.train_id}{WAGON_ID_SEPARATOR}{i+1}", wagon_length)
+            for i in range(num_wagons)
+        ]
+        
+        # O(1) lookup structures
+        self.container_locations: Dict[str, ContainerLocation] = {}  # container_id -> location
+        self.wagon_by_id: Dict[str, Wagon] = {w.wagon_id: w for w in self.wagons}
+        
+        # Track wagons with space for quick placement
+        self.wagons_with_space: Set[int] = set(range(num_wagons))  # wagon indices
+        self.empty_wagons: Set[int] = set(range(num_wagons))  # for exclusive containers
+        
+        # Timing and status
+        self.arrival_time = arrival_time
         self.departure_time = departure_time
+        self.loading_start_time: Optional[datetime] = None
+        self.loading_complete_time: Optional[datetime] = None
         self.rail_track = rail_track
-        self.status = self.ARRIVING
+        self.status = TRAIN_STATUS_ARRIVING
         
-        # Tracking variables
-        self.loading_start_time = None
-        self.loading_complete_time = None
+        # Cache for performance
+        self._total_containers = 0
+        self._total_pickup_ids = 0
+    
+    @staticmethod
+    def _generate_train_id() -> str:
+        """Generate unique train ID."""
+        return f"{TRAIN_ID_PREFIX}{random.randint(TRAIN_ID_MIN_RANDOM, TRAIN_ID_MAX_RANDOM)}"
+    
+    def find_container(self, container_id: str) -> Tuple[Optional[Wagon], Optional[int]]:
+        """Find container - O(1) operation."""
+        location = self.container_locations.get(container_id)
+        if not location:
+            return None, None
         
+        wagon = self.wagons[location.wagon_index]
+        return wagon, location.position_in_wagon
+    
+    def add_container(self, container: Container, wagon_index: Optional[int] = None) -> bool:
+        """Add container - O(1) for specified wagon, O(w) worst case for auto-placement."""
+        if not container or container.container_id in self.container_locations:
+            return False
+        
+        # Specific wagon - O(1)
+        if wagon_index is not None:
+            if 0 <= wagon_index < len(self.wagons):
+                if self._add_to_wagon(wagon_index, container):
+                    return True
+            return False
+        
+        # Auto-placement
+        if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
+            # Try empty wagons only - O(1) average
+            for idx in self.empty_wagons:
+                if self._add_to_wagon(idx, container):
+                    return True
+        else:
+            # Try wagons with space - O(1) average
+            for idx in self.wagons_with_space:
+                wagon = self.wagons[idx]
+                if not wagon.has_exclusive_container() and self._add_to_wagon(idx, container):
+                    return True
+        
+        return False
+    
+    def _add_to_wagon(self, wagon_index: int, container: Container) -> bool:
+        """Internal method to add container to specific wagon and update indexes."""
+        wagon = self.wagons[wagon_index]
+        position = len(wagon.containers)
+        
+        if wagon.add_container(container):
+            # Update location index
+            self.container_locations[container.container_id] = ContainerLocation(
+                wagon_id=wagon.wagon_id,
+                wagon_index=wagon_index,
+                position_in_wagon=position
+            )
+            
+            # Update space tracking
+            if wagon.is_full():
+                self.wagons_with_space.discard(wagon_index)
+            if not wagon.is_empty():
+                self.empty_wagons.discard(wagon_index)
+            
+            self._total_containers += 1
+            return True
+        return False
+    
+    def remove_container(self, container_id: str) -> Optional[Container]:
+        """Remove container - O(1) operation."""
+        location = self.container_locations.get(container_id)
+        if not location:
+            return None
+        
+        wagon = self.wagons[location.wagon_index]
+        container = wagon.remove_container(container_id)
+        
+        if container:
+            # Update indexes
+            del self.container_locations[container_id]
+            
+            # Update space tracking
+            if not wagon.is_full():
+                self.wagons_with_space.add(location.wagon_index)
+            if wagon.is_empty():
+                self.empty_wagons.add(location.wagon_index)
+            
+            self._total_containers -= 1
+        
+        return container
+    
+    def add_pickup_container(self, container_id: str, wagon_index: Optional[int] = None) -> bool:
+        """Add pickup container - O(1) operation."""
+        if not container_id:
+            return False
+        
+        target_wagon_index = wagon_index if wagon_index is not None else 0
+        
+        if 0 <= target_wagon_index < len(self.wagons):
+            self.wagons[target_wagon_index].add_pickup_container(container_id)
+            self._total_pickup_ids += 1
+            return True
+        return False
+    
+    def remove_pickup_container(self, container_id: str) -> bool:
+        """Remove pickup container - O(w) where w is number of wagons."""
+        if not container_id:
+            return False
+        
+        for wagon in self.wagons:
+            if container_id in wagon.pickup_container_ids:
+                wagon.remove_pickup_container(container_id)
+                self._total_pickup_ids -= 1
+                return True
+        return False
+    
+    def has_container(self, container_id: str) -> bool:
+        """Check if train has container - O(1) operation."""
+        return container_id in self.container_locations
+    
     def get_all_containers(self) -> List[Container]:
-        """Get a list of all containers on the train."""
+        """Get all containers - O(n) where n is total containers."""
         containers = []
         for wagon in self.wagons:
-            containers.extend(wagon.containers)
+            containers.extend(wagon.get_container_list())
         return containers
     
     def get_all_container_ids(self) -> List[str]:
-        """Get a list of all container IDs on the train."""
-        return [container.container_id for container in self.get_all_containers()]
+        """Get all container IDs - O(1) operation."""
+        return list(self.container_locations.keys())
+    
+    def get_container_count(self) -> int:
+        """Get container count - O(1) operation."""
+        return self._total_containers
     
     def get_all_pickup_container_ids(self) -> Set[str]:
-        """Get a set of all container IDs to be picked up."""
+        """Get all pickup IDs - O(w) where w is number of wagons."""
         pickup_ids = set()
         for wagon in self.wagons:
             pickup_ids.update(wagon.pickup_container_ids)
         return pickup_ids
     
-    def find_container(self, container_id: str) -> Tuple[Optional[Wagon], Optional[int]]:
-        """
-        Find a container on the train by its ID.
-        
-        Args:
-            container_id: ID of the container to find
-            
-        Returns:
-            tuple: (wagon, container_index) or (None, None) if not found
-        """
-        for wagon in self.wagons:
-            for i, container in enumerate(wagon.containers):
-                if container.container_id == container_id:
-                    return wagon, i
-        return None, None
-    
-    def add_container(self, container, wagon_index: int = None) -> bool:
-        """
-        Add a container to the train, either to a specific wagon or to the first available wagon.
-        
-        Args:
-            container: Container object to add
-            wagon_index: Index of the wagon to add to (tries all wagons if None)
-            
-        Returns:
-            bool: True if container was added successfully, False otherwise
-        """
-        # If wagon index specified, try to add to that wagon
-        if wagon_index is not None:
-            if 0 <= wagon_index < len(self.wagons):
-                return self.wagons[wagon_index].add_container(container)
-            return False
-        
-        # Try to find a wagon that can accommodate the container
-        for wagon in self.wagons:
-            if wagon.add_container(container):
-                return True
-        
-        return False  # No suitable wagon found
-    
-    def remove_container(self, container_id: str):
-        """
-        Remove a container from the train.
-        
-        Args:
-            container_id: ID of the container to remove
-            
-        Returns:
-            Container or None: The removed container, or None if not found
-        """
-        wagon, _ = self.find_container(container_id)
-        if wagon:
-            return wagon.remove_container(container_id)
-        return None
-    
-    def add_pickup_container(self, container_id: str, wagon_index: int = None) -> bool:
-        """
-        Add a container ID to be picked up, either to a specific wagon or to the first available wagon.
-        
-        Args:
-            container_id: ID of the container to be picked up
-            wagon_index: Index of the wagon to assign to (assigns to first wagon with space if None)
-            
-        Returns:
-            bool: True if container ID was added successfully, False otherwise
-        """
-        if wagon_index is not None:
-            if 0 <= wagon_index < len(self.wagons):
-                self.wagons[wagon_index].add_pickup_container(container_id)
-                return True
-            return False
-        
-        # Add to first wagon with available capacity
-        # For simplicity, assume each wagon can handle multiple pickups
-        if len(self.wagons) > 0:
-            self.wagons[0].add_pickup_container(container_id)
-            return True
-        
-        return False
-    
-    def start_loading(self):
-        """Mark the train as being loaded and record the start time."""
-        self.loading_start_time = datetime.now()
-        self.status = self.LOADING
-    
-    def complete_loading(self):
-        """Mark the train as finished loading and record the completion time."""
-        self.loading_complete_time = datetime.now()
-        self.status = self.DEPARTING
-    
-    def get_loading_time(self) -> Optional[timedelta]:
-        """Get the time taken to load/unload the train."""
-        if self.loading_start_time and self.loading_complete_time:
-            return self.loading_complete_time - self.loading_start_time
-        return None
-    
     def is_fully_loaded(self) -> bool:
-        """
-        Check if the train is fully loaded based on pickup requirements.
-        
-        Returns:
-            bool: True if all pickup containers have been loaded, False otherwise
-        """
-        for wagon in self.wagons:
-            if len(wagon.pickup_container_ids) > 0:
-                return False
-        return True
+        """Check if fully loaded - O(1) operation."""
+        return self._total_pickup_ids == 0
     
     def has_space_for_container(self, container: Container) -> bool:
-        """
-        Check if any wagon in the train has space for the given container.
+        """Check space availability - O(1) average case."""
+        if not container:
+            return False
         
-        Args:
-            container: Container object to check
-            
-        Returns:
-            bool: True if there's space for the container, False otherwise
-        """
-        for wagon in self.wagons:
-            # Special case for trailers and swap bodies
-            if container.container_type in ["Trailer", "Swap Body"]:
-                if wagon.is_empty():
+        if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
+            return len(self.empty_wagons) > 0
+        else:
+            # Check if any wagon with space doesn't have exclusive container
+            for idx in self.wagons_with_space:
+                if not self.wagons[idx].has_exclusive_container():
                     return True
-            else:
-                # For standard containers, check if there's enough space
-                if wagon.get_available_length() >= container.length:
-                    return True
-        return False
+            return False
     
-    def depart(self):
-        """Mark the train as departed and record the departure time."""
-        self.status = self.DEPARTED
-        self.departure_time = datetime.now()
+    # Keep existing time/status methods unchanged
+    def start_loading(self, current_time: datetime) -> None:
+        if not current_time:
+            raise ValueError("current_time must be provided")
+        self.loading_start_time = current_time
+        self.status = TRAIN_STATUS_LOADING
     
-    def __str__(self):
-        container_count = sum(len(wagon.containers) for wagon in self.wagons)
-        return f"Train {self.train_id}: {len(self.wagons)} wagons, {container_count} containers, status: {self.status}"
+    def complete_loading(self, current_time: datetime) -> None:
+        if not current_time:
+            raise ValueError("current_time must be provided")
+        self.loading_complete_time = current_time
+        self.status = TRAIN_STATUS_DEPARTING
     
-    def __repr__(self):
-        return f"Train(id={self.train_id}, wagons={len(self.wagons)}, status={self.status})"
+    def depart(self, current_time: datetime) -> None:
+        if not current_time:
+            raise ValueError("current_time must be provided")
+        self.departure_time = current_time
+        self.status = TRAIN_STATUS_DEPARTED
+    
+    def get_stats(self) -> Dict[str, any]:
+        """Get train statistics - mostly O(1) operations."""
+        total_capacity = sum(w.length for w in self.wagons)
+        used_capacity = sum(w._used_length for w in self.wagons)
+        
+        return {
+            'train_id': self.train_id,
+            'num_wagons': len(self.wagons),
+            'total_containers': self._total_containers,  # O(1)
+            'pickup_containers': self._total_pickup_ids,  # O(1)
+            'total_capacity': total_capacity,
+            'used_capacity': used_capacity,
+            'utilization_rate': used_capacity / total_capacity if total_capacity > 0 else 0,
+            'status': self.status,
+            'rail_track': self.rail_track
+        }

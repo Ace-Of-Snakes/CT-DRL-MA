@@ -1,106 +1,86 @@
-from typing import List, Set, Optional
+from datetime import datetime, timedelta
+import random
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from collections import OrderedDict
 from simulation.terminal_components.storage_units.Container import Container
 
 # ==================== WAGON CONSTANTS ====================
-# Physical dimensions (meters)
-WAGON_LENGTH_STANDARD = 24.384  # Extended wagon length
-
-# Container constraints
-MIN_CONTAINER_LENGTH = 2.5  # Minimum viable container length (meters)
-MAX_CONTAINERS_PER_WAGON = 10  # Maximum containers that can fit
-
-# Special container types that require exclusive wagon use
+WAGON_LENGTH_STANDARD = 24.384
+MIN_CONTAINER_LENGTH = 2.5
+MAX_CONTAINERS_PER_WAGON = 10
 EXCLUSIVE_CONTAINER_TYPES = {"Trailer", "Swap Body"}
-
 
 class Wagon:
     """
-    Represents a wagon in a train that can hold containers.
-    
-    Attributes:
-        wagon_id: Unique identifier for the wagon
-        length: Length of the wagon in meters
-        containers: List of containers currently loaded on the wagon
-        pickup_container_ids: Set of container IDs to be picked up at the terminal
+    Optimized wagon with O(1) container operations.
+    Uses OrderedDict to maintain insertion order while having O(1) lookups.
     """
     
     def __init__(self, wagon_id: str, length: float = WAGON_LENGTH_STANDARD):
-        """
-        Initialize a new wagon.
-        
-        Args:
-            wagon_id: Unique identifier for the wagon
-            length: Length of the wagon in meters
-        """
         self.wagon_id = wagon_id
         self.length = length
-        self.containers: List[Container] = []
-        self.pickup_container_ids: Set[str] = set()
+        self.containers: OrderedDict[str, Container] = OrderedDict()  # O(1) lookup by ID
+        self.pickup_container_ids: Set[str] = set()  # O(1) membership tests
+        self._used_length: float = 0.0  # Cache for performance
     
     def add_container(self, container: Container) -> bool:
-        """
-        Add a container to the wagon if there's enough space.
-        
-        Args:
-            container: Container object to add
-            
-        Returns:
-            True if container was added successfully, False otherwise
-        """
-        assert container is not None, 'Wagon.add_container is not allowed to recieve a None-Type Object'
-        assert type(container) is not Container, 'Wagon.add_container is not allowed to recieve an Object that is not a Container'
-        
-        # Check length constraint for standard containers
-        current_length = sum(c.length for c in self.containers)
-        if current_length + container.length > self.length:
+        """Add container - O(1) operation."""
+        if not container or container.container_id in self.containers:
             return False
         
-        self.containers.append(container)
+        # Check length
+        if self._used_length + container.length > self.length:
+            return False
+        
+        self.containers[container.container_id] = container
+        self._used_length += container.length
         return True
     
     def remove_container(self, container_id: str) -> Optional[Container]:
-        """
-        Remove a container from the wagon.
+        """Remove container - O(1) operation."""
+        if container_id not in self.containers:
+            return None
         
-        Args:
-            container_id: ID of the container to remove
-            
-        Returns:
-            The removed container, or None if not found
-        """
-        for i, container in enumerate(self.containers):
-            if container.container_id == container_id:
-                return self.containers.pop(i)
-        return None
+        container = self.containers.pop(container_id)
+        self._used_length -= container.length
+        return container
+    
+    def has_container(self, container_id: str) -> bool:
+        """Check if wagon has container - O(1) operation."""
+        return container_id in self.containers
     
     def add_pickup_container(self, container_id: str) -> None:
-        """Add a container ID to be picked up at the terminal."""
+        """Add pickup ID - O(1) operation."""
         self.pickup_container_ids.add(container_id)
     
     def remove_pickup_container(self, container_id: str) -> None:
-        """Remove a container ID from the pickup list."""
+        """Remove pickup ID - O(1) operation."""
         self.pickup_container_ids.discard(container_id)
     
     def get_available_length(self) -> float:
-        """Get the remaining available length on the wagon."""
-        current_length = sum(c.length for c in self.containers)
-        return max(0.0, self.length - current_length)
+        """Get available space - O(1) operation."""
+        return max(0.0, self.length - self._used_length)
     
     def is_empty(self) -> bool:
-        """Check if the wagon is empty."""
+        """Check if empty - O(1) operation."""
         return len(self.containers) == 0
     
     def is_full(self) -> bool:
-        """
-        Check if the wagon is effectively full.
-        
-        A wagon is considered full if it has less space than the minimum container length.
-        """
+        """Check if full - O(1) operation."""
         return self.get_available_length() < MIN_CONTAINER_LENGTH
     
     def has_exclusive_container(self) -> bool:
-        """Check if wagon contains an exclusive container type."""
-        return any(c.container_type in EXCLUSIVE_CONTAINER_TYPES for c in self.containers)
+        """Check for exclusive types - O(1) if first container is exclusive."""
+        if not self.containers:
+            return False
+        # Only need to check first since exclusive containers must be alone
+        first_container = next(iter(self.containers.values()))
+        return first_container.container_type in EXCLUSIVE_CONTAINER_TYPES
+    
+    def get_container_list(self) -> List[Container]:
+        """Get containers as list - O(n) but only when needed."""
+        return list(self.containers.values())
     
     def __str__(self) -> str:
         return (f"Wagon {self.wagon_id}: {len(self.containers)} containers, "
