@@ -1,7 +1,6 @@
 # simulation/terminal_components/TerminalTruck.py
 
 from datetime import datetime, timedelta
-import random
 from typing import Optional, Dict, Any
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.vehicles.Truck import Truck
@@ -22,8 +21,6 @@ VALID_TERMINAL_TRUCK_STATUSES = {
 
 # ID generation constants
 TERMINAL_TRUCK_ID_PREFIX = "TTR"
-TERMINAL_TRUCK_ID_MIN_RANDOM = 10000
-TERMINAL_TRUCK_ID_MAX_RANDOM = 99999
 
 # Container type restrictions
 TERMINAL_TRUCK_ALLOWED_TYPES = {"Trailer", "Swap Body"}  # Only these types allowed
@@ -62,7 +59,7 @@ class TerminalTruck(Truck):
             max_length=max_length,
             arrival_time=arrival_time,
             parking_spot=None,  # Terminal trucks don't use regular parking
-            prefix= TERMINAL_TRUCK_ID_PREFIX
+            prefix=TERMINAL_TRUCK_ID_PREFIX
         )
         
         # Override status to use terminal truck statuses
@@ -90,9 +87,9 @@ class TerminalTruck(Truck):
         Returns:
             True if container was added successfully, False otherwise
         """
-        # Dissalow to
-        assert type(container) is not Container, "No container passed to TerminalTruck.add_container"
-        
+        assert container is not None, 'TerminalTruck.add_container is not allowed to recieve a None-Type Object'
+        assert type(container) is not Container, 'TerminalTruck.add_container is not allowed to recieve an Object that is not a Container'
+
         # Only allow specific container types
         if container.container_type not in TERMINAL_TRUCK_ALLOWED_TYPES:
             return False
@@ -169,18 +166,6 @@ class TerminalTruck(Truck):
         self.task_completion_time = None
         self.containers = []  # Empty the truck
     
-    def set_idle(self, current_time: datetime) -> None:
-        """
-        Return the terminal truck to idle status from maintenance.
-        
-        Args:
-            current_time: Current simulation time
-        """
-        if not current_time:
-            raise ValueError("Current time must be provided")
-        
-        self.status = TERMINAL_TRUCK_STATUS_IDLE
-    
     def is_available(self) -> bool:
         """
         Check if the terminal truck is available for a new task.
@@ -201,71 +186,6 @@ class TerminalTruck(Truck):
             True if truck is performing a task
         """
         return self.status == TERMINAL_TRUCK_STATUS_BUSY
-    
-    def get_remaining_task_time(self, current_time: datetime) -> float:
-        """
-        Get the remaining time for the current task.
-        
-        Args:
-            current_time: Current simulation time
-            
-        Returns:
-            Remaining time in seconds, or 0 if no task
-            
-        Raises:
-            ValueError: If current_time is not provided
-        """
-        if not current_time:
-            raise ValueError("Current time must be provided")
-        
-        if (self.status != TERMINAL_TRUCK_STATUS_BUSY or 
-            not self.task_completion_time):
-            return 0.0
-        
-        remaining = (self.task_completion_time - current_time).total_seconds()
-        return max(0.0, remaining)
-    
-    def get_task_progress(self, current_time: datetime) -> float:
-        """
-        Get the progress of the current task as a percentage.
-        
-        Args:
-            current_time: Current simulation time
-            
-        Returns:
-            Progress as a float between 0.0 and 1.0
-        """
-        if not current_time:
-            raise ValueError("Current time must be provided")
-        
-        if (self.status != TERMINAL_TRUCK_STATUS_BUSY or 
-            not self.task_start_time or 
-            not self.task_completion_time):
-            return 0.0
-        
-        total_time = (self.task_completion_time - self.task_start_time).total_seconds()
-        if total_time <= 0:
-            return 1.0
-        
-        elapsed_time = (current_time - self.task_start_time).total_seconds()
-        progress = elapsed_time / total_time
-        
-        return min(1.0, max(0.0, progress))
-    
-    def validate_container_type(self, container: Container) -> bool:
-        """
-        Validate if a container type is allowed for terminal trucks.
-        
-        Args:
-            container: Container to validate
-            
-        Returns:
-            True if container type is allowed
-        """
-        return (
-            container is not None and 
-            container.container_type in TERMINAL_TRUCK_ALLOWED_TYPES
-        )
     
     def __str__(self) -> str:
         """String representation of the terminal truck."""

@@ -3,7 +3,7 @@ from simulation.terminal_components.storage_units.Container import Container, Co
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.storage_units.Wagon import Wagon
-from simulation.terminal_components.Vehicle_Queue import VehicleQueue
+from simulation.terminal_components.vehicles.Vehicle_Queue import VehicleQueue
 from simulation.terminal_components.BooleanStorage import BooleanStorageYard
 import numpy as np
 import torch
