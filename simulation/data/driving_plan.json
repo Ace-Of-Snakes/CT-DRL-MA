@@ -1,0 +1,335 @@
+{
+    "driving_plan": {
+        "details": {
+            "version": "1.0",
+            "description": "Driving plan for train operations",
+            "plan_time_format": "HH:mm",
+            "arrival_format": ["weekday", "time_of_arrival", "weekday", "time_arrival_complete"],
+            "departure_format": ["weekday", "time_of_departure", "weekday", "time_departure_complete"],
+            "derived_from": "https://www.tricon-terminal.de/info-desk/fahrplan",
+            "last_checked": "14.08.2025"
+        },
+        "trains": {
+            "6927X": {
+                "destination": "Bremerhaven/CT4",
+                "operator": "boxXpress",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "21:00", "Monday", "21:30"],
+                        "departure":["Tuesday", "06:30", "Tuesday", "09:30"],
+                        "mirrored_on":
+                        [
+                            "Tueday",
+                            "Wednesday",
+                            "Thursday"
+                        ]
+                    },
+                    "1": {
+                        "arrival":["Friday", "22:00", "Friday", "22:30"],
+                        "departure":["Saturday", "07:30", "Sunday", "09:30"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "6926X": {
+                "destination": "CTL Altenwerder/ HHL Eurokombi Hamburg",
+                "operator": "boxXpress",
+                "plan": {
+                    "0": {
+                        "arrival":["Wednesday", "08:00", "Wednesday", "08:30"],
+                        "departure":["Wednesday", "18:00", "Wednesday", "21:00"],
+                        "mirrored_on":
+                        [
+                            "Thursday",
+                            "Friday"
+                        ]
+                    },
+                    "1": {
+                        "arrival":["Saturday", "08:00", "Saturday", "08:30"],
+                        "departure":["Sunday", "11:00", "Sunday", "21:00"],
+                        "mirrored_on":
+                        []
+                    },
+                    "2": {
+                        "arrival":["Monday", "00:00", "Monday", "01:00"],
+                        "departure":["Monday", "18:00", "Monday", "21:00"],
+                        "mirrored_on":
+                        []
+                    },
+                    "3": {
+                        "arrival":["Monday", "21:00", "Tuesday", "21:30"],
+                        "departure":["Tuesday", "18:00", "Tuesday", "21:00"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "5977X/4211X": {
+                "destination": "Verona QE",
+                "operator": "Kombiverkehr",
+                "plan": {
+                    "0": {
+                        "arrival":["Wednesday", "06:45", "Wednesday", "07:15"],
+                        "departure":["Thursday", "17:15", "Thursday", "18:26"],
+                        "mirrored_on":
+                        []
+                    },
+                    "1": {
+                        "arrival":["Friday", "06:45", "Friday", "07:15"],
+                        "departure":["Saturday", "10:00", "Sunday", "10:45"],
+                        "mirrored_on":
+                        []
+                    },
+                    "2": {
+                        "arrival":["Sunday", "06:00", "Monday", "06:00"],
+                        "departure": ["Tuesday", "17:15", "Tuesday", "18:26"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "9099X": {
+                "destination": "Hamburg/Regensburg",
+                "operator": "IGS",
+                "plan": {
+                    "0": {
+                        "arrival":["Tuesday", "08:00", "Tuesday", "08:30"],
+                        "departure":["Tuesday", "19:30", "Tuesday", "22:00"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "9104X": {
+                "destination": "Hamburg/Aschaffenburg",
+                "operator": "IGS",
+                "plan": {
+                    "0": {
+                        "arrival":["Wednesday", "19:00", "Wednesday", "19:30"],
+                        "departure":["Wednesday", "21:00", "Thursday", "03:00"],
+                        "mirrored_on":
+                        [
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "9500X": {
+                "destination": "Hamburg/Schweinfurt",
+                "operator": "IGS",
+                "plan": {
+                    "0": {
+                        "arrival":["Saturday", "09:30", "Saturday", "10:00"],
+                        "departure":["Saturday", "23:00", "Sunday", "05:00"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "4970X": {
+                "destination": "Rotterdam",
+                "operator": "Hutchinson Ports intermodal",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "00:30", "Monday", "01:00"],
+                        "departure":["Tuesday", "21:00", "Wednesday", "09:30"],
+                        "mirrored_on":
+                        []
+                    },
+                    "1": {
+                        "arrival":["Tuesday", "20:30", "Tuesday", "21:00"],
+                        "departure":["Wednesday", "21:00", "Thursday", "06:00"],
+                        "mirrored_on":
+                        []
+                    },
+                    "2": {
+                        "arrival":["Wednesday", "19:30", "Tuesday", "20:00"],
+                        "departure":["Thursday", "21:00", "Friday", "08:00"],
+                        "mirrored_on":
+                        []
+                    },
+                    "3": {
+                        "arrival":["Thursday", "19:30", "Thursday", "20:00"],
+                        "departure":["Friday", "21:00", "Saturday", "09:00"],
+                        "mirrored_on":
+                        []
+                    },
+                    "4": {
+                        "arrival":["Friday", "22:00", "Friday", "22:30"],
+                        "departure":["Monday", "10:00", "Monday", "14:00"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "5002X": {
+                "destination": "Hamburg",
+                "operator": "Hellmann",
+                "plan": {
+                    "0": {
+                        "arrival":["Tuesday", "04:20", "Tuesday", "04:45"],
+                        "departure":["Tuesday", "19:15", "Tuesday", "19:45"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Thursday",
+                            "Friday"
+                        ]
+                    },
+                    "1": {
+                        "arrival":["Saturday", "04:20", "Saturday", "04:45"],
+                        "departure":["Monday", "19:15", "Monday", "19:45"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Thursday",
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "5034X": {
+                "destination": "Hamburg/Bremerhaven über Maschen",
+                "operator": "Transfracht/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "05:30", "Monday", "06:00"],
+                        "departure":["Monday", "20:00", "Monday", "21:05"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "5038X": {
+                "destination": "Hamburg/Regensburg",
+                "operator": "Transfracht/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Thursday", "08:00", "Thursday", "09:15"],
+                        "departure":["Thursday", "19:15", "Thursday", "20:25"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "503XX": {
+                "destination": "Maschen",
+                "operator": "Transfracht/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Thursday", "05:32", "Thursday", "06:00"],
+                        "departure":["Thursday", "20:00", "Thursday", "21:30"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "5013X": {
+                "destination": "Lehrte",
+                "operator": "DHL/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Tuesday", "14:10", "Tuesday", "14:40"],
+                        "departure":["Tuesday", "00:45", "Tuesday", "01:40"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Thursday",
+                            "Friday",
+                            "Saturday"
+                        ]
+                    }
+                }
+            },
+            "5000X": {
+                "destination": "Hamburg",
+                "operator": "DHL/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Sunday", "10:00", "Sunday", "19:30"],
+                        "departure":["Saturday", "22:30", "Saturday", "23:15"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "5008X": {
+                "destination": "Wuppertal",
+                "operator": "DHL/ DB Cargo",
+                "plan": {
+                    "0": {
+                        "arrival":["Sunday", "19:45", "Sunday", "20:15"],
+                        "departure":["Saturday", "22:10", "Saturday", "23:45"],
+                        "mirrored_on":
+                        []
+                    }
+                }
+            },
+            "8889X": {
+                "destionation": "München/Bremerhaven",
+                "operator": "Metrans",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "02:37", "Monday", "03:30"],
+                        "departure":["Monday", "10:30", "Monday", "12:03"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "8889Y": {
+                "destionation": "Hamburg/München",
+                "operator": "Metrans",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "05:06", "Monday", "05:30"],
+                        "departure":["Monday", "10:30", "Monday", "12:53"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "8889Z": {
+                "destionation": "Hamburg",
+                "operator": "Metrans",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "13:352", "Monday", "14:30"],
+                        "departure":["Tuesday", "09:30", "Tuesday", "11:44"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Friday"
+                        ]
+                    }
+                }
+            },
+            "8889A": {
+                "destionation": "Bremerhaven",
+                "operator": "Metrans",
+                "plan": {
+                    "0": {
+                        "arrival":["Monday", "00:52", "Monday", "01:30"],
+                        "departure":["Tuesday", "09:30", "Tuesday", "11:44"],
+                        "mirrored_on":
+                        [
+                            "Wednesday",
+                            "Thursday",
+                            "Friday"
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}
