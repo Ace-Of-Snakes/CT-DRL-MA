@@ -99,31 +99,3 @@ class StandardDepartureEstimator(EstimatorStrategy):
                        (self.MAX_HOLDING_DAYS - self.PEAK_UNCERTAINTY_DAY))
             return (self.MIN_ACCURACY_PERCENT + 
                    (self.LATE_ACCURACY_PERCENT - self.MIN_ACCURACY_PERCENT) * progress)
-
-
-# Create a container (pure data)
-container = Container(
-    container_id="CTR001",
-    direction="Import",
-    container_type="FEU",
-    arrival_date=datetime(2024, 1, 1),
-    departure_date=datetime(2024, 1, 15),
-    goods_type="Reefer"
-)
-
-# Create an estimator manager
-estimator = DepartureEstimatorManager()  # Uses StandardDepartureEstimator by default
-
-# Estimate departure
-estimated_date = estimator.estimate(container, datetime(2024, 1, 5))
-print(f"Estimated departure: {container.estimated_departure}")
-
-# Switch to a different strategy
-estimator.set_strategy(PerfectEstimator())
-estimated_date = estimator.estimate(container, datetime(2024, 1, 5))
-print(f"Perfect estimate: {container.estimated_departure}")
-
-# Use simple random estimator
-estimator.set_strategy(SimpleRandomEstimator(max_error_days=3))
-estimated_date = estimator.estimate(container, datetime(2024, 1, 5))
-print(f"Simple random estimate: {container.estimated_departure}")
