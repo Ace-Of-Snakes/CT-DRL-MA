@@ -2,36 +2,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Literal
 
-# ==================== CONTAINER CONSTANTS ====================
-# Physical dimensions (meters)
-CONTAINER_HEIGHT_STANDARD = 2.59
-CONTAINER_HEIGHT_HIGH_CUBE = 2.89
-CONTAINER_WIDTH_STANDARD = 2.44
-CONTAINER_WIDTH_SPECIAL = 2.55  # For trailers and swap bodies
-
-# Container lengths by type (meters)
-CONTAINER_LENGTHS = {
-    "TWEU": 6.06,      # 20 feet
-    "THEU": 9.14,      # 30 feet
-    "FEU": 12.19,      # 40 feet
-    "FFEU": 13.72,     # 45 feet
-    "Swap Body": 7.45, # Typical swap body length
-    "Trailer": 12.19   # Default for trailers
-}
-
 # Type definitions
-ContainerType = Literal["TWEU", "THEU", "FEU", "FFEU", "Trailer", "Swap Body"]
+# ContainerType will be dynamically defined based on available data
+ContainerType = str  # Dynamic type based on CSV data
 Direction = Literal["Import", "Export"]
-GoodsType = Literal["Regular", "Reefer", "Dangerous"]
-
-SPECIAL_CONTAINER_TYPES = {"Trailer", "Swap Body"}
+GoodsType = Literal["Regular", "Reefer", "DangerousGoods"]
 
 
 @dataclass
 class Container:
     """
     Pure data class representing a shipping container.
-    Contains only data fields without business logic.
+    All dimensions and properties are set by the factory based on container type.
     """
     # Required fields
     container_id: str
@@ -40,35 +22,40 @@ class Container:
     arrival_date: datetime
     departure_date: datetime
     
-    # Optional fields with defaults
+    # Goods type
     goods_type: GoodsType = "Regular"
+    
+    # Physical properties - set by factory
+    length_ft: int = 40
+    length_m: float = 12.19
+    width_m: float = 2.44
+    height_m: float = 2.44
     is_high_cube: bool = False
+    is_swap_body: bool = False
+    is_trailer: bool = False
     
-    # Dimensions - calculated in __post_init__ if not provided
-    height: Optional[float] = None
-    length: Optional[float] = None
-    width: Optional[float] = None
-    
-    # Estimation field - set by estimator
+    # Estimation field
     estimated_departure: Optional[datetime] = None
     
-    def __post_init__(self):
-        """Set default dimensions if not provided."""
-        if self.height is None:
-            self.height = (CONTAINER_HEIGHT_HIGH_CUBE if self.is_high_cube 
-                          else CONTAINER_HEIGHT_STANDARD)
-        
-        if self.length is None:
-            self.length = CONTAINER_LENGTHS.get(self.container_type, CONTAINER_LENGTHS["FEU"])
-        
-        if self.width is None:
-            self.width = (CONTAINER_WIDTH_SPECIAL if self.container_type in SPECIAL_CONTAINER_TYPES 
-                         else CONTAINER_WIDTH_STANDARD)
+    @property
+    def length(self) -> float:
+        """Compatibility property for existing code."""
+        return self.length_m
+    
+    @property
+    def width(self) -> float:
+        """Compatibility property for existing code."""
+        return self.width_m
+    
+    @property
+    def height(self) -> float:
+        """Compatibility property for existing code."""
+        return self.height_m
     
     @property
     def is_special_type(self) -> bool:
         """Check if this is a special container type (Trailer/Swap Body)."""
-        return self.container_type in SPECIAL_CONTAINER_TYPES
+        return self.is_trailer or self.is_swap_body
     
     def days_in_terminal(self, current_date: datetime) -> int:
         """Calculate days since arrival."""
