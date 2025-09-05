@@ -37,15 +37,18 @@ class Train:
     """
     Optimized train with O(1) container operations.
     Uses hash maps for direct container lookup across all wagons.
-    """
-    
+    """ 
     def __init__(self,
                  train_id: Optional[str] = None,
                  num_wagons: int = DEFAULT_NUM_WAGONS,
                  wagon_length: float = DEFAULT_WAGON_LENGTH,
                  arrival_time: Optional[datetime] = None,
                  departure_time: Optional[datetime] = None,
-                 rail_track: Optional[str] = None):
+                 rail_track: Optional[str] = None,
+                 operator: Optional[str] = None,
+                 destination: Optional[str] = None,
+                 scheduled_arrival: Optional[datetime] = None,
+                 scheduled_departure: Optional[datetime] = None):
         
         if num_wagons <= 0:
             raise ValueError(f"Number of wagons must be positive, got {num_wagons}")
@@ -80,6 +83,12 @@ class Train:
         # Cache for performance
         self._total_containers = 0
         self._total_pickup_ids = 0
+
+        # Additional attributes
+        self.operator = operator
+        self.destination = destination
+        self.scheduled_arrival = scheduled_arrival
+        self.scheduled_departure = scheduled_departure
     
     @staticmethod
     def _generate_train_id() -> str:
