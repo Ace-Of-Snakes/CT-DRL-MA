@@ -449,10 +449,11 @@ class ContainerFactory:
         if self.use_estimator and containers:
             self.estimator.estimate_batch(containers, current_date)
 
-# Factory uses the estimator internally
-factory = ContainerFactory(use_estimator=True)
-containers = factory.create_containers("BOX", "Import", 1000)
-print(containers[0])
+if __name__ == "__main__":
+    # Factory uses the estimator internally
+    factory = ContainerFactory(use_estimator=True)
+    containers = factory.create_containers("BOX", "Import", 1000)
+    print(containers[:10])
 # Or use estimator directly
 # estimator = StandardDepartureEstimator()
 # estimator.estimate_batch(containers, current_date)
