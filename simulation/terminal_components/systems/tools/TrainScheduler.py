@@ -142,7 +142,7 @@ class TrainScheduler:
         return True
     
     def _has_conflict(self, arr1: float, dep1: float, 
-                     arr2: float, dep2: float) -> bool:
+                    arr2: float, dep2: float) -> bool:
         """
         Check if two trains have time conflict with buffer.
         Handles weekly wraparound.
@@ -151,17 +151,58 @@ class TrainScheduler:
         arr1_buffered = (arr1 - self.buffer_seconds) % WEEK_SECONDS
         dep1_buffered = (dep1 + self.buffer_seconds) % WEEK_SECONDS
         
-        # Check for overlap considering wraparound
-        if dep1_buffered < arr1_buffered:  # Train 1 wraps around week
-            if dep2 < arr2:  # Train 2 doesn't wrap
-                return not (arr2 > dep1_buffered and dep2 < arr1_buffered)
-            else:  # Both wrap
-                return True  # Conservative: assume conflict
-        else:  # Train 1 doesn't wrap
-            if dep2 < arr2:  # Train 2 wraps
-                return not (arr1_buffered > dep2 and dep1_buffered < arr2)
-            else:  # Neither wraps
-                return not (dep1_buffered < arr2 or arr1_buffered > dep2)
+        # Helper function to check if a point is within an interval (handling wraparound)
+        def point_in_interval(point: float, start: float, end: float) -> bool:
+            if start <= end:
+                # Normal interval
+                return start <= point <= end
+            else:
+                # Wraparound interval
+                return point >= start or point <= end
+        
+        # Check if any part of train1's buffered interval overlaps with train2's interval
+        # or any part of train2's interval overlaps with train1's buffered interval
+        
+        # Check if train1's arrival or departure falls within train2's interval
+        if point_in_interval(arr1_buffered, arr2, dep2):
+            return True
+        if point_in_interval(dep1_buffered, arr2, dep2):
+            return True
+        
+        # Check if train2's arrival or departure falls within train1's buffered interval
+        if point_in_interval(arr2, arr1_buffered, dep1_buffered):
+            return True
+        if point_in_interval(dep2, arr1_buffered, dep1_buffered):
+            return True
+        
+        # Special case: one interval completely contains the other
+        # This handles cases where both trains wrap or one completely encompasses the other
+        
+        # Check if train1 completely contains train2
+        if arr1_buffered <= dep1_buffered:  # Train1 doesn't wrap
+            if arr2 <= dep2:  # Train2 doesn't wrap
+                # Already handled above
+                pass
+            else:  # Train2 wraps
+                # If train1 doesn't wrap and train2 does, they conflict if train1 
+                # spans midnight
+                if arr1_buffered == 0 or dep1_buffered >= WEEK_SECONDS - 1:
+                    return True
+        else:  # Train1 wraps
+            if arr2 > dep2:  # Train2 also wraps
+                # Both wrap - they definitely overlap
+                return True
+            else:  # Train2 doesn't wrap
+                # Train1 wraps, train2 doesn't
+                # They DON'T conflict only if train2 is entirely in the gap
+                gap_start = dep1_buffered
+                gap_end = arr1_buffered
+                if arr2 >= gap_start and dep2 <= gap_end:
+                    return False
+                else:
+                    return True
+        
+        return False
     
     def _calculate_waste(self, arrival: float, departure: float,
                         track_trains: List[ScheduledTrain]) -> float:
@@ -293,7 +334,7 @@ if __name__ == "__main__":
     trains = parser.create_trains()
     
     # Schedule trains
-    scheduler = TrainScheduler(num_tracks=5)
+    scheduler = TrainScheduler(num_tracks=12)
     schedule = scheduler.schedule_trains(trains)
     
     # Print results
