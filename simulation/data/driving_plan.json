@@ -233,8 +233,8 @@
                 "operator": "DHL/ DB Cargo",
                 "plan": {
                     "0": {
-                        "arrival":["Tuesday", "14:10", "Tuesday", "14:40"],
-                        "departure":["Tuesday", "00:45", "Tuesday", "01:40"],
+                        "arrival":["Tuesday", "00:45", "Tuesday", "01:40"],
+                        "departure":["Tuesday", "14:10", "Tuesday", "14:40"],
                         "mirrored_on":
                         [
                             "Wednesday",
@@ -250,8 +250,8 @@
                 "operator": "DHL/ DB Cargo",
                 "plan": {
                     "0": {
-                        "arrival":["Sunday", "10:00", "Sunday", "19:30"],
-                        "departure":["Saturday", "22:30", "Saturday", "23:15"],
+                        "arrival":["Saturday", "22:30", "Saturday", "23:15"],
+                        "departure":["Sunday", "10:00", "Sunday", "19:30"],
                         "mirrored_on":
                         []
                     }
@@ -262,8 +262,8 @@
                 "operator": "DHL/ DB Cargo",
                 "plan": {
                     "0": {
-                        "arrival":["Sunday", "19:45", "Sunday", "20:15"],
-                        "departure":["Saturday", "22:10", "Saturday", "23:45"],
+                        "arrival":["Saturday", "22:10", "Saturday", "23:45"],
+                        "departure":["Sunday", "19:45", "Sunday", "20:15"],
                         "mirrored_on":
                         []
                     }
