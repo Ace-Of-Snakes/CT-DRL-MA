@@ -125,8 +125,8 @@ class Train:
         else:
             # Try wagons with space - O(1) average
             for idx in self.wagons_with_space:
-                wagon = self.wagons[idx]
-                if not wagon.has_exclusive_container() and self._add_to_wagon(idx, container):
+                # wagon = self.wagons[idx]
+                if self._add_to_wagon(idx, container):
                     return True
         
         return False
@@ -241,9 +241,9 @@ class Train:
             return len(self.empty_wagons) > 0
         else:
             # Check if any wagon with space doesn't have exclusive container
-            for idx in self.wagons_with_space:
-                if not self.wagons[idx].has_exclusive_container():
-                    return True
+            # for idx in self.wagons_with_space:
+            #     if not self.wagons[idx].has_exclusive_container():
+            #         return True
             return False
     
     # Keep existing time/status methods unchanged

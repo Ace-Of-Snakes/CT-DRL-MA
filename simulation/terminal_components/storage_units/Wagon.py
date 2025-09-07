@@ -9,7 +9,6 @@ from simulation.terminal_components.storage_units.Container import Container
 WAGON_LENGTH_STANDARD = 24.384
 MIN_CONTAINER_LENGTH = 2.5
 MAX_CONTAINERS_PER_WAGON = 10
-EXCLUSIVE_CONTAINER_TYPES = {"Trailer", "Swap Body"}
 
 class Wagon:
     """
@@ -69,14 +68,6 @@ class Wagon:
     def is_full(self) -> bool:
         """Check if full - O(1) operation."""
         return self.get_available_length() < MIN_CONTAINER_LENGTH
-    
-    def has_exclusive_container(self) -> bool:
-        """Check for exclusive types - O(1) if first container is exclusive."""
-        if not self.containers:
-            return False
-        # Only need to check first since exclusive containers must be alone
-        first_container = next(iter(self.containers.values()))
-        return first_container.container_type in EXCLUSIVE_CONTAINER_TYPES
     
     def get_container_list(self) -> List[Container]:
         """Get containers as list - O(n) but only when needed."""
