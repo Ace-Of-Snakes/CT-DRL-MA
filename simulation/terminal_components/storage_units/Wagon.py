@@ -6,7 +6,7 @@ from collections import OrderedDict
 from simulation.terminal_components.storage_units.Container import Container
 
 # ==================== WAGON CONSTANTS ====================
-WAGON_LENGTH_STANDARD = 24.384
+WAGON_LENGTH_STANDARD = 24.4
 MIN_CONTAINER_LENGTH = 2.5
 MAX_CONTAINERS_PER_WAGON = 10
 

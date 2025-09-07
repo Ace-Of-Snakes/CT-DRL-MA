@@ -9,7 +9,7 @@ from simulation.terminal_components.storage_units.Wagon import Wagon
 
 # ==================== TRAIN CONSTANTS ====================
 DEFAULT_NUM_WAGONS = 10
-DEFAULT_WAGON_LENGTH = 24.384
+DEFAULT_WAGON_LENGTH = 24.4
 TRAIN_ID_PREFIX = "TRN"
 TRAIN_ID_MIN_RANDOM = 10000
 TRAIN_ID_MAX_RANDOM = 99999
@@ -114,17 +114,17 @@ class Train:
             return False
         
         # Auto-placement
-        if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
-            # Try empty wagons only - O(1) average
-            for idx in self.empty_wagons:
-                if self._add_to_wagon(idx, container):
-                    return True
-        else:
-            # Try wagons with space - O(1) average
-            for idx in self.wagons_with_space:
-                # wagon = self.wagons[idx]
-                if self._add_to_wagon(idx, container):
-                    return True
+        # if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
+        #     # Try empty wagons only - O(1) average
+        #     for idx in self.empty_wagons:
+        #         if self._add_to_wagon(idx, container):
+        #             return True
+        # else:
+        # Try wagons with space - O(1) average
+        for idx in self.wagons_with_space:
+            # wagon = self.wagons[idx]
+            if self._add_to_wagon(idx, container):
+                return True
         
         return False
     
