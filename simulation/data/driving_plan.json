@@ -13,6 +13,7 @@
             "6927X": {
                 "destination": "Bremerhaven/CT4",
                 "operator": "boxXpress",
+                "operator_short": "BOX",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "21:00", "Monday", "21:30"],
@@ -35,6 +36,7 @@
             "6926X": {
                 "destination": "CTL Altenwerder/ HHL Eurokombi Hamburg",
                 "operator": "boxXpress",
+                "operator_short": "BOX",
                 "plan": {
                     "0": {
                         "arrival":["Wednesday", "08:00", "Wednesday", "08:30"],
@@ -68,6 +70,7 @@
             "5977X/4211X": {
                 "destination": "Verona QE",
                 "operator": "Kombiverkehr",
+                "operator_short": "KOMBI",
                 "plan": {
                     "0": {
                         "arrival":["Wednesday", "06:45", "Wednesday", "07:15"],
@@ -92,6 +95,7 @@
             "9099X": {
                 "destination": "Hamburg/Regensburg",
                 "operator": "IGS",
+                "operator_short": "IGS",
                 "plan": {
                     "0": {
                         "arrival":["Tuesday", "08:00", "Tuesday", "08:30"],
@@ -104,6 +108,7 @@
             "9104X": {
                 "destination": "Hamburg/Aschaffenburg",
                 "operator": "IGS",
+                "operator_short": "IGS",
                 "plan": {
                     "0": {
                         "arrival":["Wednesday", "19:00", "Wednesday", "19:30"],
@@ -118,6 +123,7 @@
             "9500X": {
                 "destination": "Hamburg/Schweinfurt",
                 "operator": "IGS",
+                "operator_short": "IGS",
                 "plan": {
                     "0": {
                         "arrival":["Saturday", "09:30", "Saturday", "10:00"],
@@ -130,6 +136,7 @@
             "4970X": {
                 "destination": "Rotterdam",
                 "operator": "Hutchinson Ports intermodal",
+                "operator_short": "EGS",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "00:30", "Monday", "01:00"],
@@ -166,6 +173,7 @@
             "5002X": {
                 "destination": "Hamburg",
                 "operator": "Hellmann",
+                "operator_short": "HEL",
                 "plan": {
                     "0": {
                         "arrival":["Tuesday", "04:20", "Tuesday", "04:45"],
@@ -192,6 +200,7 @@
             "5034X": {
                 "destination": "Hamburg/Bremerhaven über Maschen",
                 "operator": "Transfracht/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "05:30", "Monday", "06:00"],
@@ -207,6 +216,7 @@
             "5038X": {
                 "destination": "Hamburg/Regensburg",
                 "operator": "Transfracht/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Thursday", "08:00", "Thursday", "09:15"],
@@ -219,6 +229,7 @@
             "503XX": {
                 "destination": "Maschen",
                 "operator": "Transfracht/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Thursday", "05:32", "Thursday", "06:00"],
@@ -231,6 +242,7 @@
             "5013X": {
                 "destination": "Lehrte",
                 "operator": "DHL/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Tuesday", "00:45", "Tuesday", "01:40"],
@@ -248,6 +260,7 @@
             "5000X": {
                 "destination": "Hamburg",
                 "operator": "DHL/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Saturday", "22:30", "Saturday", "23:15"],
@@ -260,6 +273,7 @@
             "5008X": {
                 "destination": "Wuppertal",
                 "operator": "DHL/ DB Cargo",
+                "operator_short": "DBI",
                 "plan": {
                     "0": {
                         "arrival":["Saturday", "22:10", "Saturday", "23:45"],
@@ -272,6 +286,7 @@
             "8889X": {
                 "destionation": "München/Bremerhaven",
                 "operator": "Metrans",
+                "operator_short": "MET",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "02:37", "Monday", "03:30"],
@@ -287,6 +302,7 @@
             "8889Y": {
                 "destionation": "Hamburg/München",
                 "operator": "Metrans",
+                "operator_short": "MET",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "05:06", "Monday", "05:30"],
@@ -302,6 +318,7 @@
             "8889Z": {
                 "destionation": "Hamburg",
                 "operator": "Metrans",
+                "operator_short": "MET",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "13:352", "Monday", "14:30"],
@@ -317,6 +334,7 @@
             "8889A": {
                 "destionation": "Bremerhaven",
                 "operator": "Metrans",
+                "operator_short": "MET",
                 "plan": {
                     "0": {
                         "arrival":["Monday", "00:52", "Monday", "01:30"],

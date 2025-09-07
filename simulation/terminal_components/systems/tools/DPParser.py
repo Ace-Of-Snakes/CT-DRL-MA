@@ -48,7 +48,7 @@ class DrivingPlanParser:
         trains = []
         
         for train_id, train_info in self.trains_data.items():
-            operator = train_info['operator']
+            operator = train_info['operator_short']
             
             for plan_key, schedule in train_info['plan'].items():
                 # Base train
