@@ -5,10 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from collections import OrderedDict
 from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.Wagon import (
-    Wagon,
-    EXCLUSIVE_CONTAINER_TYPES
-)
+from simulation.terminal_components.storage_units.Wagon import Wagon
 
 # ==================== TRAIN CONSTANTS ====================
 DEFAULT_NUM_WAGONS = 10
@@ -237,14 +234,14 @@ class Train:
         if not container:
             return False
         
-        if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
-            return len(self.empty_wagons) > 0
-        else:
+        # if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
+        #     return len(self.empty_wagons) > 0
+        # else:
             # Check if any wagon with space doesn't have exclusive container
-            # for idx in self.wagons_with_space:
-            #     if not self.wagons[idx].has_exclusive_container():
-            #         return True
-            return False
+        # for idx in self.wagons_with_space:
+        #     if not self.wagons[idx].has_exclusive_container():
+        #         return True
+        return len(self.wagons_with_space) > 0
     
     # Keep existing time/status methods unchanged
     def start_loading(self, current_time: datetime) -> None:
@@ -280,5 +277,5 @@ class Train:
             'utilization_rate': used_capacity / total_capacity if total_capacity > 0 else 0,
             'status': self.status,
             'rail_track': self.rail_track,
-            'departed_on_time': True if self.realised_departure_time < self.departure_time else False
+            'departed_on_time': True if self.realised_departure_time is not None and self.departure_time is not None and self.realised_departure_time < self.departure_time else False
         }
