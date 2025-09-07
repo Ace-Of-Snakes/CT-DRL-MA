@@ -11,7 +11,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.systems.ContainerFactory import ContainerFactory
+from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
 
 
 class TestContainerFactory(unittest.TestCase):
