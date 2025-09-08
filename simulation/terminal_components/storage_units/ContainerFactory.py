@@ -14,55 +14,41 @@ class ContainerFactory:
     """
     Factory class for efficient container generation using preloaded models and data.
     Loads all necessary data once at initialization and uses vectorized operations.
+    Now supports separate distributions and models for import and export operations.
     """
     
     def __init__(self, 
-                 operator_dist_file: str = "simulation/data/train_operator_container_type_distribution.json",
+                 import_dist_file: str = "simulation/data/train_operator_container_type_distribution_import.json",
+                 export_dist_file: str = "simulation/data/train_operator_container_type_distribution_export.json",
                  container_data_file: str = "simulation/data/container_data.csv",
                  models_folder: str = "simulation/data/models",
-                 export_kde_file: str = "kde_dwelltime_export.pkl",
                  use_estimator: bool = True):
         """
         Initialize factory with all necessary data loaded into memory.
         
         Args:
-            operator_dist_file: Path to operator distribution JSON
+            import_dist_file: Path to importer distribution JSON
+            export_dist_file: Path to exporter distribution JSON
             container_data_file: Path to container specifications CSV
-            models_folder: Folder containing KDE models
-            export_kde_file: Name of export KDE file in models folder
+            models_folder: Base folder containing 'import' and 'export' subfolders with KDE models
             use_estimator: Whether to apply departure estimation to containers
         """
-        # Load operator distributions
-        with open(operator_dist_file, 'r') as f:
-            self.operator_dict = json.load(f)
+        # Load operator distributions for both import and export
+        with open(import_dist_file, 'r') as f:
+            self.import_operator_dict = json.load(f)
+        
+        with open(export_dist_file, 'r') as f:
+            self.export_operator_dict = json.load(f)
         
         # Load container specifications
         self._load_container_specs(container_data_file)
         
-        # Load KDE models for import containers
-        self.import_kde_models = self._load_kde_models(models_folder)
+        # Load KDE models for both import and export containers
+        import_models_folder = os.path.join(models_folder, "import")
+        export_models_folder = os.path.join(models_folder, "export")
         
-        # Load single export KDE model
-        export_path = os.path.join(models_folder, export_kde_file)
-        with open(export_path, 'rb') as f:
-            export_data = pickle.load(f)
-        
-        # Handle different possible formats of the export KDE file
-        if isinstance(export_data, gaussian_kde):
-            # Already a KDE object
-            self.export_kde = export_data
-        elif isinstance(export_data, dict) and "weighted_days" in export_data:
-            # Dictionary with parameters
-            self.export_kde = gaussian_kde(
-                export_data["weighted_days"],
-                bw_method=export_data.get("bw_method", None)
-            )
-        else:
-            # Try to use it directly as data for KDE
-            try:
-                self.export_kde = gaussian_kde(export_data)
-            except Exception as e:
-                raise ValueError(f"Could not interpret export KDE file format: {e}")
+        self.import_kde_models = self._load_kde_models(import_models_folder)
+        self.export_kde_models = self._load_kde_models(export_models_folder)
         
         # Initialize departure estimator
         self.use_estimator = use_estimator
@@ -94,25 +80,42 @@ class ContainerFactory:
         self.available_container_types = set(self.container_specs.keys())
     
     def _load_kde_models(self, models_folder: str) -> Dict:
-        """Load all import KDE models."""
+        """Load all KDE models from a folder."""
         kde_models = {}
+        
+        if not os.path.exists(models_folder):
+            print(f"Warning: Models folder {models_folder} does not exist")
+            return kde_models
+        
         for file in os.listdir(models_folder):
-            if file.endswith("_dwelltime_kde.pkl") and not file.startswith("kde_dwelltime_export"):
-                container_type = file.replace("_dwelltime_kde.pkl", "")
-                with open(os.path.join(models_folder, file), 'rb') as f:
-                    kde_data = pickle.load(f)
-                
-                # Handle different possible formats
-                if isinstance(kde_data, gaussian_kde):
-                    kde_models[container_type] = kde_data
-                elif isinstance(kde_data, dict) and "weighted_days" in kde_data:
-                    kde_models[container_type] = gaussian_kde(
-                        kde_data["weighted_days"],
-                        bw_method=kde_data.get("bw_method", None)
-                    )
+            if file.endswith("_dwelltime_kde.pkl"):
+                # Extract container type from filename
+                # Handle both old format (e.g., "FEU_dwelltime_kde.pkl")
+                # and potential new format (e.g., "kde_dwelltime_FEU.pkl")
+                if file.startswith("kde_dwelltime_"):
+                    # Old export format - skip as we'll use new structure
+                    continue
                 else:
-                    # Skip if format is unrecognized
-                    print(f"Warning: Skipping {file} - unrecognized format")
+                    # Standard format: CONTAINER_TYPE_dwelltime_kde.pkl
+                    container_type = file.replace("_dwelltime_kde.pkl", "")
+                
+                file_path = os.path.join(models_folder, file)
+                try:
+                    with open(file_path, 'rb') as f:
+                        kde_data = pickle.load(f)
+                    
+                    # Handle different possible formats
+                    if isinstance(kde_data, gaussian_kde):
+                        kde_models[container_type] = kde_data
+                    elif isinstance(kde_data, dict) and "weighted_days" in kde_data:
+                        kde_models[container_type] = gaussian_kde(
+                            kde_data["weighted_days"],
+                            bw_method=kde_data.get("bw_method", None)
+                        )
+                    else:
+                        print(f"Warning: Skipping {file} - unrecognized format")
+                except Exception as e:
+                    print(f"Warning: Could not load {file}: {e}")
                     
         return kde_models
     
@@ -126,7 +129,7 @@ class ContainerFactory:
         Create containers for a given operator and direction.
         
         Args:
-            operator: Operator name (must exist in operator_dict)
+            operator: Operator name (must exist in appropriate operator_dict)
             direction: "Import" or "Export"
             n_containers: Number of containers to create
             base_arrival_date: Base arrival date (defaults to now)
@@ -135,8 +138,14 @@ class ContainerFactory:
         Returns:
             List of Container objects with estimated departures
         """
-        if operator not in self.operator_dict:
-            raise ValueError(f"Unknown operator: {operator}")
+        # Select the appropriate operator dictionary based on direction
+        if direction == "Import":
+            operator_dict = self.import_operator_dict
+        else:  # Export
+            operator_dict = self.export_operator_dict
+        
+        if operator not in operator_dict:
+            raise ValueError(f"Unknown operator: {operator} for direction: {direction}")
         
         if base_arrival_date is None:
             base_arrival_date = datetime.now()
@@ -166,14 +175,20 @@ class ContainerFactory:
         Returns:
             Structured array with sampled properties
         """
-        operator_data = self.operator_dict[operator]
+        # Select the appropriate operator dictionary based on direction
+        if direction == "Import":
+            operator_dict = self.import_operator_dict
+        else:  # Export
+            operator_dict = self.export_operator_dict
+        
+        operator_data = operator_dict[operator]
         
         # Extract container types and probabilities (filter to available types)
         all_types = list(operator_data.keys())
         valid_types = [t for t in all_types if t in self.available_container_types]
         
         if not valid_types:
-            raise ValueError(f"No valid container types found for operator {operator}")
+            raise ValueError(f"No valid container types found for operator {operator} in {direction}")
         
         container_types = np.array(valid_types)
         probs = np.array([operator_data[c]["P_for_operator"] for c in container_types])
@@ -231,31 +246,32 @@ class ContainerFactory:
                         sampled_types: np.ndarray,
                         direction: Direction,
                         n_samples: int) -> np.ndarray:
-        """Sample dwell times based on direction with precision handling."""
+        """Sample dwell times based on direction and container type with precision handling."""
         dwell_times = np.empty(n_samples)
         
-        if direction == "Export":
-            # All exports use same KDE
-            sampled = self.export_kde.resample(n_samples)
-            # Handle both 1D and 2D array returns from resample
-            if sampled.ndim > 1:
-                dwell_times[:] = sampled[0]
+        # Select the appropriate KDE models based on direction
+        if direction == "Import":
+            kde_models = self.import_kde_models
+        else:  # Export
+            kde_models = self.export_kde_models
+        
+        # Set default value for containers without KDE
+        dwell_times[:] = 2.0  # Default if no KDE available
+        
+        # Process each unique container type
+        for ct in np.unique(sampled_types):
+            if ct in kde_models:
+                idx = np.where(sampled_types == ct)[0]
+                sampled = kde_models[ct].resample(len(idx))
+                # Handle both 1D and 2D array returns from resample
+                if sampled.ndim > 1:
+                    dwell_times[idx] = sampled[0]
+                else:
+                    dwell_times[idx] = sampled
             else:
-                dwell_times[:] = sampled
-        else:
-            # Imports use type-specific KDEs
-            # Set default value for containers without KDE
-            dwell_times[:] = 2.0  # Default if no KDE available
-            
-            for ct in np.unique(sampled_types):
-                if ct in self.import_kde_models:
-                    idx = np.where(sampled_types == ct)[0]
-                    sampled = self.import_kde_models[ct].resample(len(idx))
-                    # Handle both 1D and 2D array returns
-                    if sampled.ndim > 1:
-                        dwell_times[idx] = sampled[0]
-                    else:
-                        dwell_times[idx] = sampled
+                # If no specific KDE model exists for this container type,
+                # keep the default value (2.0 days)
+                print(f"Warning: No KDE model found for {direction} container type {ct}, using default dwell time")
         
         # Ensure non-negative values
         dwell_times = np.maximum(dwell_times, 0)
@@ -448,12 +464,82 @@ class ContainerFactory:
         """
         if self.use_estimator and containers:
             self.estimator.estimate_batch(containers, current_date)
+    
+    def get_available_operators(self, direction: Direction) -> List[str]:
+        """
+        Get list of available operators for a given direction.
+        
+        Args:
+            direction: "Import" or "Export"
+            
+        Returns:
+            List of operator names
+        """
+        if direction == "Import":
+            return list(self.import_operator_dict.keys())
+        else:  # Export
+            return list(self.export_operator_dict.keys())
+    
+    def get_kde_model_summary(self) -> Dict:
+        """
+        Get summary of loaded KDE models.
+        
+        Returns:
+            Dictionary with model counts and available container types
+        """
+        return {
+            "import_models": {
+                "count": len(self.import_kde_models),
+                "container_types": sorted(self.import_kde_models.keys())
+            },
+            "export_models": {
+                "count": len(self.export_kde_models),
+                "container_types": sorted(self.export_kde_models.keys())
+            }
+        }
 
+
+# Example usage
 if __name__ == "__main__":
-    # Factory uses the estimator internally
-    factory = ContainerFactory(use_estimator=True)
-    containers = factory.create_containers("BOX", "Import", 1000)
-    print(containers[:10])
-# Or use estimator directly
-# estimator = StandardDepartureEstimator()
-# estimator.estimate_batch(containers, current_date)
+    # Initialize factory with new structure
+    factory = ContainerFactory(
+        use_estimator=True
+    )
+    
+    # Check loaded models
+    model_summary = factory.get_kde_model_summary()
+    print("KDE Models loaded:")
+    print(f"  Import: {model_summary['import_models']['count']} models")
+    print(f"  Export: {model_summary['export_models']['count']} models")
+    
+    # Check available operators
+    import_operators = factory.get_available_operators("Import")
+    export_operators = factory.get_available_operators("Export")
+    print(f"\nAvailable operators:")
+    print(f"  Import: {import_operators}")  # Show first 5
+    print(f"  Export: {export_operators}")  # Show first 5
+    
+    # Test container generation for both directions
+    print("\n=== Testing Import Containers ===")
+    if import_operators:
+        import_containers = factory.create_containers(
+            operator=import_operators[0],
+            direction="Import",
+            n_containers=10000
+        )
+        print(f"Created {len(import_containers)} import containers")
+        for c in import_containers[:3]:
+            print(f"  {c.container_id}: {c.container_type}, {c.direction}, "
+                  f"dwell: {(c.departure_date - c.arrival_date).days} days")
+    
+    print("\n=== Testing Export Containers ===")
+    if export_operators:
+        export_containers = factory.create_containers(
+            operator=export_operators[0],
+            direction="Export",
+            n_containers=10000
+        )
+        print(f"Created {len(export_containers)} export containers")
+        for c in export_containers[:3]:
+            print(f"  {c.container_id}: {c.container_type}, {c.direction}, "
+                  f"dwell: {(c.departure_date - c.arrival_date).days} days")
