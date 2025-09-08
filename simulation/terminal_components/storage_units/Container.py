@@ -27,7 +27,7 @@ class Container:
     
     # Physical properties - set by factory
     length_ft: int = 40
-    length_m: float = 12.19
+    length_m: float = 12.2
     width_m: float = 2.44
     height_m: float = 2.44
     is_high_cube: bool = False
