@@ -9,7 +9,7 @@ from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
 from simulation.terminal_components.vehicles.TruckFactory import TruckFactory
-from simulation.terminal_components.systems.tools.TimeEncoder import WeeklyTimeEncoder
+from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
 
 # ==================== CONSTANTS ====================
 # Container type groups
