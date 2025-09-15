@@ -181,7 +181,7 @@ def main_same_length_demo():
 
     if to_remove:
         rec = yard.containers[to_remove.container_id].placement
-        yard.remove_container(rec, to_remove)
+        yard.remove_container(to_remove)
         print(f"Removed top container: {to_remove.container_id}")
         draw_yard(yard, title=f"After removing {to_remove.container_id}")
 

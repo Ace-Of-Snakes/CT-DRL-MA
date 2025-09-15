@@ -136,7 +136,7 @@ class TestBooleanStorage(unittest.TestCase):
             self.assertNotIn("C001", self.yard.accessible_containers)
             
             # Remove top container
-            self.yard.remove_container(placements_above[0], c2)
+            self.yard.remove_container(c2)
             
             # Check C001 is accessible again
             self.assertTrue(self.yard.containers["C001"].is_accessible,
@@ -144,7 +144,7 @@ class TestBooleanStorage(unittest.TestCase):
             self.assertIn("C001", self.yard.accessible_containers)
         
         # Remove ground container
-        self.yard.remove_container(placement1, c1)
+        self.yard.remove_container(c1)
         
         # Check occupancy mask is cleared
         for i in range(n_splits):

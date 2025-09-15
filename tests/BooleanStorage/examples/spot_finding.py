@@ -169,7 +169,7 @@ def main():
     if placed:
         c_last, pos_last = placed[-1]
         print(f"Removing last placed container: {c_last.container_id}")
-        yard.remove_container(pos_last, c_last)
+        yard.remove_container(c_last)
         draw_yard(yard, title=f"Yard after removing {c_last.container_id}")
 
     # Optional: find moveable containers and show a couple of their destinations

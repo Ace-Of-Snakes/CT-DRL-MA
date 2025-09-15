@@ -220,7 +220,7 @@ class BooleanStorageYard:
         if placement.tier > 0:
             self._update_accessibility_below(placement, make_accessible=False)
     
-    def remove_container(self, placement: "PlacementResult", container: "Container") -> Optional["Container"]:
+    def remove_container(self, container: "Container") -> Optional["Container"]:
         """
         Remove container from yard.
         - Clear occupancy.
@@ -252,6 +252,25 @@ class BooleanStorageYard:
 
         return record.container
     
+    def move_container(self, container_id: str, destination: "PlacementResult") -> bool:
+        """
+        Minimal move: remove then add with no validity checks.
+        Expects 'destination' to be a PlacementResult (e.g., from find_moveable_containers).
+
+        Returns:
+            True if the container existed and was moved, False if container_id not found.
+        """
+        rec = self.containers.get(container_id)
+        if rec is None:
+            return False
+
+        # Remove from current placement
+        self.remove_container(rec.container)
+
+        # Add at destination
+        self.add_container(rec.container, destination)
+        return True
+
     def _update_accessibility_below(self, placement: "PlacementResult", make_accessible: bool):
         """
         Update accessibility for the container directly below the given placement:
