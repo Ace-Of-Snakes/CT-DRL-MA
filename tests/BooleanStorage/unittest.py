@@ -1,411 +1,339 @@
 import unittest
-import time
 import numpy as np
-from datetime import datetime
+import time
+import matplotlib.pyplot as plt
 from typing import List, Tuple
+from datetime import datetime
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-from simulation.terminal_components.storage.constants import CONTAINER_LENGTHS_FT
 
 
-# ============= USAGE EXAMPLE =============
-def usage_example():
-    """Simple usage example demonstrating basic operations."""
-    print("=== USAGE EXAMPLE ===\n")
-    
-    # Create a small yard
-    yard = BooleanStorageYard(
-        n_rows=3,
-        n_bays=10,
-        n_tiers=3,
-        coordinates=[
-            (1, 1, "r"),   # Bay 1, Row 1 for reefers
-            (10, 1, "r"),  # Bay 10, Row 1 for reefers
-            (5, 2, "dg"),  # Bay 5, Row 2 for dangerous goods
-        ]
-    )
-    
-    # Create containers
-    container_20ft = Container(
-        container_id="C001",
-        direction="Import",
-        container_type="20ft",
-        arrival_date=datetime.now(),
-        departure_date=datetime.now(),
-        goods_type="Regular",
-        length_ft=20
-    )
-    
-    container_40ft = Container(
-        container_id="C002",
-        direction="Import",
-        container_type="40ft",
-        arrival_date=datetime.now(),
-        departure_date=datetime.now(),
-        goods_type="Reefer",
-        length_ft=40
-    )
-    
-    # Search for placement
-    placements_20 = yard.search_placement_all_tiers(container_20ft, target_bay=3, max_proximity=7)
-    print(f"Found {len(placements_20)} placements for 20ft container")
-    if placements_20:
-        best = placements_20[0]
-        print(f"Best placement: Row {best.row}, Bay {best.bay}, Tier {best.tier}, Split {best.start_split}")
-        print('other placements: ', placements_20)
-        yard.add_container(container_20ft, best)
-        print("Container added successfully\n")
-    
-    # Add reefer container
-    placements_40 = yard.search_placement_all_tiers(container_40ft, target_bay=0, max_proximity=1)
-    print(f"Found {len(placements_40)} placements for 40ft reefer")
-    if placements_40:
-        best = placements_40[0]
-        print(f"Best placement: Row {best.row}, Bay {best.bay}, Tier {best.tier}")
-        yard.add_container(container_40ft, best)
-    
-    # Find moveable containers
-    moveable = yard.find_moveable_containers()
-    print(f"\nMoveable containers: {list(moveable.keys())}")
-
-
-# ============= UNIT TESTS =============
-class TestBooleanStorageYard(unittest.TestCase):
+class TestBooleanStorage(unittest.TestCase):
+    """Comprehensive tests for BooleanStorageYard with performance analysis."""
     
     def setUp(self):
-        """Set up test yard with standard configuration."""
+        """Set up test yard with special positions."""
+        self.coordinates = [
+            (1, 1, "r"),   # Reefer position
+            (2, 1, "dg"),  # Dangerous goods
+            (3, 1, "sb_t"), # Swap body/trailer
+            (1, 2, "r"),
+            (2, 2, "dg"),
+        ]
         self.yard = BooleanStorageYard(
-            n_rows=5,
-            n_bays=15,
-            n_tiers=4,
-            coordinates=[
-                (1, 1, "r"), (1, 2, "r"),  # Reefer positions
-                (15, 1, "r"), (15, 2, "r"),
-                (7, 3, "dg"), (8, 3, "dg"),  # Dangerous goods
-                (1, 5, "sb_t"), (2, 5, "sb_t"),  # Swap bodies
-            ]
+            n_rows=5, 
+            n_bays=58, 
+            n_tiers=5,
+            coordinates=self.coordinates
         )
     
-    def test_initialization(self):
-        """Test yard initialization."""
-        self.assertEqual(self.yard.n_rows, 5)
-        self.assertEqual(self.yard.n_bays, 15)
-        self.assertEqual(self.yard.n_tiers, 4)
-        self.assertEqual(self.yard.split_factor, 20)
-        
-        # Check mask shapes
-        self.assertEqual(self.yard.base_mask.shape, (4, 5, 15*20))  # 15 bays * 4 splits
-        self.assertEqual(self.yard.reefer_mask.shape, (4, 5, 15*20))
-    
-    def test_20ft_container_placement(self):
-        """Test placing 20ft containers (2 sub-bays)."""
-        container = Container(
-            container_id="TEST20",
+    def _create_container(self, 
+                         container_id: str, 
+                         length_ft: int = 40,
+                         goods_type: str = "Regular",
+                         is_swap_body: bool = False,
+                         is_trailer: bool = False) -> Container:
+        """Helper to create test containers."""
+        return Container(
+            container_id=container_id,
             direction="Import",
-            container_type="20ft",
+            container_type=f"{length_ft}ft",
             arrival_date=datetime.now(),
             departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=20
+            goods_type=goods_type,
+            length_ft=length_ft,
+            length_m=length_ft * 0.3048,
+            width_m=2.44,
+            height_m=2.59,
+            is_swap_body=is_swap_body,
+            is_trailer=is_trailer
         )
-        
-        placements = self.yard.search_placement_all_tiers(container, target_bay=5, max_proximity=5)
-        
-        # Should find placements
-        self.assertGreater(len(placements), 0)
-        
-        # First placement should be ground tier
-        first = placements[0]
-        self.assertEqual(first.tier, 0)
-        
-        # Valid start positions for 20ft (2 splits) are 0 or 2
-        self.assertIn(first.start_split, [0, 2])
-        
-        # Add container
-        self.yard.add_container(container, first)
-        
-        # Verify container is placed
-        self.assertIsNotNone(self.yard.containers[first.row, first.bay, first.tier, first.start_split])
     
-    def test_40ft_container_placement(self):
-        """Test placing 40ft containers (full bay)."""
-        container = Container(
-            container_id="TEST40",
-            direction="Import",
-            container_type="40ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=40
-        )
+    def test_container_placement_types(self):
+        """Test placement of different container types in appropriate positions."""
+        # Test regular container placement
+        regular = self._create_container("REG001", 40, "Regular")
+        placements = self.yard.search_placement_all_tiers(regular, target_bay=5, max_proximity=10)
+        self.assertGreater(len(placements), 0, "Should find placements for regular container")
         
-        placements = self.yard.search_placement_all_tiers(container, target_bay=7, max_proximity=5)
+        # Place regular container
+        self.yard.add_container(regular, placements[0])
+        self.assertIn("REG001", self.yard.containers)
         
+        # Test reefer container - should only go in reefer positions
+        reefer = self._create_container("REF001", 40, "Reefer")
+        reefer_placements = self.yard.search_placement_all_tiers(reefer, target_bay=0, max_proximity=10)
+        
+        for p in reefer_placements[:5]:  # Check first few placements
+            # Bay 0 and 1 have reefer positions in rows 0 and 1
+            self.assertIn(p.bay, [0, 1], "Reefer should be in reefer bays")
+            self.assertIn(p.row, [0, 1], "Reefer should be in reefer rows")
+        
+        # Test dangerous goods
+        dangerous = self._create_container("DG001", 40, "DangerousGoods")
+        dg_placements = self.yard.search_placement_all_tiers(dangerous, target_bay=1, max_proximity=10)
+        
+        for p in dg_placements[:5]:
+            self.assertIn(p.bay, [1, 2], "Dangerous goods should be in DG bays")
+            self.assertIn(p.row, [0, 1], "Dangerous goods should be in DG rows")
+        
+        # Test swap body - should only be on ground tier
+        swap_body = self._create_container("SB001", 40, "Regular", is_swap_body=True)
+        sb_placements = self.yard.search_placement_all_tiers(swap_body, target_bay=2, max_proximity=10)
+        
+        for p in sb_placements[:5]:
+            self.assertEqual(p.tier, 0, "Swap body must be on ground tier")
+            self.assertEqual(p.bay, 2, "Swap body should be in swap body bay")
+            self.assertEqual(p.row, 0, "Swap body should be in swap body row")
+    
+    def test_mask_updates_on_operations(self):
+        """Test that masks update correctly on add/remove operations."""
+        # Add container to ground tier
+        c1 = self._create_container("C001", 40)
+        placements = self.yard.search_placement_all_tiers(c1, target_bay=5, max_proximity=10)
         self.assertGreater(len(placements), 0)
         
-        first = placements[0]
-        # 40ft takes full bay, so start_split must be 0
-        self.assertEqual(first.start_split, 0)
+        placement1 = placements[0]
+        self.yard.add_container(c1, placement1)
         
-        # Add and verify
-        self.yard.add_container(container, first)
+        # Check occupancy mask is updated
+        abs_start = placement1.bay * self.yard.split_factor + placement1.start_split
+        n_splits = self.yard.container_length_map[40]
         
-        # All 4 splits should have the same container
-        for split in range(4):
-            self.assertEqual(
-                self.yard.containers[first.row, first.bay, first.tier, split],
-                container
+        for i in range(n_splits):
+            pos = abs_start + i
+            self.assertTrue(
+                self.yard.occupancy_mask[placement1.tier, placement1.row, pos],
+                f"Position {pos} should be occupied"
+            )
+        
+        # Try to place another container at same position - should not be possible
+        c2 = self._create_container("C002", 40)
+        placements2 = self.yard.search_placement_all_tiers(c2, target_bay=placement1.bay, max_proximity=0)
+        
+        # Filter to same row and tier
+        same_spot = [p for p in placements2 
+                    if p.row == placement1.row and p.tier == placement1.tier 
+                    and p.bay == placement1.bay and p.start_split == placement1.start_split]
+        self.assertEqual(len(same_spot), 0, "Should not be able to place at occupied position")
+        
+        # Stack container on top
+        placements_above = [p for p in placements2 
+                           if p.row == placement1.row and p.tier == placement1.tier + 1
+                           and p.bay == placement1.bay]
+        self.assertGreater(len(placements_above), 0, "Should be able to stack on top")
+        
+        if placements_above:
+            self.yard.add_container(c2, placements_above[0])
+            
+            # Check that C001 is no longer accessible
+            self.assertFalse(self.yard.containers["C001"].is_accessible,
+                           "Container with something above should not be accessible")
+            self.assertNotIn("C001", self.yard.accessible_containers)
+            
+            # Remove top container
+            self.yard.remove_container(placements_above[0], c2)
+            
+            # Check C001 is accessible again
+            self.assertTrue(self.yard.containers["C001"].is_accessible,
+                          "Container should be accessible after removing container above")
+            self.assertIn("C001", self.yard.accessible_containers)
+        
+        # Remove ground container
+        self.yard.remove_container(placement1, c1)
+        
+        # Check occupancy mask is cleared
+        for i in range(n_splits):
+            pos = abs_start + i
+            self.assertFalse(
+                self.yard.occupancy_mask[placement1.tier, placement1.row, pos],
+                f"Position {pos} should be free after removal"
             )
     
-    def test_45ft_cross_bay_placement(self):
-        """Test placing 45ft containers that span 2 bays."""
-        container = Container(
-            container_id="TEST45",
-            direction="Import",
-            container_type="45ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=45
-        )
+    def test_cross_bay_placement(self):
+        """Test containers that span multiple bays."""
+        # Create a long container (if such exists in the system)
+        long_container = self._create_container("LONG001", 40)
         
-        placements = self.yard.search_placement_all_tiers(container, target_bay=5, max_proximity=5)
+        # Place at bay boundary
+        placements = self.yard.search_placement_all_tiers(long_container, target_bay=0, max_proximity=10)
         
-        if placements:  # 45ft requires 5 splits, spanning 2 bays
-            first = placements[0]
-            self.yard.add_container(container, first)
+        # Find placements that span bays (start_split > 0)
+        cross_bay = [p for p in placements if p.start_split > 0]
+        
+        if cross_bay:
+            self.yard.add_container(long_container, cross_bay[0])
             
-            # Verify spans 2 bays
-            placed_bays = set()
-            for row in range(self.yard.n_rows):
-                for bay in range(self.yard.n_bays):
-                    for split in range(4):
-                        if self.yard.containers[row, bay, first.tier, split] == container:
-                            placed_bays.add(bay)
+            # Verify container is stored correctly
+            self.assertIn("LONG001", self.yard.containers)
             
-            self.assertEqual(len(placed_bays), 2, "45ft container should span 2 bays")
+            # Verify occupancy across bays
+            placement = cross_bay[0]
+            abs_start = placement.bay * self.yard.split_factor + placement.start_split
+            n_splits = self.yard.container_length_map[40]
+            
+            for i in range(n_splits):
+                pos = abs_start + i
+                if pos < self.yard.total_splits:
+                    self.assertTrue(
+                        self.yard.occupancy_mask[placement.tier, placement.row, pos],
+                        f"Cross-bay position {pos} should be occupied"
+                    )
     
-    def test_reefer_placement(self):
-        """Test reefer containers only go in reefer positions."""
-        reefer = Container(
-            container_id="REEF1",
-            direction="Import",
-            container_type="40ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Reefer",
-            length_ft=40
-        )
+    def test_performance_scaling(self):
+        """Stress test and performance analysis with visualization."""
+        results = {
+            'containers': [],
+            'placement_time': [],
+            'search_time': [],
+            'moveable_time': [],
+            'proximity_results': {}
+        }
         
-        # Search near reefer area (bay 0)
-        placements = self.yard.search_placement_all_tiers(reefer, target_bay=0, max_proximity=5)
+        # Test scaling with number of containers
+        container_counts = [10, 50, 100, 200, 400]
         
-        # Should find placements in reefer zones
-        self.assertGreater(len(placements), 0)
+        for count in container_counts:
+            # Reset yard
+            self.yard = BooleanStorageYard(
+                n_rows=10, 
+                n_bays=50, 
+                n_tiers=5,
+                coordinates=[]
+            )
+            
+            # Placement time
+            start = time.perf_counter()
+            containers_added = 0
+            for i in range(count):
+                c = self._create_container(f"PERF{i:04d}", 
+                                          np.random.choice([20, 40]),
+                                          np.random.choice(["Regular", "Reefer", "DangerousGoods"]))
+                
+                placements = self.yard.search_placement_all_tiers(c, 
+                                                                 target_bay=np.random.randint(0, 50),
+                                                                 max_proximity=5)
+                if placements:
+                    self.yard.add_container(c, placements[0])
+                    containers_added += 1
+            
+            placement_time = time.perf_counter() - start
+            
+            # Search time (average of 10 searches)
+            search_times = []
+            for _ in range(10):
+                test_container = self._create_container("TEST", 40)
+                start = time.perf_counter()
+                self.yard.search_placement_all_tiers(test_container, 
+                                                    target_bay=25,
+                                                    max_proximity=5)
+                search_times.append(time.perf_counter() - start)
+            
+            # Moveable containers time
+            start = time.perf_counter()
+            moveable = self.yard.find_moveable_containers(max_proximity=3)
+            moveable_time = time.perf_counter() - start
+            
+            results['containers'].append(containers_added)
+            results['placement_time'].append(placement_time)
+            results['search_time'].append(np.mean(search_times))
+            results['moveable_time'].append(moveable_time)
         
-        # Verify placement is in reefer area
-        first = placements[0]
-        self.assertIn(first.row, [0, 1])  # Reefer rows
-        self.assertIn(first.bay, [0, 1])  # Near reefer bays
+        # Test proximity scaling
+        proximities = [1, 2, 3, 5, 10, 15]
+        for prox in proximities:
+            test_container = self._create_container("PROX_TEST", 40)
+            start = time.perf_counter()
+            placements = self.yard.search_placement_all_tiers(test_container,
+                                                             target_bay=25,
+                                                             max_proximity=prox)
+            prox_time = time.perf_counter() - start
+            results['proximity_results'][prox] = {
+                'time': prox_time,
+                'found': len(placements)
+            }
+        
+        # Visualization
+        self._plot_performance_results(results)
+        
+        # Assertions on performance
+        # Check that operations scale reasonably
+        if len(results['containers']) > 1:
+            # Search time should not scale with container count (or minimally)
+            search_time_ratio = results['search_time'][-1] / results['search_time'][0]
+            self.assertLess(search_time_ratio, 2.0, 
+                          "Search time should not double with 40x containers")
+            
+            # Moveable finding should scale linearly or better
+            moveable_ratio = results['moveable_time'][-1] / results['moveable_time'][0]
+            container_ratio = results['containers'][-1] / results['containers'][0]
+            self.assertLess(moveable_ratio, container_ratio * 1.5,
+                          "Moveable finding should scale linearly or better")
     
-    def test_dangerous_goods_placement(self):
-        """Test dangerous goods placement in designated areas."""
-        dangerous = Container(
-            container_id="DG001",
-            direction="Import",
-            container_type="40ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="DangerousGoods",
-            length_ft=40
-        )
+    def _plot_performance_results(self, results):
+        """Plot performance analysis results."""
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle('BooleanStorageYard Performance Analysis', fontsize=16)
         
-        # Search near dangerous goods area
-        placements = self.yard.search_placement_all_tiers(dangerous, target_bay=7, max_proximity=5)
+        # Container scaling - placement time
+        axes[0, 0].plot(results['containers'], results['placement_time'], 'b-o')
+        axes[0, 0].set_xlabel('Number of Containers')
+        axes[0, 0].set_ylabel('Total Placement Time (s)')
+        axes[0, 0].set_title('Placement Time Scaling')
+        axes[0, 0].grid(True, alpha=0.3)
         
-        if placements:
-            first = placements[0]
-            self.assertEqual(first.row, 2)  # DG row
-            self.assertIn(first.bay, [6, 7])  # DG bays
-    
-    def test_stacking_behavior(self):
-        """Test that containers stack properly."""
-        # Place ground container
-        ground = Container(
-            container_id="GROUND",
-            direction="Import",
-            container_type="40ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=40
-        )
+        # Container scaling - search time
+        axes[0, 1].plot(results['containers'], 
+                       [t * 1000 for t in results['search_time']], 'g-s')
+        axes[0, 1].set_xlabel('Number of Containers in Yard')
+        axes[0, 1].set_ylabel('Avg Search Time (ms)')
+        axes[0, 1].set_title('Search Time Scaling')
+        axes[0, 1].grid(True, alpha=0.3)
         
-        placements = self.yard.search_placement_all_tiers(ground, target_bay=5, max_proximity=0)
-        ground_placement = next(p for p in placements if p.tier == 0)
-        self.yard.add_container(ground, ground_placement)
+        # Container scaling - moveable finding
+        axes[1, 0].plot(results['containers'], 
+                       [t * 1000 for t in results['moveable_time']], 'r-^')
+        axes[1, 0].set_xlabel('Number of Containers')
+        axes[1, 0].set_ylabel('Find Moveable Time (ms)')
+        axes[1, 0].set_title('Moveable Container Finding')
+        axes[1, 0].grid(True, alpha=0.3)
         
-        # Now place another container
-        stacked = Container(
-            container_id="STACKED",
-            direction="Import",
-            container_type="40ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=40
-        )
+        # Proximity scaling
+        prox_data = results['proximity_results']
+        proximities = sorted(prox_data.keys())
+        prox_times = [prox_data[p]['time'] * 1000 for p in proximities]
+        prox_found = [prox_data[p]['found'] for p in proximities]
         
-        placements2 = self.yard.search_placement_all_tiers(stacked, target_bay=5, max_proximity=0)
+        ax = axes[1, 1]
+        ax2 = ax.twinx()
         
-        # Should have tier 1 available now
-        tier1_placements = [p for p in placements2 if p.tier == 1]
-        self.assertGreater(len(tier1_placements), 0)
+        line1 = ax.plot(proximities, prox_times, 'b-o', label='Search Time')
+        ax.set_xlabel('Max Proximity')
+        ax.set_ylabel('Search Time (ms)', color='b')
+        ax.tick_params(axis='y', labelcolor='b')
         
-        # Verify same position is available in tier 1
-        same_pos_tier1 = [p for p in tier1_placements 
-                         if p.row == ground_placement.row and p.bay == ground_placement.bay]
-        self.assertGreater(len(same_pos_tier1), 0)
-    
-    def test_container_removal(self):
-        """Test removing containers."""
-        container = Container(
-            container_id="REMOVE",
-            direction="Import",
-            container_type="20ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type="Regular",
-            length_ft=20
-        )
+        line2 = ax2.plot(proximities, prox_found, 'r-s', label='Placements Found')
+        ax2.set_ylabel('Placements Found', color='r')
+        ax2.tick_params(axis='y', labelcolor='r')
         
-        placements = self.yard.search_placement_all_tiers(container, target_bay=5, max_proximity=1)
-        placement = placements[0]
+        ax.set_title('Proximity Search Scaling')
+        ax.grid(True, alpha=0.3)
         
-        # Add then remove
-        self.yard.add_container(container, placement)
-        removed = self.yard.remove_container(placement, container)
+        # Legend
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax.legend(lines, labels, loc='upper left')
         
-        self.assertEqual(removed.container_id, "REMOVE")
+        plt.tight_layout()
+        plt.savefig('storage_yard_performance.png', dpi=150)
+        plt.show()
         
-        # Verify position is empty
-        self.assertIsNone(self.yard.containers[placement.row, placement.bay, placement.tier, placement.start_split])
-    
-    def test_moveable_containers(self):
-        """Test finding moveable containers."""
-        # Add some containers
-        c1 = Container("MOVE1", "Import", "20ft", datetime.now(), datetime.now(), "Regular", length_ft=20)
-        c2 = Container("MOVE2", "Import", "40ft", datetime.now(), datetime.now(), "Regular", length_ft=40)
-        
-        p1 = self.yard.search_placement_all_tiers(c1, 5, 2)[0]
-        p2 = self.yard.search_placement_all_tiers(c2, 7, 2)[0]
-        
-        self.yard.add_container(c1, p1)
-        self.yard.add_container(c2, p2)
-        
-        moveable = self.yard.find_moveable_containers()
-        
-        # Both should be moveable (on ground tier)
-        self.assertIn("MOVE1", moveable)
-        self.assertIn("MOVE2", moveable)
-        
-        # Each should have alternative positions
-        self.assertGreater(len(moveable["MOVE1"]), 0)
-        self.assertGreater(len(moveable["MOVE2"]), 0)
+        print(f"\nPerformance Summary:")
+        print(f"Max containers tested: {max(results['containers'])}")
+        print(f"Placement throughput: {max(results['containers'])/max(results['placement_time']):.1f} containers/sec")
+        print(f"Search time at max load: {results['search_time'][-1]*1000:.2f} ms")
+        print(f"Moveable finding at max load: {results['moveable_time'][-1]*1000:.2f} ms")
 
 
-# ============= STRESS TEST =============
-def stress_test():
-    """Stress test with large yard configuration."""
-    print("\n=== STRESS TEST ===")
-    print("Creating large yard: 58 bays x 5 rows x 5 tiers")
-    
-    start_time = time.time()
-    
-    # Create large yard with realistic special positions
-    coordinates = []
-    # Reefer positions on ends
-    for row in range(1, 6):
-        coordinates.extend([(1, row, "r"), (2, row, "r"), (57, row, "r"), (58, row, "r")])
-    
-    # Dangerous goods in middle
-    for bay in range(28, 31):
-        coordinates.extend([(bay, 3, "dg")])
-    
-    # Swap bodies along one edge
-    for bay in range(1, 59):
-        coordinates.append((bay, 1, "sb_t"))
-    
-    yard = BooleanStorageYard(
-        n_rows=5,
-        n_bays=58,
-        n_tiers=5,
-        coordinates=coordinates
-    )
-    
-    init_time = time.time() - start_time
-    print(f"Initialization time: {init_time:.3f}s")
-    
-    # Create diverse containers
-    containers = []
-    for i, length in enumerate(CONTAINER_LENGTHS_FT * 10):  # 70 containers
-        containers.append(Container(
-            container_id=f"C{i:04d}",
-            direction="Import",
-            container_type=f"{length}ft",
-            arrival_date=datetime.now(),
-            departure_date=datetime.now(),
-            goods_type=["Regular", "Reefer", "DangerousGoods"][i % 3],
-            length_ft=length
-        ))
-    
-    # Benchmark placement search
-    search_times = []
-    successful_placements = 0
-    
-    for container in containers:
-        start = time.time()
-        placements = yard.search_placement_all_tiers(container, target_bay=29, max_proximity=30)
-        search_time = time.time() - start
-        search_times.append(search_time)
-        
-        if placements:
-            yard.add_container(container, placements[0])
-            successful_placements += 1
-    
-    print(f"\nPlacement Results:")
-    print(f"  Containers placed: {successful_placements}/{len(containers)}")
-    print(f"  Avg search time: {np.mean(search_times)*1000:.2f}ms")
-    print(f"  Max search time: {np.max(search_times)*1000:.2f}ms")
-    print(f"  Min search time: {np.min(search_times)*1000:.2f}ms")
-    
-    # Benchmark move finding
-    start = time.time()
-    moveable = yard.find_moveable_containers(max_proximity=5)
-    move_time = time.time() - start
-    
-    print(f"\nMove Finding:")
-    print(f"  Moveable containers: {len(moveable)}")
-    print(f"  Time to find all moves: {move_time:.3f}s")
-    
-    # Calculate yard utilization
-    total_positions = 5 * 58 * 5 * 4  # rows * bays * tiers * splits
-    used_positions = np.sum(yard.containers != None)
-    utilization = (used_positions / total_positions) * 100
-    
-    print(f"\nYard Statistics:")
-    print(f"  Total positions: {total_positions}")
-    print(f"  Used positions: {used_positions}")
-    print(f"  Utilization: {utilization:.1f}%")
-
-
-if __name__ == "__main__":
-    # Run usage example
-    usage_example()
-    
-    # Run unit tests
-    print("\n=== RUNNING UNIT TESTS ===")
-    unittest.main(argv=[''], exit=False, verbosity=2)
-    
-    # Run stress test
-    stress_test()
+if __name__ == '__main__':
+    unittest.main()

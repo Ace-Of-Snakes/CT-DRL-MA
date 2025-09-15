@@ -1,6 +1,5 @@
 import numpy as np
 from typing import Dict, Tuple, List, Optional, Set
-from collections import defaultdict
 from dataclasses import dataclass
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage.constants import (
@@ -16,13 +15,22 @@ class PlacementResult:
     bay: int
     tier: int
     start_split: int
-    score: float = 0.0  # For prioritization
+    score: float = 0.0
+
+
+@dataclass
+class ContainerRecord:
+    """Complete record of a container and its placement."""
+    container: Container
+    placement: PlacementResult
+    n_splits: int
+    is_accessible: bool = True
 
 
 class BooleanStorageYard:
     """
-    Optimized storage yard with dynamic container lengths and multi-tier support.
-    Uses vectorized operations and dynamic space finding for maximum flexibility.
+    Hybrid storage yard using both spatial masks and direct lookups.
+    Optimized for both placement search and container operations.
     """
     
     def __init__(self, 
@@ -32,7 +40,7 @@ class BooleanStorageYard:
                  coordinates: List[Tuple[int, int, str]],
                  validate: bool = False):
         """
-        Initialize storage yard with dynamic container length support.
+        Initialize storage yard with hybrid data structures.
         
         Args:
             n_rows: Number of rows in yard
@@ -45,98 +53,61 @@ class BooleanStorageYard:
         self.n_bays = n_bays
         self.n_tiers = n_tiers
         self.split_factor = BAY_SPLIT_FACTOR
-        
-        # Total splits across all bays
         self.total_splits = n_bays * self.split_factor
         
-        # Container storage array
-        self.containers = np.full((n_rows, n_bays, n_tiers, self.split_factor), 
-                                  None, dtype=object)
+        # Hybrid data structures
+        self.occupancy_mask = np.zeros((n_tiers, n_rows, self.total_splits), dtype=bool)
+        self.containers: Dict[str, ContainerRecord] = {}
+        self.position_map: Dict[Tuple[int, int, int], str] = {}  # (row, tier, start_split) -> container_id
+        self.tier_containers: List[Set[str]] = [set() for _ in range(n_tiers)]
+        self.accessible_containers: Set[str] = set()
         
-        # Create tier-aware dynamic masks for each container length
-        self._init_dynamic_masks()
-        
-        # Create special position masks (reefer, dangerous goods, swap body/trailer)
+        # Special position masks
         self._init_special_masks(coordinates)
         
-        # Container length mapping from constants 
+        # Container length mapping
         self.container_length_map = CONTAINER_LENGTH_TO_SUB_BAYS
         
         if validate:
             self._print_masks()
     
-    def _init_dynamic_masks(self):
-        """Initialize dynamic occupancy masks for each tier and container length."""
-        # Base occupancy mask: (n_tiers, n_rows, n_bays * split_factor)
-        self.base_mask = np.zeros((self.n_tiers, self.n_rows, self.total_splits), 
-                                   dtype=bool)
-        
-        # Only ground tier is initially available
-        self.base_mask[0, :, :] = True
-        
-        # Dynamic masks for each container length at each tier
-        # Key: (length_ft, tier) -> mask
-        self.length_tier_masks = {}
-        
-        for length_ft in CONTAINER_LENGTHS_FT:
-            for tier in range(self.n_tiers):
-                # Initially copy base mask for this tier
-                mask = self.base_mask[tier].copy()
-                self.length_tier_masks[(length_ft, tier)] = mask
-    
     def _init_special_masks(self, coordinates: List[Tuple[int, int, str]]):
-        """Initialize special position masks for reefer, dangerous goods, and swap bodies."""
-        # Shape: (n_tiers, n_rows, n_bays * split_factor)
-        self.reefer_mask = np.zeros((self.n_tiers, self.n_rows, self.total_splits), 
-                                     dtype=bool)
+        """Initialize special position masks."""
+        self.reefer_mask = np.zeros((self.n_tiers, self.n_rows, self.total_splits), dtype=bool)
         self.dangerous_mask = np.zeros_like(self.reefer_mask)
         self.swapbody_mask = np.zeros_like(self.reefer_mask)
         
         for bay, row, position_type in coordinates:
-            # Convert to 0-indexed
             bay_idx = bay - 1
             row_idx = row - 1
-            
-            # Calculate position range in flattened array
             start_pos = bay_idx * self.split_factor
             end_pos = start_pos + self.split_factor
             
-            if position_type == "r":  # Reefer
+            if position_type == "r":
                 self.reefer_mask[:, row_idx, start_pos:end_pos] = True
-            elif position_type == "dg":  # Dangerous goods
+            elif position_type == "dg":
                 self.dangerous_mask[:, row_idx, start_pos:end_pos] = True
-            elif position_type == "sb_t":  # Swap body/trailer
-                # Only ground tier for swap bodies
+            elif position_type == "sb_t":
                 self.swapbody_mask[0, row_idx, start_pos:end_pos] = True
         
-        # Regular container mask (everything except special positions)
         self.regular_mask = ~(self.reefer_mask | self.dangerous_mask)
-    
-    def _get_container_length_ft(self, container: Container) -> int:
-        """Extract container length in feet from container object."""
-        return container.length_ft
     
     def _get_goods_mask(self, container: Container, tier: int) -> np.ndarray:
         """Get appropriate mask based on container goods type."""
-        goods_type = container.goods_type
-        
-        if goods_type == "Reefer":
+        if container.goods_type == "Reefer":
             return self.reefer_mask[tier]
-        elif goods_type == "DangerousGoods":
+        elif container.goods_type == "DangerousGoods":
             return self.dangerous_mask[tier]
         elif container.is_swap_body or container.is_trailer:
-            if tier > 0:
-                return np.zeros_like(self.swapbody_mask[0])  # Not stackable
-            return self.swapbody_mask[tier]
-        else:  # Regular
-            return self.regular_mask[tier]
+            return self.swapbody_mask[tier] if tier == 0 else np.zeros_like(self.swapbody_mask[0])
+        return self.regular_mask[tier]
     
     def search_placement_all_tiers(self, 
                                    container: Container, 
                                    target_bay: int, 
                                    max_proximity: int = 3) -> List[PlacementResult]:
         """
-        Search for valid placements across all tiers using dynamic space finding.
+        Search for valid placements across all tiers.
         
         Args:
             container: Container to place
@@ -144,245 +115,200 @@ class BooleanStorageYard:
             max_proximity: Maximum distance from target bay
             
         Returns:
-            List of PlacementResult sorted by tier (ground first) and proximity
+            List of PlacementResult sorted by tier and proximity
         """
-        length_ft = self._get_container_length_ft(container)
-        n_splits = self.container_length_map.get(length_ft, 0)
-        
+        n_splits = self.container_length_map.get(container.length_ft, 0)
         if n_splits == 0:
             return []
         
-        # Calculate bay range for proximity
-        min_bay = max(0, target_bay - max_proximity)
-        max_bay = min(self.n_bays, target_bay + max_proximity + 1)
-        
-        # Convert to split positions
-        min_split = min_bay * self.split_factor
-        max_split = max_bay * self.split_factor
+        min_split = max(0, target_bay - max_proximity) * self.split_factor
+        max_split = min(self.n_bays, target_bay + max_proximity + 1) * self.split_factor
         
         all_placements = []
         
-        # Search all tiers
         for tier in range(self.n_tiers):
-            # Get combined mask for this tier
-            goods_mask = self._get_goods_mask(container, tier)
-            dynamic_mask = self.length_tier_masks[(length_ft, tier)]
+            # Get available positions mask
+            available = self._get_available_mask(container, tier)
             
-            # Combine masks
-            available = goods_mask & dynamic_mask
-            
-            # Find valid placements for this tier
-            tier_placements = self._find_placements_in_tier(
-                available, tier, n_splits, min_split, max_split, target_bay
-            )
-            all_placements.extend(tier_placements)
+            # Find placements in this tier
+            for row in range(self.n_rows):
+                row_mask = available[row]
+                
+                for start_pos in range(min_split, min(max_split, self.total_splits - n_splits + 1)):
+                    if np.all(row_mask[start_pos:start_pos + n_splits]):
+                        bay = start_pos // self.split_factor
+                        start_split = start_pos % self.split_factor
+                        
+                        # Score based on container center
+                        center_bay = (start_pos + n_splits // 2) / self.split_factor
+                        score = abs(center_bay - target_bay)
+                        
+                        all_placements.append(PlacementResult(
+                            row=row, bay=bay, tier=tier, 
+                            start_split=start_split, score=score
+                        ))
         
-        # Sort by tier (ground first) then by proximity score
         all_placements.sort(key=lambda p: (p.tier, p.score))
-        
         return all_placements
     
-    def _find_placements_in_tier(self, 
-                                 available_mask: np.ndarray, 
-                                 tier: int, 
-                                 n_splits: int,
-                                 min_split: int,
-                                 max_split: int,
-                                 target_bay: int) -> List[PlacementResult]:
-        """
-        Find all valid placements within a single tier using sliding window.
-        This method finds all consecutive spaces where a container fits,
-        regardless of bay boundaries.
-        """
-        placements = []
+    def _get_available_mask(self, container: Container, tier: int) -> np.ndarray:
+        """Get combined availability mask for container at tier."""
+        goods_mask = self._get_goods_mask(container, tier)
         
-        # Process each row
-        for row in range(self.n_rows):
-            row_mask = available_mask[row]
-            
-            # Use sliding window to find all consecutive available spaces
-            # that can accommodate the container
-            for start_pos in range(min_split, min(max_split, self.total_splits - n_splits + 1)):
-                # Check if all required positions are available
-                if np.all(row_mask[start_pos:start_pos + n_splits]):
-                    # Convert back to bay and split coordinates
-                    bay = start_pos // self.split_factor
-                    start_split = start_pos % self.split_factor
-                    
-                    # Calculate proximity score based on the center of the container
-                    container_center_bay = (start_pos + n_splits // 2) / self.split_factor
-                    score = abs(container_center_bay - target_bay)
-                    
-                    placements.append(PlacementResult(
-                        row=row, 
-                        bay=bay, 
-                        tier=tier, 
-                        start_split=start_split, 
-                        score=score
-                    ))
-        
-        return placements
+        # Check occupancy and support
+        if tier == 0:
+            return goods_mask & ~self.occupancy_mask[tier]
+        else:
+            # Must have support from below and be unoccupied
+            has_support = self.occupancy_mask[tier - 1]
+            return goods_mask & has_support & ~self.occupancy_mask[tier]
     
     def add_container(self, container: Container, placement: PlacementResult):
-        """
-        Add container to yard at specified placement.
-        
-        Args:
-            container: Container to add
-            placement: PlacementResult from search
-        """
-        length_ft = self._get_container_length_ft(container)
-        n_splits = self.container_length_map.get(length_ft, 0)
-        
-        # Calculate absolute starting position
+        """Add container to yard at specified placement."""
+        n_splits = self.container_length_map.get(container.length_ft, 0)
         abs_start = placement.bay * self.split_factor + placement.start_split
         
-        # Update container array
+        # Update occupancy mask
         for i in range(n_splits):
-            abs_pos = abs_start + i
-            bay = abs_pos // self.split_factor
-            split = abs_pos % self.split_factor
-            
-            if bay < self.n_bays:
-                self.containers[placement.row, bay, placement.tier, split] = container
+            pos = abs_start + i
+            if pos < self.total_splits:
+                self.occupancy_mask[placement.tier, placement.row, pos] = True
         
-        # Update masks
-        self._update_masks_on_add(placement, n_splits, length_ft)
+        # Create container record
+        record = ContainerRecord(
+            container=container,
+            placement=placement,
+            n_splits=n_splits,
+            is_accessible=placement.tier == self.n_tiers - 1
+        )
+        
+        # Update data structures
+        self.containers[container.container_id] = record
+        self.position_map[(placement.row, placement.tier, abs_start)] = container.container_id
+        self.tier_containers[placement.tier].add(container.container_id)
+        
+        if record.is_accessible:
+            self.accessible_containers.add(container.container_id)
+        
+        # Update accessibility of container below
+        if placement.tier > 0:
+            self._update_accessibility_below(placement, False)
     
     def remove_container(self, placement: PlacementResult, container: Container) -> Container:
-        """
-        Remove container from yard.
+        """Remove container from yard."""
+        container_id = container.container_id
+        if container_id not in self.containers:
+            return None
         
-        Args:
-            placement: PlacementResult indicating position
-            container: Container being removed (for length info)
-            
-        Returns:
-            Removed container
-        """
-        length_ft = self._get_container_length_ft(container)
-        n_splits = self.container_length_map.get(length_ft, 0)
-        
-        # Calculate absolute starting position
+        record = self.containers[container_id]
         abs_start = placement.bay * self.split_factor + placement.start_split
         
-        # Remove from container array
-        removed = None
-        for i in range(n_splits):
-            abs_pos = abs_start + i
-            bay = abs_pos // self.split_factor
-            split = abs_pos % self.split_factor
-            
-            if bay < self.n_bays:
-                if removed is None:
-                    removed = self.containers[placement.row, bay, placement.tier, split]
-                self.containers[placement.row, bay, placement.tier, split] = None
-        
-        # Update masks
-        self._update_masks_on_remove(placement, n_splits, length_ft)
-        
-        return removed
-    
-    def _update_masks_on_add(self, placement: PlacementResult, n_splits: int, length_ft: int):
-        """Update dynamic masks when container is added."""
-        row = placement.row
-        tier = placement.tier
-        
-        # Calculate absolute starting position
-        abs_start = placement.bay * self.split_factor + placement.start_split
-        
-        # Mark positions as occupied for all container lengths at this tier
-        for i in range(n_splits):
+        # Update occupancy mask
+        for i in range(record.n_splits):
             pos = abs_start + i
             if pos < self.total_splits:
-                for other_length in CONTAINER_LENGTHS_FT:
-                    self.length_tier_masks[(other_length, tier)][row, pos] = False
+                self.occupancy_mask[placement.tier, placement.row, pos] = False
         
-        # Enable next tier if applicable
-        if tier < self.n_tiers - 1:
-            for i in range(n_splits):
-                pos = abs_start + i
-                if pos < self.total_splits:
-                    self.base_mask[tier + 1, row, pos] = True
-                    for other_length in CONTAINER_LENGTHS_FT:
-                        self.length_tier_masks[(other_length, tier + 1)][row, pos] = True
+        # Remove from data structures
+        del self.containers[container_id]
+        del self.position_map[(placement.row, placement.tier, abs_start)]
+        self.tier_containers[placement.tier].discard(container_id)
+        self.accessible_containers.discard(container_id)
+        
+        # Update accessibility of container below
+        if placement.tier > 0:
+            self._update_accessibility_below(placement, True)
+        
+        return record.container
     
-    def _update_masks_on_remove(self, placement: PlacementResult, n_splits: int, length_ft: int):
-        """Update dynamic masks when container is removed."""
-        row = placement.row
-        tier = placement.tier
+    def _update_accessibility_below(self, placement: PlacementResult, make_accessible: bool):
+        """Update accessibility of containers below the given placement."""
+        if placement.tier == 0:
+            return
         
-        # Calculate absolute starting position
+        tier_below = placement.tier - 1
         abs_start = placement.bay * self.split_factor + placement.start_split
         
-        # Mark positions as available
-        for i in range(n_splits):
-            pos = abs_start + i
-            if pos < self.total_splits:
-                for other_length in CONTAINER_LENGTHS_FT:
-                    self.length_tier_masks[(other_length, tier)][row, pos] = True
+        # Check for containers at positions below
+        containers_below = set()
+        for pos in range(abs_start, abs_start + self.container_length_map.get(
+            self.containers.get(list(self.position_map.values())[0]).container.length_ft 
+            if self.position_map else 20, 1)):
+            
+            # Check all possible container starts that could cover this position
+            for check_start in range(max(0, pos - 40), pos + 1):
+                key = (placement.row, tier_below, check_start)
+                if key in self.position_map:
+                    containers_below.add(self.position_map[key])
         
-        # Disable next tier if it becomes unsupported
-        if tier < self.n_tiers - 1:
-            for i in range(n_splits):
-                pos = abs_start + i
-                if pos < self.total_splits:
-                    # Check if position has support from below
-                    bay = pos // self.split_factor
-                    split = pos % self.split_factor
-                    if self.containers[row, bay, tier, split] is None:
-                        self.base_mask[tier + 1, row, pos] = False
-                        for other_length in CONTAINER_LENGTHS_FT:
-                            self.length_tier_masks[(other_length, tier + 1)][row, pos] = False
+        # Update accessibility
+        for container_id in containers_below:
+            if container_id in self.containers:
+                record = self.containers[container_id]
+                if make_accessible:
+                    # Check if truly accessible (nothing else above)
+                    abs_pos = record.placement.bay * self.split_factor + record.placement.start_split
+                    nothing_above = not np.any(
+                        self.occupancy_mask[tier_below + 1:, record.placement.row, 
+                                          abs_pos:abs_pos + record.n_splits]
+                    )
+                    if nothing_above:
+                        record.is_accessible = True
+                        self.accessible_containers.add(container_id)
+                else:
+                    record.is_accessible = False
+                    self.accessible_containers.discard(container_id)
     
     def find_moveable_containers(self, max_proximity: int = 2) -> Dict[str, List[PlacementResult]]:
         """
-        Find all containers that can be moved and their possible destinations.
+        Find all accessible containers and their possible destinations.
         
         Returns:
             Dict mapping container_id to list of possible placements
         """
         moveable = {}
         
-        # Find accessible containers (top of stacks or ground level non-stackables)
-        for row in range(self.n_rows):
-            for bay in range(self.n_bays):
-                for tier in range(self.n_tiers):
-                    for split in range(self.split_factor):
-                        container = self.containers[row, bay, tier, split]
-                        
-                        if container is None:
-                            continue
-                        
-                        # Check if accessible (nothing above or special type on ground)
-                        is_accessible = tier == self.n_tiers - 1  # Top tier
-                        
-                        if not is_accessible and tier < self.n_tiers - 1:
-                            # Check if nothing above
-                            nothing_above = all(
-                                self.containers[row, bay, t, split] is None 
-                                for t in range(tier + 1, self.n_tiers)
-                            )
-                            is_accessible = nothing_above
-                        
-                        if is_accessible and container.container_id not in moveable:
-                            # Find alternative placements
-                            current_placement = PlacementResult(row, bay, tier, split)
-                            destinations = self.search_placement_all_tiers(
-                                container, bay, max_proximity
-                            )
-                            
-                            # Filter out current position
-                            destinations = [
-                                d for d in destinations 
-                                if not (d.row == row and d.bay == bay and 
-                                       d.tier == tier and d.start_split == split)
-                            ]
-                            
-                            if destinations:
-                                moveable[container.container_id] = destinations
+        for container_id in self.accessible_containers:
+            record = self.containers[container_id]
+            current = record.placement
+            
+            # Find alternative placements
+            destinations = self.search_placement_all_tiers(
+                record.container, current.bay, max_proximity
+            )
+            
+            # Filter out current position
+            abs_current = current.bay * self.split_factor + current.start_split
+            destinations = [
+                d for d in destinations 
+                if not (d.row == current.row and d.tier == current.tier and 
+                       d.bay * self.split_factor + d.start_split == abs_current)
+            ]
+            
+            if destinations:
+                moveable[container_id] = destinations
         
         return moveable
+    
+    def get_container(self, container_id: str) -> Optional[Container]:
+        """Get container by ID - O(1) operation."""
+        record = self.containers.get(container_id)
+        return record.container if record else None
+    
+    def get_container_placement(self, container_id: str) -> Optional[PlacementResult]:
+        """Get container placement by ID - O(1) operation."""
+        record = self.containers.get(container_id)
+        return record.placement if record else None
+    
+    def get_tier_containers(self, tier: int) -> List[Container]:
+        """Get all containers in a specific tier - O(tier_size) operation."""
+        return [self.containers[cid].container 
+                for cid in self.tier_containers[tier] 
+                if cid in self.containers]
+    
+    def get_all_containers(self) -> List[Container]:
+        """Get all containers - O(n) where n is number of containers."""
+        return [record.container for record in self.containers.values()]
     
     def _print_masks(self):
         """Print masks for validation."""
@@ -394,6 +320,5 @@ class BooleanStorageYard:
         print(f"Swap body positions:\n{self.swapbody_mask[0]}")
         print(f"Regular positions:\n{self.regular_mask[0]}")
         
-        print("\n=== Dynamic Masks Sample ===")
-        print(f"20ft container tier 0:\n{self.length_tier_masks[(20, 0)]}")
-        print(f"40ft container tier 0:\n{self.length_tier_masks[(40, 0)]}")
+        print("\n=== Occupancy (Tier 0) ===")
+        print(f"Occupied positions:\n{self.occupancy_mask[0]}")
