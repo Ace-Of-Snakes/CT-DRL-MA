@@ -6,7 +6,7 @@ from typing import List, Tuple
 from datetime import datetime
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-
+np.random.seed(42)
 
 class TestBooleanStorage(unittest.TestCase):
     """Comprehensive tests for BooleanStorageYard with performance analysis."""
