@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage.constants import (
     BAY_LENGTH_FT, BAY_SPLIT_FACTOR, SUB_BAY_LENGTH_FT,
-    CONTAINER_LENGTHS_FT, CONTAINER_LENGTH_TO_SUB_BAYS,
-    CONTAINER_LENGTH_PERMUTATIONS, CONTAINER_STARTING_POSITIONS
+    CONTAINER_LENGTHS_FT, CONTAINER_LENGTH_TO_SUB_BAYS
 )
 
 
@@ -23,7 +22,7 @@ class PlacementResult:
 class BooleanStorageYard:
     """
     Optimized storage yard with dynamic container lengths and multi-tier support.
-    Uses vectorized operations and parallel tier searching for maximum performance.
+    Uses vectorized operations and dynamic space finding for maximum flexibility.
     """
     
     def __init__(self, 
@@ -47,6 +46,9 @@ class BooleanStorageYard:
         self.n_tiers = n_tiers
         self.split_factor = BAY_SPLIT_FACTOR
         
+        # Total splits across all bays
+        self.total_splits = n_bays * self.split_factor
+        
         # Container storage array
         self.containers = np.full((n_rows, n_bays, n_tiers, self.split_factor), 
                                   None, dtype=object)
@@ -57,10 +59,8 @@ class BooleanStorageYard:
         # Create special position masks (reefer, dangerous goods, swap body/trailer)
         self._init_special_masks(coordinates)
         
-        # Container length mapping from constants
+        # Container length mapping from constants 
         self.container_length_map = CONTAINER_LENGTH_TO_SUB_BAYS
-        self.valid_permutations = CONTAINER_LENGTH_PERMUTATIONS
-        self.valid_starting_positions = CONTAINER_STARTING_POSITIONS
         
         if validate:
             self._print_masks()
@@ -68,7 +68,7 @@ class BooleanStorageYard:
     def _init_dynamic_masks(self):
         """Initialize dynamic occupancy masks for each tier and container length."""
         # Base occupancy mask: (n_tiers, n_rows, n_bays * split_factor)
-        self.base_mask = np.zeros((self.n_tiers, self.n_rows, self.n_bays * self.split_factor), 
+        self.base_mask = np.zeros((self.n_tiers, self.n_rows, self.total_splits), 
                                    dtype=bool)
         
         # Only ground tier is initially available
@@ -87,7 +87,7 @@ class BooleanStorageYard:
     def _init_special_masks(self, coordinates: List[Tuple[int, int, str]]):
         """Initialize special position masks for reefer, dangerous goods, and swap bodies."""
         # Shape: (n_tiers, n_rows, n_bays * split_factor)
-        self.reefer_mask = np.zeros((self.n_tiers, self.n_rows, self.n_bays * self.split_factor), 
+        self.reefer_mask = np.zeros((self.n_tiers, self.n_rows, self.total_splits), 
                                      dtype=bool)
         self.dangerous_mask = np.zeros_like(self.reefer_mask)
         self.swapbody_mask = np.zeros_like(self.reefer_mask)
@@ -136,7 +136,7 @@ class BooleanStorageYard:
                                    target_bay: int, 
                                    max_proximity: int = 3) -> List[PlacementResult]:
         """
-        Search for valid placements across all tiers in parallel.
+        Search for valid placements across all tiers using dynamic space finding.
         
         Args:
             container: Container to place
@@ -152,13 +152,17 @@ class BooleanStorageYard:
         if n_splits == 0:
             return []
         
-        # Calculate bay range
+        # Calculate bay range for proximity
         min_bay = max(0, target_bay - max_proximity)
         max_bay = min(self.n_bays, target_bay + max_proximity + 1)
         
+        # Convert to split positions
+        min_split = min_bay * self.split_factor
+        max_split = max_bay * self.split_factor
+        
         all_placements = []
         
-        # Search all tiers in parallel using vectorized operations
+        # Search all tiers
         for tier in range(self.n_tiers):
             # Get combined mask for this tier
             goods_mask = self._get_goods_mask(container, tier)
@@ -167,14 +171,9 @@ class BooleanStorageYard:
             # Combine masks
             available = goods_mask & dynamic_mask
             
-            # Apply bay proximity filter
-            bay_filter = np.zeros_like(available, dtype=bool)
-            bay_filter[:, min_bay*self.split_factor:max_bay*self.split_factor] = True
-            available = available & bay_filter
-            
             # Find valid placements for this tier
             tier_placements = self._find_placements_in_tier(
-                available, tier, n_splits, target_bay
+                available, tier, n_splits, min_split, max_split, target_bay
             )
             all_placements.extend(tier_placements)
         
@@ -187,92 +186,42 @@ class BooleanStorageYard:
                                  available_mask: np.ndarray, 
                                  tier: int, 
                                  n_splits: int,
+                                 min_split: int,
+                                 max_split: int,
                                  target_bay: int) -> List[PlacementResult]:
         """
-        Find valid placements within a single tier using vectorized operations.
+        Find all valid placements within a single tier using sliding window.
+        This method finds all consecutive spaces where a container fits,
+        regardless of bay boundaries.
         """
         placements = []
         
-        # Use convolution to find consecutive available positions
-        if n_splits <= self.split_factor:
-            # Container fits within a single bay
-            for row in range(self.n_rows):
-                row_mask = available_mask[row]
-                
-                # Use sliding window to find valid positions
-                for bay in range(self.n_bays):
-                    bay_start = bay * self.split_factor
-                    
-                    # Check valid starting positions (start or end of bay)
-                    valid_starts = self._get_valid_start_positions(n_splits)
-                    
-                    for start_split in valid_starts:
-                        end_split = start_split + n_splits
-                        
-                        if end_split <= self.split_factor:
-                            # Check if all positions are available
-                            positions = range(bay_start + start_split, bay_start + end_split)
-                            if all(row_mask[p] for p in positions):
-                                # Calculate proximity score
-                                score = abs(bay - target_bay)
-                                placements.append(PlacementResult(
-                                    row=row, bay=bay, tier=tier, 
-                                    start_split=start_split, score=score
-                                ))
-        else:
-            # Container spans multiple bays
-            placements.extend(self._find_cross_bay_placements(
-                available_mask, tier, n_splits, target_bay
-            ))
-        
-        return placements
-    
-    def _find_cross_bay_placements(self, 
-                                   available_mask: np.ndarray,
-                                   tier: int,
-                                   n_splits: int,
-                                   target_bay: int) -> List[PlacementResult]:
-        """Find placements for containers that span multiple bays."""
-        placements = []
-        n_bays_needed = (n_splits + self.split_factor - 1) // self.split_factor
-        
+        # Process each row
         for row in range(self.n_rows):
             row_mask = available_mask[row]
             
-            for start_bay in range(self.n_bays - n_bays_needed + 1):
-                # Check all required positions
-                valid = True
-                for i in range(n_splits):
-                    pos = start_bay * self.split_factor + i
-                    if pos >= len(row_mask) or not row_mask[pos]:
-                        valid = False
-                        break
-                
-                if valid:
-                    score = abs(start_bay - target_bay)
+            # Use sliding window to find all consecutive available spaces
+            # that can accommodate the container
+            for start_pos in range(min_split, min(max_split, self.total_splits - n_splits + 1)):
+                # Check if all required positions are available
+                if np.all(row_mask[start_pos:start_pos + n_splits]):
+                    # Convert back to bay and split coordinates
+                    bay = start_pos // self.split_factor
+                    start_split = start_pos % self.split_factor
+                    
+                    # Calculate proximity score based on the center of the container
+                    container_center_bay = (start_pos + n_splits // 2) / self.split_factor
+                    score = abs(container_center_bay - target_bay)
+                    
                     placements.append(PlacementResult(
-                        row=row, bay=start_bay, tier=tier,
-                        start_split=0, score=score
+                        row=row, 
+                        bay=bay, 
+                        tier=tier, 
+                        start_split=start_split, 
+                        score=score
                     ))
         
         return placements
-    
-    def _get_valid_start_positions(self, n_splits: int) -> List[int]:
-        """Get valid starting positions from CONTAINER_STARTING_POSITIONS."""
-        # Find the length_ft that corresponds to this n_splits
-        length_ft = None
-        for length, splits in self.container_length_map.items():
-            if splits == n_splits:
-                length_ft = length
-                break
-        
-        if length_ft and length_ft in self.valid_starting_positions:
-            # Return positions that fit within a single bay
-            positions = [p for p in self.valid_starting_positions[length_ft] 
-                        if p < self.split_factor]
-            return positions if positions else [0]
-        
-        return [0]  # Fallback
     
     def add_container(self, container: Container, placement: PlacementResult):
         """
@@ -285,14 +234,17 @@ class BooleanStorageYard:
         length_ft = self._get_container_length_ft(container)
         n_splits = self.container_length_map.get(length_ft, 0)
         
+        # Calculate absolute starting position
+        abs_start = placement.bay * self.split_factor + placement.start_split
+        
         # Update container array
         for i in range(n_splits):
-            bay_offset = (placement.start_split + i) // self.split_factor
-            split_offset = (placement.start_split + i) % self.split_factor
+            abs_pos = abs_start + i
+            bay = abs_pos // self.split_factor
+            split = abs_pos % self.split_factor
             
-            actual_bay = placement.bay + bay_offset
-            if actual_bay < self.n_bays:
-                self.containers[placement.row, actual_bay, placement.tier, split_offset] = container
+            if bay < self.n_bays:
+                self.containers[placement.row, bay, placement.tier, split] = container
         
         # Update masks
         self._update_masks_on_add(placement, n_splits, length_ft)
@@ -311,17 +263,20 @@ class BooleanStorageYard:
         length_ft = self._get_container_length_ft(container)
         n_splits = self.container_length_map.get(length_ft, 0)
         
+        # Calculate absolute starting position
+        abs_start = placement.bay * self.split_factor + placement.start_split
+        
         # Remove from container array
         removed = None
         for i in range(n_splits):
-            bay_offset = (placement.start_split + i) // self.split_factor
-            split_offset = (placement.start_split + i) % self.split_factor
+            abs_pos = abs_start + i
+            bay = abs_pos // self.split_factor
+            split = abs_pos % self.split_factor
             
-            actual_bay = placement.bay + bay_offset
-            if actual_bay < self.n_bays:
+            if bay < self.n_bays:
                 if removed is None:
-                    removed = self.containers[placement.row, actual_bay, placement.tier, split_offset]
-                self.containers[placement.row, actual_bay, placement.tier, split_offset] = None
+                    removed = self.containers[placement.row, bay, placement.tier, split]
+                self.containers[placement.row, bay, placement.tier, split] = None
         
         # Update masks
         self._update_masks_on_remove(placement, n_splits, length_ft)
@@ -333,18 +288,21 @@ class BooleanStorageYard:
         row = placement.row
         tier = placement.tier
         
+        # Calculate absolute starting position
+        abs_start = placement.bay * self.split_factor + placement.start_split
+        
         # Mark positions as occupied for all container lengths at this tier
         for i in range(n_splits):
-            pos = placement.bay * self.split_factor + placement.start_split + i
-            if pos < self.n_bays * self.split_factor:
+            pos = abs_start + i
+            if pos < self.total_splits:
                 for other_length in CONTAINER_LENGTHS_FT:
                     self.length_tier_masks[(other_length, tier)][row, pos] = False
         
         # Enable next tier if applicable
         if tier < self.n_tiers - 1:
             for i in range(n_splits):
-                pos = placement.bay * self.split_factor + placement.start_split + i
-                if pos < self.n_bays * self.split_factor:
+                pos = abs_start + i
+                if pos < self.total_splits:
                     self.base_mask[tier + 1, row, pos] = True
                     for other_length in CONTAINER_LENGTHS_FT:
                         self.length_tier_masks[(other_length, tier + 1)][row, pos] = True
@@ -354,20 +312,25 @@ class BooleanStorageYard:
         row = placement.row
         tier = placement.tier
         
+        # Calculate absolute starting position
+        abs_start = placement.bay * self.split_factor + placement.start_split
+        
         # Mark positions as available
         for i in range(n_splits):
-            pos = placement.bay * self.split_factor + placement.start_split + i
-            if pos < self.n_bays * self.split_factor:
+            pos = abs_start + i
+            if pos < self.total_splits:
                 for other_length in CONTAINER_LENGTHS_FT:
                     self.length_tier_masks[(other_length, tier)][row, pos] = True
         
         # Disable next tier if it becomes unsupported
         if tier < self.n_tiers - 1:
             for i in range(n_splits):
-                pos = placement.bay * self.split_factor + placement.start_split + i
-                if pos < self.n_bays * self.split_factor:
+                pos = abs_start + i
+                if pos < self.total_splits:
                     # Check if position has support from below
-                    if self.containers[row, placement.bay + i // self.split_factor, tier, i % self.split_factor] is None:
+                    bay = pos // self.split_factor
+                    split = pos % self.split_factor
+                    if self.containers[row, bay, tier, split] is None:
                         self.base_mask[tier + 1, row, pos] = False
                         for other_length in CONTAINER_LENGTHS_FT:
                             self.length_tier_masks[(other_length, tier + 1)][row, pos] = False
