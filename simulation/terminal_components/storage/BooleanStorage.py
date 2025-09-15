@@ -107,6 +107,10 @@ class BooleanStorageYard:
         target_bay: int,
         max_proximity: int = 3
     ) -> List["PlacementResult"]:
+        """
+        Find all valid placements near target_bay across all tiers.
+        Vectorized across rows via a single 2D sliding-window sum per tier.
+        """
         n_splits = self.container_length_map.get(container.length_ft, 0)
         if n_splits <= 0:
             return []
@@ -115,28 +119,32 @@ class BooleanStorageYard:
         target_bay = max(0, min(target_bay, self.n_bays - 1))
         min_split = max(0, target_bay - max_proximity) * self.split_factor
         max_split_excl = min(self.n_bays, target_bay + max_proximity + 1) * self.split_factor
-        # IMPORTANT: pass stop_exclusive as the window edge, not reduced by run_len
-        # This allows starts at the last split of the window, even if the span crosses into the next bay.
+        # Note: stop_exclusive is the window edge; _find_runs_2d clamps to valid start indices internally.
 
         results: List["PlacementResult"] = []
 
         for tier in range(self.n_tiers):
-            available = self._get_available_mask(container, tier)  # (n_rows, total_splits)
-            for row in range(self.n_rows):
-                starts = self._find_runs(
-                    available[row],
-                    run_len=n_splits,
-                    start=min_split,
-                    stop_exclusive=max_split_excl  # changed from (max_split_excl - n_splits + 1)
+            available = self._get_available_mask(container, tier)  # (n_rows, total_splits), bool
+
+            rows, starts = self._find_runs_2d(
+                available_brs=available,
+                run_len=n_splits,
+                start=min_split,
+                stop_exclusive=max_split_excl
+            )
+            if rows.size == 0:
+                continue
+
+            bays = starts // self.split_factor
+            start_splits = starts % self.split_factor
+            center_bays = (starts + n_splits / 2.0) / self.split_factor
+            scores = np.abs(center_bays - target_bay)
+
+            # Build PlacementResult list
+            for r, b, ss, sc in zip(rows.tolist(), bays.tolist(), start_splits.tolist(), scores.tolist()):
+                results.append(
+                    PlacementResult(row=int(r), bay=int(b), tier=int(tier), start_split=int(ss), score=float(sc))
                 )
-                for start_pos in starts:
-                    bay = start_pos // self.split_factor
-                    start_split = start_pos % self.split_factor
-                    center_bay = (start_pos + n_splits / 2.0) / self.split_factor
-                    score = abs(center_bay - target_bay)
-                    results.append(
-                        PlacementResult(row=row, bay=bay, tier=tier, start_split=start_split, score=score)
-                    )
 
         results.sort(key=lambda p: (p.tier, p.score))
         return results
@@ -305,28 +313,55 @@ class BooleanStorageYard:
             # Adding a container above => not accessible
             rec.is_accessible = False
             self.accessible_containers.discard(cid_below)
-    
-    def _find_runs(self, row_mask: np.ndarray, run_len: int, start: int, stop_exclusive: int) -> np.ndarray:
+
+    def _find_runs_2d(
+        self,
+        available_brs: np.ndarray,
+        run_len: int,
+        start: int,
+        stop_exclusive: int
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Return start indices where row_mask has a contiguous run of True of length run_len,
-        limited to [start, stop_exclusive). Indices are in split units.
+        Vectorized run detection across all rows using 2D cumsum/diff.
+        Returns:
+        - rows: 1D int array of row indices
+        - starts: 1D int array of absolute start split indices (same length as rows)
+        Only considers start positions in [start, stop_exclusive).
         """
         if run_len <= 0:
-            return np.array([], dtype=np.int32)
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
-        valid_len = len(row_mask) - run_len + 1
+        R, S = available_brs.shape
+        valid_len = S - run_len + 1
         if valid_len <= 0:
-            return np.array([], dtype=np.int32)
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
+        # Clamp the start window to valid start indices
         lo = max(0, min(start, valid_len))
         hi = max(lo, min(stop_exclusive, valid_len))
         if lo >= hi:
-            return np.array([], dtype=np.int32)
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
-        # Convolution-based run detection
-        sums = np.convolve(row_mask.astype(np.int32), np.ones(run_len, dtype=np.int32), mode='valid')
-        return np.where(sums[lo:hi] == run_len)[0] + lo
-    
+        # Slice only the needed region to reduce work
+        # We need columns [lo : hi + run_len - 1] to compute windowed sums over starts in [lo, hi)
+        end_col = hi + run_len - 1  # exclusive upper bound for the sliced columns
+        sub = available_brs[:, lo:end_col].astype(np.int8, copy=False)  # [R, (hi-lo)+run_len-1]
+
+        # 2D rolling sum along splits using cumsum/diff
+        c = np.cumsum(sub, axis=1, dtype=np.int32)
+        # Window sums at each start: sum over run_len = c[:, i+run_len-1] - c[:, i-1]
+        prev = np.concatenate([np.zeros((R, 1), dtype=c.dtype), c[:, :-run_len]], axis=1)
+        win = c[:, run_len - 1:] - prev  # shape [R, hi-lo]
+
+        # Valid starts where the window sum equals run_len
+        valid = (win == run_len)
+        rows, starts_rel = np.where(valid)
+        if rows.size == 0:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+        starts = starts_rel + lo
+        return rows.astype(np.int32, copy=False), starts.astype(np.int32, copy=False)
+
     def find_moveable_containers(self, max_proximity: int = 5) -> Dict[str, List[PlacementResult]]:
         """
         Find all accessible containers and their possible destinations.
