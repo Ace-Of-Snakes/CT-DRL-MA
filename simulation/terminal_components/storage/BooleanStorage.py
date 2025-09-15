@@ -60,7 +60,8 @@ class BooleanStorageYard:
         self.position_map: Dict[Tuple[int, int, int], str] = {}  # (row, tier, start_split) -> container_id
         self.tier_containers: List[Set[str]] = [set() for _ in range(n_tiers)]
         self.accessible_containers: Set[str] = set()
-        
+        self._support_masks: Dict[tuple[int, int], np.ndarray] = {}
+
         # Special position masks
         self._init_special_masks(coordinates)
         
@@ -101,6 +102,39 @@ class BooleanStorageYard:
             return self.swapbody_mask[tier] if tier == 0 else np.zeros_like(self.swapbody_mask[0])
         return self.regular_mask[tier]
     
+    def _get_support_mask(self, tier: int, n_splits: int) -> np.ndarray:
+        if tier == 0:
+            # Never used for base tier; keep shape for consistency
+            if (tier, n_splits) not in self._support_masks:
+                self._support_masks[(tier, n_splits)] = np.zeros((self.n_rows, self.total_splits), dtype=bool)
+            return self._support_masks[(tier, n_splits)]
+        key = (tier, n_splits)
+        mask = self._support_masks.get(key)
+        if mask is None:
+            mask = np.zeros((self.n_rows, self.total_splits), dtype=bool)
+            # cold-build once from current tier-1 containers
+            for cid in self.tier_containers[tier - 1]:
+                rec = self.containers.get(cid)
+                if rec and rec.n_splits == n_splits:
+                    r = rec.placement.row
+                    s = rec.placement.bay * self.split_factor + rec.placement.start_split
+                    e = s + n_splits
+                    mask[r, s:e] = True
+            self._support_masks[key] = mask
+        return mask
+
+    def _k(self, row: int, tier: int, abs_start: int) -> int:
+        return (tier * self.n_rows + row) * self.total_splits + abs_start
+    
+    def _support_cache_apply(self, tier: int, n_splits: int, row: int, abs_start: int, abs_end: int, value: bool):
+        # Update support for placements at 'tier' (supported by tier-1)
+        if tier <= 0 or tier > self.n_tiers - 1:
+            return
+        key = (tier, n_splits)
+        if key not in self._support_masks:
+            self._support_masks[key] = np.zeros((self.n_rows, self.total_splits), dtype=bool)
+        self._support_masks[key][row, abs_start:abs_end] = value
+
     def search_placement_all_tiers(
         self,
         container: "Container",
@@ -150,35 +184,12 @@ class BooleanStorageYard:
         return results
     
     def _get_available_mask(self, container: "Container", tier: int) -> np.ndarray:
-        """
-        Combined availability mask for a given container at a given tier.
-
-        Rules:
-        - Tier 0: can be placed anywhere it fits (goods mask) and is unoccupied.
-        - Tier > 0: can only be placed exactly on top of a single container of the same length
-        (aligned start), and target splits must be unoccupied.
-        """
         goods_mask = self._get_goods_mask(container, tier)
         unoccupied = ~self.occupancy_mask[tier]
         n_splits = self.container_length_map.get(container.length_ft, 0)
-
         if tier == 0:
             return goods_mask & unoccupied
-
-        # Build support mask: spans that correspond exactly to same-length containers on tier-1
-        support = np.zeros_like(goods_mask)
-        for cid in self.tier_containers[tier - 1]:
-            rec = self.containers.get(cid)
-            if not rec:
-                continue
-            if rec.n_splits != n_splits:
-                continue
-            r = rec.placement.row
-            s = rec.placement.bay * self.split_factor + rec.placement.start_split
-            e = s + rec.n_splits
-            # mark the exact span above this container as valid support
-            support[r, s:e] = True
-
+        support = self._get_support_mask(tier, n_splits)
         return goods_mask & support & unoccupied
     
     def add_container(self, container: "Container", placement: "PlacementResult"):
@@ -202,6 +213,9 @@ class BooleanStorageYard:
 
         # Vectorized occupancy set
         self.occupancy_mask[placement.tier, placement.row, abs_start:abs_end] = True
+
+        # make starts above available for same-length placements
+        self._support_cache_apply(placement.tier + 1, n_splits, placement.row, abs_start, abs_end, True)
 
         # Is new container top-of-its-stack?
         above = self.occupancy_mask[placement.tier + 1:, placement.row, abs_start:abs_end]
@@ -247,6 +261,9 @@ class BooleanStorageYard:
 
         # Clear occupancy first
         self.occupancy_mask[tier, row, abs_start:abs_end] = False
+
+        # remove support above this container
+        self._support_cache_apply(tier + 1, record.n_splits, row, abs_start, abs_end, False)
 
         # Update accessibility for directly-below container (if any)
         if tier > 0:
