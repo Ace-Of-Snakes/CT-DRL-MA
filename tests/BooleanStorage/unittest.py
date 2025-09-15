@@ -200,7 +200,7 @@ class TestBooleanStorage(unittest.TestCase):
         for count in container_counts:
             # Reset yard
             self.yard = BooleanStorageYard(
-                n_rows=10, 
+                n_rows=5, 
                 n_bays=50, 
                 n_tiers=5,
                 coordinates=[]
@@ -235,7 +235,7 @@ class TestBooleanStorage(unittest.TestCase):
             
             # Moveable containers time
             start = time.perf_counter()
-            moveable = self.yard.find_moveable_containers(max_proximity=3)
+            moveable = self.yard.find_moveable_containers(max_proximity=5)
             moveable_time = time.perf_counter() - start
             
             results['containers'].append(containers_added)

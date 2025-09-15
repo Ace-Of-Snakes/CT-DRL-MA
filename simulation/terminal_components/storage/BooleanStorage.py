@@ -327,7 +327,7 @@ class BooleanStorageYard:
         sums = np.convolve(row_mask.astype(np.int32), np.ones(run_len, dtype=np.int32), mode='valid')
         return np.where(sums[lo:hi] == run_len)[0] + lo
     
-    def find_moveable_containers(self, max_proximity: int = 2) -> Dict[str, List[PlacementResult]]:
+    def find_moveable_containers(self, max_proximity: int = 5) -> Dict[str, List[PlacementResult]]:
         """
         Find all accessible containers and their possible destinations.
         
