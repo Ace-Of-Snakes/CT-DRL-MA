@@ -203,3 +203,4 @@ precomputed/
 # unnecessary folders
 data/
 deprecated_components/
+runs/

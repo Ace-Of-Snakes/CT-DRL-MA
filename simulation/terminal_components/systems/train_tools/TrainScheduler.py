@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.systems.tools.TimeEncoder import WeeklyTimeEncoder
-from simulation.terminal_components.systems.tools.DPParser import DrivingPlanParser
+from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
+from simulation.terminal_components.systems.train_tools.DPParser import DrivingPlanParser
 
 # Constants
 WEEK_SECONDS = 604800
