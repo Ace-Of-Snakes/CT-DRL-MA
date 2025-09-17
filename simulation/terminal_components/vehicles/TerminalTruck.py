@@ -87,8 +87,8 @@ class TerminalTruck(Truck):
         Returns:
             True if container was added successfully, False otherwise
         """
-        assert container is not None, 'TerminalTruck.add_container is not allowed to recieve a None-Type Object'
-        assert type(container) is not Container, 'TerminalTruck.add_container is not allowed to recieve an Object that is not a Container'
+        assert container is not None, "TerminalTruck.add_container requires a Container"
+        assert isinstance(container, Container), "TerminalTruck.add_container expects a Container"
 
         # Only allow specific container types
         if container.container_type not in TERMINAL_TRUCK_ALLOWED_TYPES:
