@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
-from simulation.terminal_components.systems.tools.TrainLoader import TrainLoader
+from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
 
 def run_performance_test():
     """Run comprehensive performance test for TrainLoader component."""
@@ -16,7 +16,7 @@ def run_performance_test():
     loader = TrainLoader(factory, overgeneration_factor=3.0)
     
     # Load operator list from distribution file
-    with open("simulation/data/train_operator_container_type_distribution.json", 'r') as f:
+    with open("simulation/data/train_operator_container_type_distribution_import.json", 'r') as f:
         operator_data = json.load(f)
     operators = list(operator_data.keys())[:10]  # Test first 10 operators
     

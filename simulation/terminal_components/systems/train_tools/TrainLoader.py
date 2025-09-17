@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.storage_units.Container import Container
+from simulation.terminal_components.storage_units.Wagon import Wagon
 from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
+from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
 
 # ==================== CONSTANTS ====================
 OVERGENERATION_FACTOR = 5.0  # Generate 5x more containers than wagons
@@ -327,6 +329,93 @@ class TrainLoader:
             time_elapsed_ms=0  # Set by caller if timing
         )
     
+    @staticmethod
+    def rearrange_wagons_for_goods(train: Train, yard: BooleanStorageYard) -> List[int]:
+        """
+        Reorder wagons in-place:
+        - Split reefer wagons into two halves: front and back (ends).
+        - Place DG wagons near the center (between regular halves).
+        - Regular wagons split to fill between ends and center.
+
+        Returns:
+            new_order_indices: old_index -> new_index mapping list (length = num_wagons)
+        """
+        wags = train.wagons
+        n = len(wags)
+        if n <= 1:
+            return list(range(n))
+
+        # Classify wagons with minimal yard lookups
+        cls = []  # 'reefer' | 'dg' | 'regular'
+        for w in wags:
+            has_reefer = False
+            has_dg = False
+
+            # Existing containers on wagon
+            for c in w.get_container_list():
+                if c.goods_type == "Reefer":
+                    has_reefer = True
+                elif c.goods_type == "DangerousGoods":
+                    has_dg = True
+                if has_reefer and has_dg:
+                    break
+
+            # If still unknown, check pickup ids that are already in yard
+            if not (has_reefer or has_dg) and w.pickup_container_ids:
+                for cid in w.pickup_container_ids:
+                    c = yard.get_container(cid)
+                    if c:
+                        if c.goods_type == "Reefer":
+                            has_reefer = True
+                        elif c.goods_type == "DangerousGoods":
+                            has_dg = True
+                        if has_reefer and has_dg:
+                            break
+
+            # Priority: DG over Reefer (safety)
+            if has_dg:
+                cls.append("dg")
+            elif has_reefer:
+                cls.append("reefer")
+            else:
+                cls.append("regular")
+
+        reefer_idxs = [i for i, k in enumerate(cls) if k == "reefer"]
+        dg_idxs = [i for i, k in enumerate(cls) if k == "dg"]
+        reg_idxs = [i for i, k in enumerate(cls) if k == "regular"]
+
+        # Split reefer and regular into two halves
+        half_reef = (len(reefer_idxs) + 1) // 2
+        front_reefers = reefer_idxs[:half_reef]
+        back_reefers = reefer_idxs[half_reef:]
+
+        half_reg = len(reg_idxs) // 2
+        left_regular = reg_idxs[:half_reg]
+        right_regular = reg_idxs[half_reg:]
+
+        # Build new order (by old indices), preserving within-class order
+        new_order_old_indices = front_reefers + left_regular + dg_idxs + right_regular + back_reefers
+        if len(new_order_old_indices) != n:
+            # In case of logic error, fallback to identity
+            new_order_old_indices = list(range(n))
+
+        # Apply reordering
+        new_wagons: List[Wagon] = [wags[i] for i in new_order_old_indices]
+        train.wagons = new_wagons
+
+        # Build old->new index map
+        old_to_new = {old: new for new, old in enumerate(new_order_old_indices)}
+
+        # Update container_locations (wagon_index) in O(total_containers)
+        for cid, loc in list(train.container_locations.items()):
+            loc.wagon_index = old_to_new.get(loc.wagon_index, loc.wagon_index)
+
+        # Rebuild fast index sets
+        train.wagons_with_space = set(i for i, w in enumerate(train.wagons) if not w.is_full())
+        train.empty_wagons = set(i for i, w in enumerate(train.wagons) if w.is_empty())
+
+        # wagon_by_id remains valid (same objects)
+        return [old_to_new.get(i, i) for i in range(n)]
 
 if __name__ == "__main__":
     import time
