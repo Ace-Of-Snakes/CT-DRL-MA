@@ -334,7 +334,7 @@ if __name__ == "__main__":
     trains = parser.create_trains()
     
     # Schedule trains
-    scheduler = TrainScheduler(num_tracks=12)
+    scheduler = TrainScheduler(num_tracks=13)
     schedule = scheduler.schedule_trains(trains)
     
     # Print results
