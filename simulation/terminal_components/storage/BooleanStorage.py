@@ -1,4 +1,5 @@
 import numpy as np
+from datetime import datetime
 from typing import Dict, Tuple, List, Optional, Set
 from dataclasses import dataclass
 from simulation.terminal_components.storage_units.Container import Container
@@ -442,3 +443,66 @@ class BooleanStorageYard:
         
         print("\n=== Occupancy (Tier 0) ===")
         print(f"Occupied positions:\n{self.occupancy_mask[0]}")
+
+    def get_containers_departing_on(
+        self,
+        day: datetime,
+        use_estimated: bool = True,
+        one_based_bay: bool = True
+    ) -> List[tuple[str, int]]:
+        """
+        List containers scheduled to leave on 'day' with their current bay.
+
+        Args:
+            day: Current day (date portion used)
+            use_estimated: If True, prefer container.estimated_departure when available;
+                           otherwise use container.departure_date
+            one_based_bay: If True, return 1-based bay numbers; else 0-based
+
+        Returns:
+            List of (container_id, bay) tuples, sorted by bay then container_id.
+            Bay is the container's start bay (rough placement).
+        """
+        target = day.date()
+        out: List[tuple[str, int]] = []
+
+        # Localize lookups for speed
+        records = self.containers.values()
+        add = out.append
+        off = 1 if one_based_bay else 0
+
+        for rec in records:
+            c = rec.container
+            dep = c.estimated_departure if (use_estimated and c.estimated_departure) else c.departure_date
+            if dep and dep.date() == target:
+                bay = rec.placement.bay + off
+                add((c.container_id, bay))
+
+        # Stable, cheap sort
+        out.sort(key=lambda x: (x[1], x[0]))
+        return out
+
+    def get_containers_departing_on_by_bay(
+        self,
+        day: datetime,
+        use_estimated: bool = True,
+        one_based_bay: bool = True
+    ) -> Dict[int, List[str]]:
+        """
+        Group containers scheduled to leave on 'day' by bay.
+
+        Returns:
+            Dict[bay -> sorted list of container_ids]
+        """
+        items = self.get_containers_departing_on(day, use_estimated, one_based_bay)
+        grouped: Dict[int, List[str]] = {}
+        for cid, bay in items:
+            lst = grouped.get(bay)
+            if lst is None:
+                grouped[bay] = [cid]
+            else:
+                lst.append(cid)
+        # Sort IDs per bay for deterministic output
+        for bay in grouped:
+            grouped[bay].sort()
+        return grouped

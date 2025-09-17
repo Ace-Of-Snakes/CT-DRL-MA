@@ -6,6 +6,7 @@ from typing import List, Tuple
 from datetime import datetime
 from simulation.terminal_components.storage_units.Container import Container
 from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
+from datetime import datetime, timedelta
 np.random.seed(42)
 
 class TestBooleanStorage(unittest.TestCase):
@@ -280,6 +281,114 @@ class TestBooleanStorage(unittest.TestCase):
             self.assertLess(search_time_ratio, 2.0, "Search time should not double with 40x containers")
             self.assertLess(moveable_ratio, container_ratio * 1.5, "Moveable finding should scale linearly or better")
             
+    def _place_container_at_bay(self, container: Container, target_bay: int) -> PlacementResult:
+            """Helper: find a placement near target_bay and add the container."""
+            placements = self.yard.search_placement_all_tiers(container, target_bay=target_bay, max_proximity=10)
+            self.assertGreater(len(placements), 0, f"No placements found for {container.container_id} near bay {target_bay}")
+            chosen = placements[0]
+            self.yard.add_container(container, chosen)
+            return chosen
+
+    def test_departures_listing_use_estimated_vs_actual(self):
+        """Verify listing by day using estimated vs actual departure dates."""
+        current_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Create containers with various departure/estimated dates
+        c_today_a = self._create_container("TODAY_REG_A", 40, "Regular")
+        c_today_a.departure_date = current_day.replace(hour=14)
+
+        c_today_b = self._create_container("TODAY_REG_B", 40, "Regular")
+        c_today_b.departure_date = current_day.replace(hour=9)
+
+        c_tomorrow = self._create_container("TOMORROW_REG", 40, "Regular")
+        c_tomorrow.departure_date = current_day + timedelta(days=1)
+
+        # Estimated today (even though actual is in 2 days)
+        c_est_today = self._create_container("EST_TODAY", 40, "Regular")
+        c_est_today.departure_date = current_day + timedelta(days=2)
+        c_est_today.estimated_departure = current_day.replace(hour=13)
+
+        # Estimated tomorrow (actual is today)
+        c_est_tomorrow = self._create_container("EST_TOMORROW", 40, "Regular")
+        c_est_tomorrow.departure_date = current_day.replace(hour=11)
+        c_est_tomorrow.estimated_departure = current_day + timedelta(days=1)
+
+        # Place them in known bays
+        p_today_a = self._place_container_at_bay(c_today_a, target_bay=10)
+        p_today_b = self._place_container_at_bay(c_today_b, target_bay=10)
+        p_tomorrow = self._place_container_at_bay(c_tomorrow, target_bay=12)
+        p_est_today = self._place_container_at_bay(c_est_today, target_bay=5)
+        p_est_tomorrow = self._place_container_at_bay(c_est_tomorrow, target_bay=20)
+
+        # Expected bay map (1-based indexing for comparison)
+        expected_bays_1b = {
+            "TODAY_REG_A": p_today_a.bay + 1,
+            "TODAY_REG_B": p_today_b.bay + 1,
+            "TOMORROW_REG": p_tomorrow.bay + 1,
+            "EST_TODAY": p_est_today.bay + 1,
+            "EST_TOMORROW": p_est_tomorrow.bay + 1,
+        }
+
+        # Use estimated = True: include TODAY_REG_A, TODAY_REG_B, EST_TODAY
+        res_est = self.yard.get_containers_departing_on(current_day, use_estimated=True, one_based_bay=True)
+        got_ids_est = {cid for cid, _ in res_est}
+        exp_ids_est = {"TODAY_REG_A", "TODAY_REG_B", "EST_TODAY"}
+        self.assertSetEqual(got_ids_est, exp_ids_est, "Estimated-based listing mismatch")
+
+        # Validate bays for estimated case
+        for cid, bay in res_est:
+            self.assertEqual(bay, expected_bays_1b[cid], f"Wrong bay for {cid} (estimated case)")
+
+        # Use estimated = False: include TODAY_REG_A, TODAY_REG_B, EST_TOMORROW
+        res_act = self.yard.get_containers_departing_on(current_day, use_estimated=False, one_based_bay=True)
+        got_ids_act = {cid for cid, _ in res_act}
+        exp_ids_act = {"TODAY_REG_A", "TODAY_REG_B", "EST_TOMORROW"}
+        self.assertSetEqual(got_ids_act, exp_ids_act, "Actual-based listing mismatch")
+
+        # Validate bays for actual case
+        for cid, bay in res_act:
+            self.assertEqual(bay, expected_bays_1b[cid], f"Wrong bay for {cid} (actual case)")
+
+    def test_departures_grouped_by_bay(self):
+        """Verify grouped-by-bay output using estimated departures."""
+        current_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Two containers due today in same bay and one in a different bay
+        a = self._create_container("DUE_A", 40, "Regular")
+        b = self._create_container("DUE_B", 40, "Regular")
+        c = self._create_container("DUE_C", 40, "Regular")
+
+        for cont in (a, b, c):
+            cont.departure_date = current_day.replace(hour=8)
+
+        pa = self._place_container_at_bay(a, target_bay=7)
+        pb = self._place_container_at_bay(b, target_bay=7)
+        pc = self._place_container_at_bay(c, target_bay=15)
+
+        grouped = self.yard.get_containers_departing_on_by_bay(current_day, use_estimated=True, one_based_bay=True)
+
+        bay7 = pa.bay + 1
+        bay15 = pc.bay + 1
+
+        self.assertIn(bay7, grouped, "Expected bay 7 group missing")
+        self.assertIn(bay15, grouped, "Expected bay 15 group missing")
+        self.assertCountEqual(grouped[bay7], ["DUE_A", "DUE_B"], "Bay 7 group mismatch")
+        self.assertEqual(grouped[bay15], ["DUE_C"], "Bay 15 group mismatch")
+
+    def test_departures_zero_based_bay_indexing(self):
+        """Verify optional zero-based bay indexing."""
+        current_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        x = self._create_container("ZERO_A", 40, "Regular")
+        x.departure_date = current_day.replace(hour=10)
+        px = self._place_container_at_bay(x, target_bay=22)
+
+        res0 = self.yard.get_containers_departing_on(current_day, use_estimated=True, one_based_bay=False)
+        self.assertTrue(any(cid == "ZERO_A" for cid, _ in res0), "ZERO_A missing in zero-based output")
+        for cid, bay in res0:
+            if cid == "ZERO_A":
+                self.assertEqual(bay, px.bay, "Zero-based bay should match placement.bay")
+
     def _plot_performance_results(self, results):
         """Plot performance analysis results."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
