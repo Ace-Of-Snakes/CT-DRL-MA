@@ -3,10 +3,11 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
+import os
 
 # Constants
 DRIVING_PLAN_PATH = "simulation/data/driving_plan.json"
-WAGON_COUNT = 29
+WAGON_COUNT = int(os.getenv("WAGON_COUNT", "29"))  # set to "27" to shorten by 2 wagons
 WAGON_LENGTH = 24.384  # Default from Train class
 ARRIVAL_IDX_DAY = 0
 ARRIVAL_IDX_TIME = 1

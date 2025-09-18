@@ -42,13 +42,18 @@ class LogisticsManager:
                  terminal_gate: TerminalGate,
                  train_loader: TrainLoader,
                  train_scheduler: TrainScheduler,
-                 parser: DrivingPlanParser):
+                 parser: DrivingPlanParser,
+                 daily_import_cap: Optional[int] = None,
+                 export_per_import: float = 0.75):
         self.yard = yard
         self.gate = terminal_gate
         self.loader = train_loader
         self.scheduler = train_scheduler
         self.parser = parser
         self.time = WeeklyTimeEncoder()
+        # New controls
+        self.daily_import_cap = daily_import_cap
+        self.export_per_import = max(0.0, float(export_per_import))
 
     def plan_day(self, day_start: datetime, trains_override: Optional[List[Train]] = None) -> DayPlan:
         # 1) Build trains and schedule (respect override)
@@ -79,18 +84,18 @@ class LogisticsManager:
         due_export_containers = [self.yard.get_container(cid) for cid in due_export_ids if self.yard.get_container(cid)]
         due_import_containers = [self.yard.get_container(cid) for cid in due_import_ids if self.yard.get_container(cid)]
 
-        # 4) Assign due-today Export containers to trains (operator-agnostic)
+        # 4) Assign due-today Export containers to trains (pickup IDs)
         pickup_assignments: Dict[str, Dict[int, List[str]]] = self._assign_pickups_to_trains(
             due_export_containers, [st.train for st in todays_trains], append_to=None
         )
 
         # 5) Generate trucks for today
-        target_exports = int(round(0.75 * imports_arriving))
+        target_exports = int(round(0.75 * imports_arriving))  # keep current ratio, can be parameterized later
         export_cfg = self._export_operator_split(todays_trains, target_exports)
         order = Order(import_containers=due_import_containers, export_operators=export_cfg)
         trucks_today = self.gate.process_order(order, day_start, day_start.strftime("%A"))
 
-        # 6) Pre-assign IDs from delivered exports to trains
+        # 6) Pre-assign delivered exports to trains
         if trucks_today:
             export_delivered: List[Container] = []
             for t in trucks_today:
@@ -125,21 +130,16 @@ class LogisticsManager:
                 imminent.append(st.train)
         if not imminent:
             return
-
-        # Gather still-present Export due-today
         due_pairs = self.yard.get_containers_departing_on(now, use_estimated=True, one_based_bay=False)
         due_export = []
         for cid, _ in due_pairs:
             c = self.yard.get_container(cid)
             if c and c.direction == "Export":
                 due_export.append(c)
-
-        # Clear existing pickups on imminent trains if not due today
         due_ids = {c.container_id for c in due_export}
         for tr in imminent:
             for w in tr.wagons:
                 w.pickup_container_ids.intersection_update(due_ids)
-
         self._assign_pickups_to_trains(due_export, imminent, append_to=None)
 
     # ---------------- helpers ----------------
@@ -215,3 +215,28 @@ class LogisticsManager:
             if dt > latest:
                 latest = dt
         return latest
+    
+    def _throttle_train_imports(self, trains: List[Train], cap_total: int) -> None:
+        """Remove import containers from trains (round-robin) until total <= cap_total."""
+        total = sum(tr.get_container_count() for tr in trains)
+        if total <= cap_total:
+            return
+        to_remove = total - cap_total
+        # Round-robin over trains, pop containers from wagons
+        while to_remove > 0:
+            changed = False
+            for tr in trains:
+                if to_remove <= 0:
+                    break
+                if tr.get_container_count() == 0:
+                    continue
+                # remove one arbitrary container (last wagon with any container)
+                for w in reversed(tr.wagons):
+                    ids = list(w.containers.keys())
+                    if ids:
+                        tr.remove_container(ids[-1])
+                        to_remove -= 1
+                        changed = True
+                        break
+            if not changed:
+                break  # can't remove more (shouldn't happen)
