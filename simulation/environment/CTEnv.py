@@ -38,14 +38,15 @@ class ContainerTerminalEnv:
     """
 
     def __init__(self,
-                 yard: BooleanStorageYard,
-                 rail: BooleanRailYard,
-                 parking: ParkingArea,
-                 tlm: TerminalLogisticsManager,
-                 lm: LogisticsManager,
-                 num_tracks: int,
-                 step_minutes: int = 5,
-                 overflow_penalty: float = -500.0):
+                yard: BooleanStorageYard,
+                rail: BooleanRailYard,
+                parking: ParkingArea,
+                tlm: TerminalLogisticsManager,
+                lm: LogisticsManager,
+                num_tracks: int,
+                step_minutes: int = 5,
+                overflow_penalty: float = -500.0,
+                num_cranes: int = 2):
         self.yard = yard
         self.rail = rail
         self.parking = parking
@@ -55,23 +56,20 @@ class ContainerTerminalEnv:
         self.step_minutes = step_minutes
         self.overflow_penalty = overflow_penalty
 
-        # Encoder/Reward
         self.encoder = TerminalStateEncoder(yard, rail)
         self.reward_engine = RewardEngine(yard)
 
-        # Sim-Zustand
         self.current_time: Optional[datetime] = None
         self.day_index: int = 0
         self.day_plan: Optional[DayPlan] = None
         self._scheduled_trains: List = []
         self._departed_cache: Dict[str, Train] = {}
 
-        # Live-Objekte
         self.trains: Dict[str, Train] = {}
         self.trucks: Dict[str, Truck] = {}
         self.terminal_trucks: Dict[str, TerminalTruck] = {}
 
-        # RMGC-Setup: Geometrie und Performance (einfaches Modell)
+        # geometry/perf unchanged ...
         self._bay_length_m = 12.192
         self._row_slot_width_m = 2.44
         self._track_width_m = 3.0
@@ -82,7 +80,6 @@ class ContainerTerminalEnv:
         self._tier_height_m = 2.59
         self._ground_vehicle_height_m = 1.5
 
-        # Performance (m/s) und Handlingzeit
         self._trolley_speed = 70.0 / 60.0
         self._hoist_speed = 28.0 / 60.0
         self._gantry_speed = 130.0 / 60.0
@@ -92,36 +89,35 @@ class ContainerTerminalEnv:
         self._max_hook_height = 20.0
         self._handling_s = 30.0
 
-        # y-Koordinaten der Bereiche
         self._rail_y0 = 0.0
         self._parking_y = self._rail_y0 + max(self._track_width_m, self._track_width_m * self.num_tracks) + self._space_rails_to_parking_m
         self._driving_y = self._parking_y + self._parking_lane_width_m
         self._storage_y0 = self._driving_y + self._driving_lane_width_m + self._space_driving_to_storage_m
 
-        # Kräne
+        # N cranes
+        self.num_cranes = max(1, int(num_cranes))
         self.cranes: List[CraneState] = []
         self.crane_zones: List[Tuple[int, int]] = []
 
     # ------------- Public API -------------
 
-    def reset(self, day_start: datetime, day_index: int = 0) -> Tuple[Any, List[Move]]:
+    def reset(self, day_start: datetime, day_index: int = 0, trains_override: Optional[List[Train]] = None) -> Tuple[Any, List[Move]]:
         self.day_index = day_index
         self.current_time = day_start.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # Tag planen
-        self.day_plan = self.lm.plan_day(self.current_time)
+        # Plan day (respect override)
+        self.day_plan = self.lm.plan_day(self.current_time, trains_override=trains_override)
         self._scheduled_trains = list(self.day_plan.todays_trains)
         self.trains.clear()
         self.trucks.clear()
         self.terminal_trucks.clear()
 
-        # Kräne initialisieren
-        self.cranes = [CraneState(0, None), CraneState(1, None)]
+        # N cranes
+        self.cranes = [CraneState(i, None) for i in range(self.num_cranes)]
         self.crane_zones = self._make_crane_zones(overlap_bays=4)
 
-        # Ankünfte (t=0)
+        # Admit arrivals at t0, auto-slot parking
         self._admit_arrivals()
-        # Autoslot-Parking (ohne Kranzeit)
         self._auto_slot_parking()
 
         state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
@@ -190,18 +186,11 @@ class ContainerTerminalEnv:
                         agent,
                         log_cb: Optional[Callable[[Dict[str, Any]], None]] = None
                         ) -> Tuple[Any, List[Move], float, bool, Dict]:
-        """
-        Ereignisgetrieben, duale Kräne:
-        - Bilde Move-Liste.
-        - Wähle bis zu 2 Moves (je einen pro idle Kran) über den Agenten aus (gefiltert nach Zonen/Konflikten).
-        - Führe beide Moves sofort aus, berechne Zeiten.
-        - Zeitfortschritt um das Minimum der beiden Zeiten; längerer Move hält seinen Kran weiter busy.
-        """
         reward = 0.0
         info: Dict[str, Any] = {"executed": [], "train_departures": [], "truck_departures": []}
         now = self.current_time
 
-        # Vor dem Scheduling: laufende Ankünfte/Abfahrten verarbeiten
+        # arrivals/departures before scheduling
         departed_ids = self._admit_arrivals_and_departures()
         for tid in departed_ids:
             tr = self._departed_cache.get(tid)
@@ -209,40 +198,31 @@ class ContainerTerminalEnv:
                 reward += self.reward_engine.on_train_departure(tr)
                 info["train_departures"].append(tid)
 
-        # Autoslot-Parking
         self._auto_slot_parking()
 
-        # Idle-Kräne identifizieren
         idle = [c for c in self.cranes if (c.busy_until is None or c.busy_until <= now)]
         if not idle:
-            # zu nächstem Kranende vorspringen
             next_t = min(c.busy_until for c in self.cranes if c.busy_until is not None)
             advance_min = (next_t - now).total_seconds() / 60.0
             self.current_time = next_t
-            # optional Wartestrafe
             reward += self.reward_engine.waiting_penalty(len(self.trucks), advance_min)
             state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
             return state, self._list_moves(), reward, False, info
 
         all_moves = self._list_moves()
         if not all_moves:
-            # keine Moves -> kleine Zeitscheibe springen
             self.current_time += timedelta(minutes=self.step_minutes)
             state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
             return state, self._list_moves(), reward, False, info
 
         zones = self.crane_zones
-        picks: List[Tuple[int, Move, float, float]] = []  # (crane_id, move, distance_m, time_s)
-        used_bays = set()
-        used_cids = set()
+        picks: List[Tuple[int, Move, float, float]] = []
+        used_bays, used_cids = set(), set()
 
-        # Wähle max. 2 Moves (zwei idle Kräne)
-        for crane in idle[:2]:
-            # Kandidaten für diesen Kran
+        for crane in idle:
             cand = [m for m in all_moves if self._eligible_for_crane(m, crane.id, zones)]
             if not cand:
                 continue
-            # Konflikte vermeiden (gleicher Container oder gleiche Bay)
             filtered = []
             for mv in cand:
                 cids = self._move_container_ids(mv)
@@ -255,37 +235,27 @@ class ContainerTerminalEnv:
             if not filtered:
                 continue
 
-            # Agentenentscheidung auf gefilterter Liste
             state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
             a_idx = agent.act(state, filtered)
             if a_idx < 0 or a_idx >= len(filtered):
                 continue
             mv = filtered[a_idx]
 
-            # Kosten berechnen
             p = self._endpoints_for_move(mv)
             if p is None:
                 continue
             cost = self._estimate_move_cost(p[0], p[1])
-
-            # Move ausführen
             ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
             if not ok:
                 continue
 
-            # Reward
             r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
             reward += r
-
-            # Kran blockieren
             self.cranes[crane.id].busy_until = now + timedelta(seconds=cost["time_s"])
             picks.append((crane.id, mv, cost["distance_m"], cost["time_s"]))
-
-            # Konflikte updaten
             used_bays |= self._move_bays(mv)
             used_cids |= self._move_container_ids(mv)
 
-            # Logging/Info
             rec = {
                 "timestamp": now.isoformat(), "crane_id": crane.id,
                 "move_type": mv.type, "args": mv.args,
@@ -299,16 +269,13 @@ class ContainerTerminalEnv:
                     pass
 
         if not picks:
-            # nichts geplant -> vorwärts
             self.current_time += timedelta(minutes=self.step_minutes)
             state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
             return state, self._list_moves(), reward, False, info
 
-        # Zeit um die kürzere Move-Zeit fortschreiben
         min_time_s = min(t for (_, _, _, t) in picks)
         self.current_time = now + timedelta(seconds=min_time_s)
 
-        # Abfahrten genau jetzt
         departed_ids2 = self._admit_arrivals_and_departures()
         for tid in departed_ids2:
             tr = self._departed_cache.get(tid)
@@ -316,10 +283,8 @@ class ContainerTerminalEnv:
                 reward += self.reward_engine.on_train_departure(tr)
                 info["train_departures"].append(tid)
 
-        # Trucks, die fertig sind, departieren (Wartezeiten)
         info["truck_departures"].extend(self._collect_truck_departures())
 
-        # End-of-day
         done = False
         if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
             reward += self.reward_engine.end_of_day_penalty(self.current_time)
@@ -333,10 +298,17 @@ class ContainerTerminalEnv:
     # ------------- interne Helfer -------------
 
     def _make_crane_zones(self, overlap_bays: int = 4) -> List[Tuple[int, int]]:
-        half = self.yard.n_bays // 2
-        z0 = (0, min(self.yard.n_bays, half + overlap_bays))
-        z1 = (max(0, half - overlap_bays), self.yard.n_bays)
-        return [z0, z1]
+        n = max(1, self.num_cranes)
+        B = self.yard.n_bays
+        if n == 1:
+            return [(0, B)]
+        base = B // n
+        zones = []
+        for i in range(n):
+            lo = max(0, i * base - overlap_bays)
+            hi = B if i == n - 1 else min(B, (i + 1) * base + overlap_bays)
+            zones.append((lo, hi))
+        return zones
 
     def _list_moves(self) -> List[Move]:
         out: List[Move] = []

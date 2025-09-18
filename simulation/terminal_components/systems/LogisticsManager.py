@@ -50,13 +50,13 @@ class LogisticsManager:
         self.parser = parser
         self.time = WeeklyTimeEncoder()
 
-    def plan_day(self, day_start: datetime) -> DayPlan:
-        # 1) Build trains and schedule
-        trains = self.parser.create_trains()
+    def plan_day(self, day_start: datetime, trains_override: Optional[List[Train]] = None) -> DayPlan:
+        # 1) Build trains and schedule (respect override)
+        trains = trains_override if trains_override is not None else self.parser.create_trains()
         schedule = self.scheduler.schedule_trains(trains)
         day_name = day_start.strftime("%A").lower()
         todays_trains = [st for st in schedule.scheduled_trains
-                         if self.time.decode(st.arrival_angle)[0] == day_name]
+                        if self.time.decode(st.arrival_angle)[0] == day_name]
 
         # 2) Pre-load import containers and rearrange wagons
         for st in todays_trains:
@@ -69,17 +69,12 @@ class LogisticsManager:
 
         # 3) Gather due-today yard containers
         due_pairs = self.yard.get_containers_departing_on(day_start, use_estimated=True, one_based_bay=False)
-        # Split by direction
-        due_export_ids = []
-        due_import_ids = []
+        due_export_ids, due_import_ids = [], []
         for cid, _bay in due_pairs:
             c = self.yard.get_container(cid)
-            if not c: 
+            if not c:
                 continue
-            if c.direction == "Export":
-                due_export_ids.append(cid)
-            else:
-                due_import_ids.append(cid)
+            (due_export_ids if c.direction == "Export" else due_import_ids).append(cid)
 
         due_export_containers = [self.yard.get_container(cid) for cid in due_export_ids if self.yard.get_container(cid)]
         due_import_containers = [self.yard.get_container(cid) for cid in due_import_ids if self.yard.get_container(cid)]
@@ -90,14 +85,12 @@ class LogisticsManager:
         )
 
         # 5) Generate trucks for today
-        # 5a) Delivery trucks (Export containers), ratio = 0.75 per Import arrival
         target_exports = int(round(0.75 * imports_arriving))
         export_cfg = self._export_operator_split(todays_trains, target_exports)
-        # 5b) Pickup trucks for Import containers due today
         order = Order(import_containers=due_import_containers, export_operators=export_cfg)
         trucks_today = self.gate.process_order(order, day_start, day_start.strftime("%A"))
 
-        # 6) Pre-assign IDs of export deliveries to trains as well
+        # 6) Pre-assign IDs from delivered exports to trains
         if trucks_today:
             export_delivered: List[Container] = []
             for t in trucks_today:
@@ -105,9 +98,9 @@ class LogisticsManager:
                     export_delivered.extend(t.containers)
             if export_delivered:
                 self._assign_pickups_to_trains(export_delivered, [st.train for st in todays_trains],
-                                               append_to=pickup_assignments)
+                                            append_to=pickup_assignments)
 
-        # 7) Compute last departure datetime for cut-off
+        # 7) Compute last departure datetime
         last_departure_dt = self._last_departure_datetime(todays_trains, day_start)
 
         return DayPlan(
