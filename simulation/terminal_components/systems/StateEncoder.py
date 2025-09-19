@@ -6,6 +6,7 @@ from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
 from simulation.terminal_components.vehicles.TerminalTruck import TerminalTruck
 from simulation.terminal_components.systems.railyard import BooleanRailYard
+from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
 
 class TerminalStateEncoder:
     """
@@ -14,11 +15,13 @@ class TerminalStateEncoder:
     5: accessible, 6: wanted_by_train, 7: wanted_by_truck,
     8: days_until_departure (normalized),
     9: train_pickup_demand_per_bay (broadcast),
-    10: train_anchor_heat (broadcast)
+    10: train_anchor_heat (broadcast),
+    + Forecast channels (11: trains_arriving_heat, 12: trucks_arriving_heat)
     """
     def __init__(self, yard: BooleanStorageYard, rail: BooleanRailYard):
         self.yard = yard
         self.rail = rail
+        self.time_enc = WeeklyTimeEncoder()  # use our own decoder for angles
 
     def encode(self,
                trains: Dict[str, Train],
@@ -43,7 +46,7 @@ class TerminalStateEncoder:
                 tensor[r, b, t, 1] = 1.0
             tensor[r, b, t, 5] = 1.0 if rec.is_accessible else 0.0
             try:
-                now = c.arrival_date
+                now = c.arrival_date  # keep your current convention
                 days = c.days_until_departure(now)
                 tensor[r, b, t, 8] = float(min(30.0, max(0.0, days))) / 30.0
             except:
@@ -57,8 +60,7 @@ class TerminalStateEncoder:
         for tk in trucks.values():
             truck_want |= set(tk.pickup_container_ids)
 
-        for cid in self.yard.containers.keys():
-            rec = self.yard.containers[cid]
+        for cid, rec in self.yard.containers.items():
             r, b, t = rec.placement.row, rec.placement.bay, rec.placement.tier
             if cid in train_want:
                 tensor[r, b, t, 6] = 1.0
@@ -90,3 +92,62 @@ class TerminalStateEncoder:
         tensor[:, :, :, 9] = demand_per_bay[None, :, None]
         tensor[:, :, :, 10] = anchor_heat[None, :, None]
         return tensor
+
+    def encode_with_forecast(self,
+                             trains: Dict[str, Train],
+                             trucks: Dict[str, Truck],
+                             terminal_trucks: Dict[str, TerminalTruck],
+                             day_plan,  # LogisticsManager.DayPlan
+                             now) -> np.ndarray:
+        """
+        Extend the 11-channel tensor with 2 broadcast channels:
+        - 11: trains_arriving_soon_heat (by anchor bay, next ~3h)
+        - 12: trucks_arriving_soon_heat (by preferred bay, next ~2h)
+        """
+        base = self.encode(trains, trucks, terminal_trucks)  # [R, B, T, 11]
+        R, B, T, _ = base.shape
+        extra = np.zeros((R, B, T, 2), dtype=np.float32)
+
+        # Trains arriving soon (<= 3 hours)
+        trains_heat = np.zeros(B, dtype=np.float32)
+        if day_plan and getattr(day_plan, "todays_trains", None):
+            for st in day_plan.todays_trains:
+                # If not yet admitted, use anchor; weight by time-to-arrival
+                if st.train.train_id not in trains:
+                    _day, h, m = self.time_enc.decode(st.arrival_angle)  # decode directly
+                    arr_dt = day_plan.date.replace(hour=h, minute=m, second=0, microsecond=0)
+                    dt_min = (arr_dt - now).total_seconds() / 60.0
+                    if 0.0 <= dt_min <= 180.0:
+                        anchor = self.rail.get_anchor_bay(st.train.train_id) or (B // 2)
+                        w = max(0.0, 1.0 - dt_min / 180.0)
+                        trains_heat[anchor] += w
+
+        # Trucks arriving soon (<= 2 hours)
+        trucks_heat = np.zeros(B, dtype=np.float32)
+        if day_plan and getattr(day_plan, "trucks_today", None):
+            for tk in day_plan.trucks_today:
+                if tk and tk.arrival_time and tk.arrival_time > now:
+                    dt_min = (tk.arrival_time - now).total_seconds() / 60.0
+                    if 0.0 <= dt_min <= 120.0:
+                        # Approximate preferred bay: if pickup -> median of target container bays; if delivery -> center
+                        bay = self.yard.n_bays // 2
+                        if getattr(tk, "pickup_container_ids", None):
+                            bays = []
+                            for cid in tk.pickup_container_ids:
+                                pl = self.yard.get_container_placement(cid)
+                                if pl:
+                                    bays.append(pl.bay)
+                            if bays:
+                                bays.sort()
+                                bay = bays[len(bays)//2]
+                        w = max(0.0, 1.0 - dt_min / 120.0)
+                        trucks_heat[min(max(0, bay), B-1)] += w
+
+        if trains_heat.max() > 0:
+            trains_heat /= trains_heat.max()
+        if trucks_heat.max() > 0:
+            trucks_heat /= trucks_heat.max()
+
+        extra[:, :, :, 0] = trains_heat[None, :, None]
+        extra[:, :, :, 1] = trucks_heat[None, :, None]
+        return np.concatenate([base, extra], axis=-1)

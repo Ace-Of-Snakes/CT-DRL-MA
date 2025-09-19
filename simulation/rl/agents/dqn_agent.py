@@ -12,15 +12,17 @@ from simulation.terminal_components.systems.StateEncoder import TerminalStateEnc
 from simulation.rl.policy.cnn_policy import CNN3DBackbone, MoveFeaturizer, MoveEncoder, QScorer
 
 @dataclass
+# simulation/rl/agents/dqn_agent.py
+@dataclass
 class DQNConfig:
-    in_channels: int = 11     # must match TerminalStateEncoder
+    in_channels: int = 13     # 11 Basis + 2 Forecast-Kanäle
     state_hidden: int = 128
     move_hidden: int = 128
     gamma: float = 0.99
     lr: float = 3e-4
     batch_size: int = 32
     replay_size: int = 50000
-    target_tau: float = 0.005  # soft update
+    target_tau: float = 0.005
     epsilon_start: float = 0.2
     epsilon_end: float = 0.02
     epsilon_decay_steps: int = 50000

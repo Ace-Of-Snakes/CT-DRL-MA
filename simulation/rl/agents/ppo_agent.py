@@ -10,8 +10,10 @@ from simulation.terminal_components.systems.TerminalManager import Move
 from simulation.rl.policy.cnn_policy import CNN3DBackbone, MoveFeaturizer, MoveEncoder, PolicyHeads
 
 @dataclass
+# simulation/rl/agents/ppo_agent.py
+@dataclass
 class PPOConfig:
-    in_channels: int = 11
+    in_channels: int = 13     # 11 Basis + 2 Forecast-Kanäle
     state_hidden: int = 128
     move_hidden: int = 128
     lr: float = 3e-4

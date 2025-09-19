@@ -389,6 +389,52 @@ class TerminalGate:
         
         return [truck for truck, arrived in zip(trucks, mask) if arrived]
     
+    def create_delivery_trucks_for_operators(self,
+                                             export_operators: Dict[str, Dict],
+                                             simulation_date: datetime,
+                                             day_of_week: str) -> List[Truck]:
+        """
+        Generate Export delivery trucks for the given operator config.
+        Keeps current arrival-time policy (short-dwell early), then builds trucks.
+        """
+        if not export_operators:
+            return []
+        trucks: List[Truck] = []
+        for operator, cfg in export_operators.items():
+            num_containers = int(cfg.get("num_containers", 0))
+            if num_containers <= 0:
+                continue
+            # Use existing single-operator path
+            op_trucks = self._process_single_operator(operator, cfg, simulation_date, day_of_week)
+            if op_trucks:
+                trucks.extend(op_trucks)
+        return trucks
+
+    def create_pickup_trucks_after(self,
+                                   containers: List[Container],
+                                   earliest_time: datetime,
+                                   day_of_week: str) -> List[Truck]:
+        """
+        Create Import pickup trucks for the given containers but force arrival
+        strictly after earliest_time (add small jitter to avoid ties).
+        """
+        if not containers:
+            return []
+        day_key = day_of_week.lower()
+        # Use the same grouping and truck creation as _process_imports but on our list
+        trucks = self.truck_factory._generate_pickup_trucks(
+            containers=containers,
+            day_key=day_key,
+            base_date=earliest_time,
+            parking_spot_prefix="P"
+        )
+        # Enforce 'after' timing
+        for i, t in enumerate(trucks or []):
+            if t.arrival_time is None or t.arrival_time <= earliest_time:
+                jitter = np.random.randint(5, 45)  # 5..45 minutes after earliest_time
+                t.arrival_time = earliest_time + timedelta(minutes=int(jitter))
+        return trucks
+
     def cleanup(self):
         """Clean up resources."""
         self.executor.shutdown(wait=True)

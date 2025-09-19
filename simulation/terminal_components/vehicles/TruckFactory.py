@@ -220,63 +220,63 @@ class TruckFactory:
         return groups
     
     def _create_delivery_truck(self,
-                              containers: List[Container],
-                              day_key: str,
-                              base_date: Optional[datetime],
-                              parking_spot_prefix: str) -> Truck:
-        """Create a delivery truck with containers loaded."""
+                            containers: List[Container],
+                            day_key: str,
+                            base_date: Optional[datetime],
+                            parking_spot_prefix: str) -> Truck:
         self._id_counter += 1
         truck_id = f"TRK{self._id_counter:05d}"
-        
+
         arrival_time = self._sample_arrival_time(
             day_key=day_key,
             is_delivery=True,
             base_date=base_date
         )
-        
+
+        # Do NOT pre-assign parking; agent will SLOT_TRUCK_PARKING
         truck = Truck(
             truck_id=truck_id,
             max_length=TRUCK_LENGTH,
             arrival_time=arrival_time,
-            parking_spot=f"{parking_spot_prefix}{self._id_counter:03d}"
+            parking_spot=None
         )
-        
+
         for container in containers:
             truck.add_container(container)
-        
+
         truck.is_delivery_truck = True
         truck.is_pickup_truck = False
-        
+
         return truck
-    
+
     def _create_pickup_truck(self,
-                           containers: List[Container],
-                           day_key: str,
-                           base_date: Optional[datetime],
-                           parking_spot_prefix: str) -> Truck:
-        """Create a pickup truck with container IDs to collect."""
+                            containers: List[Container],
+                            day_key: str,
+                            base_date: Optional[datetime],
+                            parking_spot_prefix: str) -> Truck:
         self._id_counter += 1
         truck_id = f"TRK{self._id_counter:05d}"
-        
+
         arrival_time = self._sample_arrival_time(
             day_key=day_key,
             is_delivery=False,
             base_date=base_date
         )
-        
+
+        # Do NOT pre-assign parking; agent will SLOT_TRUCK_PARKING
         truck = Truck(
             truck_id=truck_id,
             max_length=TRUCK_LENGTH,
             arrival_time=arrival_time,
-            parking_spot=f"{parking_spot_prefix}{self._id_counter:03d}"
+            parking_spot=None
         )
-        
+
         for container in containers:
             truck.add_pickup_container_id(container.container_id)
-        
+
         truck.is_pickup_truck = True
         truck.is_delivery_truck = False
-        
+
         return truck
     
     def _sample_arrival_time(self,

@@ -14,6 +14,7 @@ MOVE_TYPES = [
     "TRAIN_TO_TRUCK",
     "TRUCK_TO_TRAIN",
     "YARD_TO_TERMINAL_TRUCK",
+    "SLOT_TRUCK_PARKING",   
 ]
 TYPE_TO_IDX = {t: i for i, t in enumerate(MOVE_TYPES)}
 
@@ -49,7 +50,7 @@ class MoveFeaturizer:
     """
     @staticmethod
     def feat_dim() -> int:
-        return 13
+        return len(MOVE_TYPES) + 5
 
     @staticmethod
     def featurize(moves: List[Move],
@@ -59,6 +60,7 @@ class MoveFeaturizer:
         for mv in moves:
             f = [0.0] * len(MOVE_TYPES)
             f[TYPE_TO_IDX.get(mv.type, 0)] = 1.0
+
             row = bay = tier = start = score = 0.0
             pl: PlacementResult = mv.args.get("placement", None)
             if pl is not None:
@@ -66,8 +68,19 @@ class MoveFeaturizer:
                 bay = pl.bay / max(1, n_bays - 1)
                 tier = pl.tier / max(1, n_tiers - 1)
                 start = pl.start_split / max(1, split_factor - 1)
-                # pl.score is distance in bays; normalize by proximity=3 cap
                 score = min(1.0, float(pl.score) / 3.0)
+            elif mv.type == "SLOT_TRUCK_PARKING":
+                # Spot "P_{bay}_{split}" parsen -> bay normalisieren
+                spot = mv.args.get("spot", "")
+                try:
+                    parts = spot.split("_")
+                    if len(parts) == 3:
+                        _, b, s = parts
+                        bay = int(b) / max(1, n_bays - 1)
+                        start = int(s) / max(1, split_factor - 1)
+                except Exception:
+                    pass
+
             out.append(f + [row, bay, tier, start, score])
         if not out:
             return torch.zeros((0, MoveFeaturizer.feat_dim()), dtype=torch.float32)
