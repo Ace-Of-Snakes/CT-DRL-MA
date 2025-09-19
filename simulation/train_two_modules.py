@@ -113,13 +113,18 @@ def build_module(name: str,
     lm = LogisticsManager(yard, gate, loader, scheduler, parser,
                           daily_import_cap=import_cap, export_per_import=export_per_import)
     tlm = TerminalLogisticsManager(yard, rail, parking)
-    env = ContainerTerminalEnv(yard=yard, rail=rail, parking=parking, tlm=tlm, lm=lm, num_tracks=tracks, step_minutes=5)
 
     mdir = os.path.join(logdir, name)
     os.makedirs(mdir, exist_ok=True)
     tracker = StatsTracker(moves_path=os.path.join(mdir, "moves.ndjson"),
                            daily_csv_path=os.path.join(mdir, "daily.csv"),
                            yard=yard)
+
+    # NEW: pass stats to env
+    env = ContainerTerminalEnv(yard=yard, rail=rail, parking=parking,
+                               tlm=tlm, lm=lm, num_tracks=tracks,
+                               step_minutes=5, stats=tracker)
+
     dims = (yard.n_rows, yard.n_bays, yard.n_tiers, yard.split_factor)
     agent = DQNAgent(dims, DQNConfig()) if algo == "dqn" else PPOAgent(dims, PPOConfig())
     return Module(name=name, env=env, yard=yard, scheduler=scheduler, tracker=tracker, agent=agent)
@@ -138,7 +143,7 @@ def main():
     args = ap.parse_args()
 
     random.seed(args.seed); np.random.seed(args.seed)
-    TM.PROXIMITY = 5  # as requested
+    TM.PROXIMITY = 5
 
     outdir = os.path.join(args.logdir, datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(outdir, exist_ok=True)
@@ -173,45 +178,32 @@ def main():
     start_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     best_sum_reward = -1e18
 
-    def make_log_cb(module: Module, day_idx: int):
-        counter = {"k": 0}
-        def cb(rec: Dict[str, Any]):
-            safe = {
-                "day_index": day_idx, "time": rec.get("timestamp"),
-                "module": module.name, "crane_id": rec.get("crane_id"),
-                "move_type": rec.get("move_type"), "args": jsonable(rec.get("args")),
-                "distance_m": rec.get("distance_m"), "time_s": rec.get("time_s"), "reward": rec.get("reward"),
-                "event_idx": counter["k"]
-            }
-            module.tracker.log_move(safe)
-            counter["k"] += 1
-        return cb
-
     try:
         for d in range(args.days):
             day_start = start_day + timedelta(days=d)
-            # Reset both modules (shared clock is implicit via stepping the earlier current_time)
-            m1_state, m1_moves = m1.env.reset(day_start, day_index=d)
-            m2_state, m2_moves = m2.env.reset(day_start, day_index=d)
+
+            m1.env.reset(day_start, day_index=d)
+            m2.env.reset(day_start, day_index=d)
             m1.tracker.reset_day_aggregates()
             m2.tracker.reset_day_aggregates()
+
             rec1 = DualActRecorder(m1.agent)
             rec2 = DualActRecorder(m2.agent)
-            log_cb1 = make_log_cb(m1, d)
-            log_cb2 = make_log_cb(m2, d)
+
             done1 = False; done2 = False
             day_reward_m1 = 0.0; day_reward_m2 = 0.0
             steps = 0
-
             pbar = tqdm(total=1, desc=f"Day {d+1}/{args.days}", leave=False)
 
             while not (done1 and done2):
                 t1 = None if done1 else m1.env.current_time
                 t2 = None if done2 else m2.env.current_time
+
                 if t2 is None or (t1 is not None and t1 <= t2):
                     rec1.reset()
-                    ns, nm, rew, dn, info = m1.env.step_dual_agent(rec1, log_cb=log_cb1)
+                    ns, nm, rew, dn, info = m1.env.step_dual_agent(rec1)  # no log_cb needed
                     day_reward_m1 += rew
+
                     if rec1.records:
                         r_exec = [e.get("reward", 0.0) for e in info.get("executed", [])]
                         for k, r in enumerate(rec1.records):
@@ -227,16 +219,13 @@ def main():
                                                   r_k, r.get("value", 0.0), dn)
                         if isinstance(m1.agent, DQNAgent):
                             m1.agent.optimize()
-                    for tinfo in info.get("truck_departures", []):
-                        m1.tracker.on_truck_departure(wait_minutes=tinfo.get("wait_min", 0.0))
-                    for _ in info.get("train_departures", []):
-                        m1.tracker.on_train_departure(leftover_ids_count=0, imports_unloaded_count=0)
-                    m1_state, m1_moves = ns, nm
+
                     done1 = dn
                 else:
                     rec2.reset()
-                    ns, nm, rew, dn, info = m2.env.step_dual_agent(rec2, log_cb=log_cb2)
+                    ns, nm, rew, dn, info = m2.env.step_dual_agent(rec2)
                     day_reward_m2 += rew
+
                     if rec2.records:
                         r_exec = [e.get("reward", 0.0) for e in info.get("executed", [])]
                         for k, r in enumerate(rec2.records):
@@ -252,11 +241,7 @@ def main():
                                                   r_k, r.get("value", 0.0), dn)
                         if isinstance(m2.agent, DQNAgent):
                             m2.agent.optimize()
-                    for tinfo in info.get("truck_departures", []):
-                        m2.tracker.on_truck_departure(wait_minutes=tinfo.get("wait_min", 0.0))
-                    for _ in info.get("train_departures", []):
-                        m2.tracker.on_train_departure(leftover_ids_count=0, imports_unloaded_count=0)
-                    m2_state, m2_moves = ns, nm
+
                     done2 = dn
 
                 steps += 1
@@ -271,10 +256,13 @@ def main():
             if isinstance(m2.agent, PPOAgent):
                 m2.agent.update()
 
+            # Fill daily imports_unloaded from TRAIN_TO_YARD move counts
+            m1.tracker.imports_unloaded = m1.tracker.move_counts.get("TRAIN_TO_YARD", 0)
+            m2.tracker.imports_unloaded = m2.tracker.move_counts.get("TRAIN_TO_YARD", 0)
+
             m1.tracker.write_day_summary(day_index=d, date=day_start)
             m2.tracker.write_day_summary(day_index=d, date=day_start)
 
-            # checkpoints
             m1.agent.save(os.path.join(ckpt_dir, "m1_last.pt"))
             m2.agent.save(os.path.join(ckpt_dir, "m2_last.pt"))
             sum_r = day_reward_m1 + day_reward_m2

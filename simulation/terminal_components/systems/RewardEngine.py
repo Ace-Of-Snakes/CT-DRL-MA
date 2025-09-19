@@ -26,6 +26,12 @@ class RewardWeights:
     endday_leftover_weight: float = -0.1
     waiting_penalty_per_truck_minute: float = 0.0  # set >0 for real penalty
 
+    # New: truck wait-time shaping
+    truck_wait_fast_minutes: float = 60.0     # <= 1 hour => max reward
+    truck_wait_slow_minutes: float = 180.0    # >= 3 hours => min reward
+    truck_wait_reward_fast: float = 1.0       # reward at <= 1h
+    truck_wait_reward_min: float = 0.05       # reward floor at >= 3h
+
 class RewardEngine:
     def __init__(self, yard: BooleanStorageYard, weights: RewardWeights = RewardWeights()):
         self.yard = yard
@@ -57,6 +63,17 @@ class RewardEngine:
         if self.w.waiting_penalty_per_truck_minute <= 0.0:
             return 0.0
         return -self.w.waiting_penalty_per_truck_minute * num_trucks_present * minutes_advanced
+
+    def truck_wait_reward(self, wait_minutes: float) -> float:
+        # High reward at <= 60 min; linear down to 180 min; minimal afterward
+        w = self.w
+        if wait_minutes <= w.truck_wait_fast_minutes:
+            return w.truck_wait_reward_fast
+        if wait_minutes >= w.truck_wait_slow_minutes:
+            return w.truck_wait_reward_min
+        span = max(1e-6, (w.truck_wait_slow_minutes - w.truck_wait_fast_minutes))
+        alpha = (wait_minutes - w.truck_wait_fast_minutes) / span
+        return (1.0 - alpha) * w.truck_wait_reward_fast + alpha * w.truck_wait_reward_min
 
     def on_train_departure(self, train) -> float:
         if train.train_id in self._departed_trains:

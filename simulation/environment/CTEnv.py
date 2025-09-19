@@ -15,7 +15,7 @@ from simulation.terminal_components.systems.TerminalManager import TerminalLogis
 from simulation.terminal_components.systems.StateEncoder import TerminalStateEncoder
 from simulation.terminal_components.systems.LogisticsManager import LogisticsManager, DayPlan
 from simulation.terminal_components.systems.RewardEngine import RewardEngine
-
+from simulation.analytics.stats_tracker import StatsTracker
 
 @dataclass
 class CraneState:
@@ -46,7 +46,8 @@ class ContainerTerminalEnv:
                 num_tracks: int,
                 step_minutes: int = 5,
                 overflow_penalty: float = -500.0,
-                num_cranes: int = 2):
+                num_cranes: int = 2,
+                stats: Optional[StatsTracker] = None):  # NEW
         self.yard = yard
         self.rail = rail
         self.parking = parking
@@ -58,6 +59,7 @@ class ContainerTerminalEnv:
 
         self.encoder = TerminalStateEncoder(yard, rail)
         self.reward_engine = RewardEngine(yard)
+        self.stats = stats
 
         self.current_time: Optional[datetime] = None
         self.day_index: int = 0
@@ -125,175 +127,191 @@ class ContainerTerminalEnv:
         return state, moves
 
     def step(self, action: Optional[int], moves: List[Move]) -> Tuple[Any, List[Move], float, bool, Dict]:
-        """
-        Einfache Einzelmove-Variante (kompatibel mit bestehendem Trainer), Zeitfortschritt = step_minutes.
-        Für produktives Training bitte step_dual_agent(agent, log_cb) verwenden.
-        """
-        reward = 0.0
-        info: Dict[str, Any] = {"executed": None, "train_departures": [], "truck_departures": []}
+            reward = 0.0
+            info: Dict[str, Any] = {"executed": None, "train_departures": [], "truck_departures": []}
 
-        # Move ausführen
-        if moves and action is not None and 0 <= action < len(moves):
-            mv = moves[action]
-            # Endpunkte und Kosten
-            p = self._endpoints_for_move(mv)
-            if p is not None:
-                cost = self._estimate_move_cost(p[0], p[1])
-                ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-                if ok:
-                    r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
-                    reward += r
-                    info["executed"] = {
-                        "timestamp": self.current_time.isoformat(),
-                        "move_type": mv.type, "args": mv.args,
-                        "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r
-                    }
+            if moves and action is not None and 0 <= action < len(moves):
+                mv = moves[action]
+                p = self._endpoints_for_move(mv)
+                if p is not None:
+                    cost = self._estimate_move_cost(p[0], p[1])
+                    ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                    if ok:
+                        r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
+                        reward += r
+                        rec = {
+                            "timestamp": self.current_time.isoformat(),
+                            "move_type": mv.type, "args": mv.args,
+                            "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r
+                        }
+                        info["executed"] = rec
+                        if self.stats:
+                            self.stats.log_move(rec)
+                    else:
+                        reward -= 0.1
                 else:
-                    reward -= 0.1
-            else:
-                ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-                reward += 0.5 if ok else -0.1
+                    ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                    reward += 0.5 if ok else -0.1
+                    if ok and self.stats:
+                        self.stats.log_move({
+                            "timestamp": self.current_time.isoformat(),
+                            "move_type": mv.type, "args": mv.args,
+                            "distance_m": 0.0, "time_s": 0.0, "reward": 0.5
+                        })
 
-        # Zeit fortschreiben (fix)
-        self.current_time += timedelta(minutes=self.step_minutes)
-        # Recalc vor Ankunft
-        self.lm.recalc_assignments_before_arrival(self.current_time, self.day_plan)
-        # Ankünfte/Abfahrten
-        departed_ids = self._admit_arrivals_and_departures()
-        for tid in departed_ids:
-            tr = self._departed_cache.get(tid)
-            if tr:
-                reward += self.reward_engine.on_train_departure(tr)
-                info["train_departures"].append(tid)
+            self.current_time += timedelta(minutes=self.step_minutes)
+            self.lm.recalc_assignments_before_arrival(self.current_time, self.day_plan)
 
-        # Autoslot-Parking
-        self._auto_slot_parking()
-        # Trucks, die fertig sind, departieren
-        info["truck_departures"].extend(self._collect_truck_departures())
+            departed = self._admit_arrivals_and_departures()  # List[Tuple[tid, leftover]]
+            for tid, leftover in departed:
+                tr = self._departed_cache.get(tid)
+                if tr:
+                    reward += self.reward_engine.on_train_departure(tr)
+                    info["train_departures"].append(tid)
+                    if self.stats:
+                        # imports_unloaded per-train is 0 here; fill daily total from move counts at day end
+                        self.stats.on_train_departure(leftover_ids_count=leftover, imports_unloaded_count=0)
 
-        # End-of-day
-        done = False
-        if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
-            reward += self.reward_engine.end_of_day_penalty(self.current_time)
-            self._rollover_missed_deadlines()
-            done = True
+            self._auto_slot_parking()
 
-        next_moves = self._list_moves()
-        state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-        return state, next_moves, reward, done, info
+            events = self._collect_truck_departures()
+            info["truck_departures"].extend(events)
+            for ev in events:
+                reward += self.reward_engine.truck_wait_reward(ev.get("wait_min", 0.0))
+
+            done = False
+            if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
+                reward += self.reward_engine.end_of_day_penalty(self.current_time)
+                self._rollover_missed_deadlines()
+                done = True
+
+            next_moves = self._list_moves()
+            state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
+            return state, next_moves, reward, done, info
 
     def step_dual_agent(self,
-                        agent,
-                        log_cb: Optional[Callable[[Dict[str, Any]], None]] = None
-                        ) -> Tuple[Any, List[Move], float, bool, Dict]:
-        reward = 0.0
-        info: Dict[str, Any] = {"executed": [], "train_departures": [], "truck_departures": []}
-        now = self.current_time
+                            agent,
+                            log_cb: Optional[Callable[[Dict[str, Any]], None]] = None
+                            ) -> Tuple[Any, List[Move], float, bool, Dict]:
+            reward = 0.0
+            info: Dict[str, Any] = {"executed": [], "train_departures": [], "truck_departures": []}
+            now = self.current_time
 
-        # arrivals/departures before scheduling
-        departed_ids = self._admit_arrivals_and_departures()
-        for tid in departed_ids:
-            tr = self._departed_cache.get(tid)
-            if tr:
-                reward += self.reward_engine.on_train_departure(tr)
-                info["train_departures"].append(tid)
+            departed = self._admit_arrivals_and_departures()
+            for tid, leftover in departed:
+                tr = self._departed_cache.get(tid)
+                if tr:
+                    reward += self.reward_engine.on_train_departure(tr)
+                    info["train_departures"].append(tid)
+                    if self.stats:
+                        self.stats.on_train_departure(leftover_ids_count=leftover, imports_unloaded_count=0)
 
-        self._auto_slot_parking()
+            self._auto_slot_parking()
 
-        idle = [c for c in self.cranes if (c.busy_until is None or c.busy_until <= now)]
-        if not idle:
-            next_t = min(c.busy_until for c in self.cranes if c.busy_until is not None)
-            advance_min = (next_t - now).total_seconds() / 60.0
-            self.current_time = next_t
-            reward += self.reward_engine.waiting_penalty(len(self.trucks), advance_min)
-            state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-            return state, self._list_moves(), reward, False, info
+            idle = [c for c in self.cranes if (c.busy_until is None or c.busy_until <= now)]
+            if not idle:
+                next_t = min(c.busy_until for c in self.cranes if c.busy_until is not None)
+                advance_min = (next_t - now).total_seconds() / 60.0
+                self.current_time = next_t
+                reward += self.reward_engine.waiting_penalty(len(self.trucks), advance_min)
+                state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
+                return state, self._list_moves(), reward, False, info
 
-        all_moves = self._list_moves()
-        if not all_moves:
-            self.current_time += timedelta(minutes=self.step_minutes)
-            state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-            return state, self._list_moves(), reward, False, info
+            all_moves = self._list_moves()
+            if not all_moves:
+                self.current_time += timedelta(minutes=self.step_minutes)
+                state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
+                return state, self._list_moves(), reward, False, info
 
-        zones = self.crane_zones
-        picks: List[Tuple[int, Move, float, float]] = []
-        used_bays, used_cids = set(), set()
+            # If no external logger, bind stats logger automatically
+            if log_cb is None and self.stats:
+                def log_cb(rec: Dict[str, Any]):
+                    self.stats.log_move(rec)
 
-        for crane in idle:
-            cand = [m for m in all_moves if self._eligible_for_crane(m, crane.id, zones)]
-            if not cand:
-                continue
-            filtered = []
-            for mv in cand:
-                cids = self._move_container_ids(mv)
-                bays = self._move_bays(mv)
-                if cids and (used_cids & cids):
+            zones = self.crane_zones
+            picks: List[Tuple[int, Move, float, float]] = []
+            used_bays, used_cids = set(), set()
+
+            for crane in idle:
+                cand = [m for m in all_moves if self._eligible_for_crane(m, crane.id, zones)]
+                if not cand:
                     continue
-                if bays and (used_bays & bays):
+                filtered = []
+                for mv in cand:
+                    cids = self._move_container_ids(mv)
+                    bays = self._move_bays(mv)
+                    if cids and (used_cids & cids):
+                        continue
+                    if bays and (used_bays & bays):
+                        continue
+                    filtered.append(mv)
+                if not filtered:
                     continue
-                filtered.append(mv)
-            if not filtered:
-                continue
+
+                state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
+                a_idx = agent.act(state, filtered)
+                if a_idx < 0 or a_idx >= len(filtered):
+                    continue
+                mv = filtered[a_idx]
+
+                p = self._endpoints_for_move(mv)
+                if p is None:
+                    continue
+                cost = self._estimate_move_cost(p[0], p[1])
+                ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                if not ok:
+                    continue
+
+                r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
+                reward += r
+                self.cranes[crane.id].busy_until = now + timedelta(seconds=cost["time_s"])
+                picks.append((crane.id, mv, cost["distance_m"], cost["time_s"]))
+                used_bays |= self._move_bays(mv)
+                used_cids |= self._move_container_ids(mv)
+
+                rec = {
+                    "timestamp": now.isoformat(), "crane_id": crane.id,
+                    "move_type": mv.type, "args": mv.args,
+                    "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r
+                }
+                info["executed"].append(rec)
+                if log_cb:
+                    try:
+                        log_cb(rec)
+                    except Exception:
+                        pass
+
+            if not picks:
+                self.current_time += timedelta(minutes=self.step_minutes)
+                state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
+                return state, self._list_moves(), reward, False, info
+
+            min_time_s = min(t for (_, _, _, t) in picks)
+            self.current_time = now + timedelta(seconds=min_time_s)
+
+            departed2 = self._admit_arrivals_and_departures()
+            for tid, leftover in departed2:
+                tr = self._departed_cache.get(tid)
+                if tr:
+                    reward += self.reward_engine.on_train_departure(tr)
+                    info["train_departures"].append(tid)
+                    if self.stats:
+                        self.stats.on_train_departure(leftover_ids_count=leftover, imports_unloaded_count=0)
+
+            events = self._collect_truck_departures()
+            info["truck_departures"].extend(events)
+            for ev in events:
+                reward += self.reward_engine.truck_wait_reward(ev.get("wait_min", 0.0))
+
+            done = False
+            if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
+                reward += self.reward_engine.end_of_day_penalty(self.current_time)
+                self._rollover_missed_deadlines()
+                done = True
 
             state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-            a_idx = agent.act(state, filtered)
-            if a_idx < 0 or a_idx >= len(filtered):
-                continue
-            mv = filtered[a_idx]
-
-            p = self._endpoints_for_move(mv)
-            if p is None:
-                continue
-            cost = self._estimate_move_cost(p[0], p[1])
-            ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-            if not ok:
-                continue
-
-            r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
-            reward += r
-            self.cranes[crane.id].busy_until = now + timedelta(seconds=cost["time_s"])
-            picks.append((crane.id, mv, cost["distance_m"], cost["time_s"]))
-            used_bays |= self._move_bays(mv)
-            used_cids |= self._move_container_ids(mv)
-
-            rec = {
-                "timestamp": now.isoformat(), "crane_id": crane.id,
-                "move_type": mv.type, "args": mv.args,
-                "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r
-            }
-            info["executed"].append(rec)
-            if log_cb:
-                try:
-                    log_cb(rec)
-                except Exception:
-                    pass
-
-        if not picks:
-            self.current_time += timedelta(minutes=self.step_minutes)
-            state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-            return state, self._list_moves(), reward, False, info
-
-        min_time_s = min(t for (_, _, _, t) in picks)
-        self.current_time = now + timedelta(seconds=min_time_s)
-
-        departed_ids2 = self._admit_arrivals_and_departures()
-        for tid in departed_ids2:
-            tr = self._departed_cache.get(tid)
-            if tr:
-                reward += self.reward_engine.on_train_departure(tr)
-                info["train_departures"].append(tid)
-
-        info["truck_departures"].extend(self._collect_truck_departures())
-
-        done = False
-        if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
-            reward += self.reward_engine.end_of_day_penalty(self.current_time)
-            self._rollover_missed_deadlines()
-            done = True
-
-        state = self.encoder.encode(self.trains, self.trucks, self.terminal_trucks)
-        next_moves = self._list_moves()
-        return state, next_moves, reward, done, info
+            next_moves = self._list_moves()
+            return state, next_moves, reward, done, info
 
     # ------------- interne Helfer -------------
 
@@ -334,88 +352,89 @@ class ContainerTerminalEnv:
                 pass
 
     def _collect_truck_departures(self) -> List[Dict[str, Any]]:
-        events = []
-        # „Fertig“ = alle Pickup-IDs abgearbeitet (Pickup-Lkw) oder alle Lieferungen gelöscht (Delivery-Lkw)
-        to_remove = []
-        for tid, tk in self.trucks.items():
-            if tk.is_ready_to_depart():
-                if tk.departure_time is None:
-                    tk.departure_time = self.current_time
-                wait_min = 0.0
-                if tk.arrival_time:
-                    wait_min = (tk.departure_time - tk.arrival_time).total_seconds() / 60.0
-                events.append({"truck_id": tk.truck_id, "wait_min": wait_min})
-                to_remove.append(tid)
-        for tid in to_remove:
-            self.trucks.pop(tid, None)
-        return events
+            events = []
+            to_remove = []
+            for tid, tk in self.trucks.items():
+                if tk.is_ready_to_depart():
+                    if tk.departure_time is None:
+                        tk.departure_time = self.current_time
+                    wait_min = 0.0
+                    if tk.arrival_time:
+                        wait_min = (tk.departure_time - tk.arrival_time).total_seconds() / 60.0
+                    events.append({"truck_id": tk.truck_id, "wait_min": wait_min})
+                    if self.stats:
+                        self.stats.on_truck_departure(truck=tk, wait_minutes=wait_min)
+                    to_remove.append(tid)
+            for tid in to_remove:
+                self.trucks.pop(tid, None)
+            return events
 
     def _admit_arrivals(self) -> None:
-        # Züge bis jetzt einlassen
-        still = []
-        self._departed_cache = {}
-        for st in self._scheduled_trains:
-            d_arr, h_arr, m_arr = self.lm.time.decode(st.arrival_angle)
-            d_dep, h_dep, m_dep = self.lm.time.decode(st.departure_angle)
-            arr_dt = self.day_plan.date.replace(hour=h_arr, minute=m_arr, second=0, microsecond=0)
-            dep_dt = self.day_plan.date.replace(hour=h_dep, minute=m_dep, second=0, microsecond=0)
-            tid = st.train.train_id
-            if tid not in self.trains and self.current_time >= arr_dt and self.current_time < dep_dt:
-                anchor = int(round((st.track_id + 1) * (self.yard.n_bays / (self.num_tracks + 1))))
-                anchor = max(0, min(self.yard.n_bays - 1, anchor))
-                self.rail.slot_train(st.train, RailSlot(track_id=st.track_id, anchor_bay=anchor))
-                st.train.arrival_time = arr_dt
-                st.train.departure_time = dep_dt
-                self.trains[tid] = st.train
-            still.append(st)
-        self._scheduled_trains = still
+            still = []
+            self._departed_cache = {}
+            for st in self._scheduled_trains:
+                d_arr, h_arr, m_arr = self.lm.time.decode(st.arrival_angle)
+                d_dep, h_dep, m_dep = self.lm.time.decode(st.departure_angle)
+                arr_dt = self.day_plan.date.replace(hour=h_arr, minute=m_arr, second=0, microsecond=0)
+                dep_dt = self.day_plan.date.replace(hour=h_dep, minute=m_dep, second=0, microsecond=0)
+                tid = st.train.train_id
+                if tid not in self.trains and self.current_time >= arr_dt and self.current_time < dep_dt:
+                    anchor = int(round((st.track_id + 1) * (self.yard.n_bays / (self.num_tracks + 1))))
+                    anchor = max(0, min(self.yard.n_bays - 1, anchor))
+                    self.rail.slot_train(st.train, RailSlot(track_id=st.track_id, anchor_bay=anchor))
+                    st.train.arrival_time = arr_dt
+                    st.train.departure_time = dep_dt
+                    self.trains[tid] = st.train
+                    if self.stats:
+                        self.stats.on_train_arrival(st.train)
+                still.append(st)
+            self._scheduled_trains = still
 
-        # Lkw bis jetzt einlassen
-        for t in self.day_plan.trucks_today:
-            if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
-                t.status = "waiting"
-                self.trucks[t.truck_id] = t
+            for t in self.day_plan.trucks_today:
+                if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
+                    t.status = "waiting"
+                    self.trucks[t.truck_id] = t
+                    if self.stats:
+                        self.stats.on_truck_arrival(t)
 
-    def _admit_arrivals_and_departures(self) -> List[str]:
-        departed: List[str] = []
-        still = []
-        self._departed_cache = {}
+    def _admit_arrivals_and_departures(self) -> List[Tuple[str, int]]:
+            departed: List[Tuple[str, int]] = []
+            still = []
+            self._departed_cache = {}
 
-        for st in self._scheduled_trains:
-            d_arr, h_arr, m_arr = self.lm.time.decode(st.arrival_angle)
-            d_dep, h_dep, m_dep = self.lm.time.decode(st.departure_angle)
-            arr_dt = self.day_plan.date.replace(hour=h_arr, minute=m_arr, second=0, microsecond=0)
-            dep_dt = self.day_plan.date.replace(hour=h_dep, minute=m_dep, second=0, microsecond=0)
-            tid = st.train.train_id
+            for st in self._scheduled_trains:
+                d_arr, h_arr, m_arr = self.lm.time.decode(st.arrival_angle)
+                d_dep, h_dep, m_dep = self.lm.time.decode(st.departure_angle)
+                arr_dt = self.day_plan.date.replace(hour=h_arr, minute=m_arr, second=0, microsecond=0)
+                dep_dt = self.day_plan.date.replace(hour=h_dep, minute=m_dep, second=0, microsecond=0)
+                tid = st.train.train_id
 
-            # Ankunft
-            if tid not in self.trains and self.current_time >= arr_dt and self.current_time < dep_dt:
-                anchor = int(round((st.track_id + 1) * (self.yard.n_bays / (self.num_tracks + 1))))
-                anchor = max(0, min(self.yard.n_bays - 1, anchor))
-                self.rail.slot_train(st.train, RailSlot(track_id=st.track_id, anchor_bay=anchor))
-                st.train.arrival_time = arr_dt
-                st.train.departure_time = dep_dt
-                self.trains[tid] = st.train
+                if tid not in self.trains and self.current_time >= arr_dt and self.current_time < dep_dt:
+                    anchor = int(round((st.track_id + 1) * (self.yard.n_bays / (self.num_tracks + 1))))
+                    anchor = max(0, min(self.yard.n_bays - 1, anchor))
+                    self.rail.slot_train(st.train, RailSlot(track_id=st.track_id, anchor_bay=anchor))
+                    st.train.arrival_time = arr_dt
+                    st.train.departure_time = dep_dt
+                    self.trains[tid] = st.train
 
-            # Abfahrt
-            if tid in self.trains and self.current_time >= dep_dt:
-                tr = self.trains.pop(tid)
-                self.rail.release_train(tid)
-                self._departed_cache[tid] = tr
-                departed.append(tid)
-                continue
+                if tid in self.trains and self.current_time >= dep_dt:
+                    tr = self.trains.pop(tid)
+                    leftover = len(tr.get_all_pickup_container_ids())
+                    self.rail.release_train(tid)
+                    self._departed_cache[tid] = tr
+                    departed.append((tid, leftover))
+                    continue
 
-            still.append(st)
+                still.append(st)
 
-        self._scheduled_trains = still
+            self._scheduled_trains = still
 
-        # Lkw einlassen
-        for t in self.day_plan.trucks_today:
-            if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
-                t.status = "waiting"
-                self.trucks[t.truck_id] = t
+            for t in self.day_plan.trucks_today:
+                if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
+                    t.status = "waiting"
+                    self.trucks[t.truck_id] = t
 
-        return departed
+            return departed
 
     def _rollover_missed_deadlines(self) -> None:
         # Noch im Yard befindliche Container mit Frist <= heute → auf morgen 23:59 schieben
