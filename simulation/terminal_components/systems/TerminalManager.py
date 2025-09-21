@@ -7,7 +7,7 @@ import numpy as np
 from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
 from simulation.terminal_components.vehicles.Train import Train
 from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.vehicles.TerminalTruck import TerminalTruck, TERMINAL_TRUCK_ALLOWED_TYPES
+from simulation.terminal_components.vehicles.TerminalTruck import TerminalTruck
 from simulation.terminal_components.systems.railyard import BooleanRailYard
 from simulation.terminal_components.systems.parking import ParkingArea
 from simulation.terminal_components.systems.TerminalGate import TerminalGate
@@ -195,13 +195,36 @@ class TerminalLogisticsManager:
         return out
 
     def list_yard_to_terminal_truck(self, ttr: TerminalTruck) -> List[Move]:
-        if not ttr.is_available():
-            return []
-        for cid in self.yard.accessible_containers:
+        """
+        Listet alle möglichen TT‑Pickups (nur SwapBody/Trailer, nur wenn TT frei).
+        Achtung: keine Kranzeit – die Env blockt die Ressource für 5 Minuten.
+        """
+        out: List[Move] = []
+        if not ttr:
+            return out
+        # TerminalTruck gilt als verfügbar, wenn leer und nicht busy (Env prüft Busy zusätzlich)
+        if hasattr(ttr, "is_available") and not ttr.is_available():
+            return out
+
+        for cid in list(self.yard.accessible_containers):
             c = self.yard.get_container(cid)
-            if c and (c.container_type in TERMINAL_TRUCK_ALLOWED_TYPES):
-                return [Move(YARD_TO_TERMINAL_TRUCK, {"terminal_truck_id": ttr.truck_id, "container_id": cid})]
-        return []
+            if not c:
+                continue
+            # nur Swap Body / Trailer
+            if not (getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False)):
+                continue
+            out.append(Move(YARD_TO_TERMINAL_TRUCK, {
+                "terminal_truck_id": getattr(ttr, "truck_id", None),
+                "container_id": cid
+            }))
+        return out
+
+    def _remove_pickup_id_from_all_trucks(self, trucks: Dict[str, Truck], cid: str) -> None:
+        for tk in trucks.values():
+            try:
+                tk.remove_pickup_container_id(cid)
+            except Exception:
+                pass
 
     # ----- execution -----
     def execute(self, move: Move, trains: Dict[str, Train], trucks: Dict[str, Truck], terminal_trucks: Dict[str, TerminalTruck]) -> bool:
@@ -293,12 +316,27 @@ class TerminalLogisticsManager:
         if t == YARD_TO_TERMINAL_TRUCK:
             tt = terminal_trucks.get(a["terminal_truck_id"])
             cid = a["container_id"]
-            if not tt or not tt.is_available():
+            if not tt:
+                return False
+            # nur wenn TT frei (leer) – Busy/Timer macht die Env
+            if hasattr(tt, "is_available") and not tt.is_available():
                 return False
             cont = self.yard.get_container(cid)
             if not cont:
                 return False
+            # nur Swap Body / Trailer
+            if not (getattr(cont, "is_swap_body", False) or getattr(cont, "is_trailer", False)):
+                return False
+
+            # aus Yard entfernen, Pickup-IDs bei allen Trucks entfernen
             self.yard.remove_container(cont)
-            return tt.add_container(cont)
+            self._remove_pickup_id_from_all_trucks(trucks, cid)
+
+            # auf TT laden (TT hält 1 Stück)
+            if not tt.add_container(cont):
+                # Rückrollen: falls add fehlschlägt, Container zurück in Yard (sollte selten sein)
+                # Hier vereinfachen wir und geben False zurück, da zurücklegen Kranlos nicht passt.
+                return False
+            return True
 
         return False
