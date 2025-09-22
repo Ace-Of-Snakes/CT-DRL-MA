@@ -462,6 +462,8 @@ class ContainerTerminalEnv:
                     events.append({"truck_id": tk.truck_id, "wait_min": wait_min})
                     if self.stats:
                         self.stats.on_truck_departure(truck=tk, wait_minutes=wait_min)
+                    if self.parking:
+                        self.parking.release(tk)
                     to_remove.append(tid)
             for tid in to_remove:
                 self.trucks.pop(tid, None)
