@@ -99,20 +99,48 @@ class TerminalLogisticsManager:
         if not candidates:
             return []
         moves: List[Move] = []
+        # Allowed bay offsets from preferred bay: left (-1), exact (0), right (+1)
+        PARKING_ALLOWED_OFFSETS = (-1, 0, +1)
         for t in candidates:
             pb = self._preferred_bay_for_truck(t)
-            spot = None
-            if pb is not None:
-                near = self.parking.iter_free_in_bay_range(max(0, pb - 2), min(self.yard.n_bays - 1, pb + 2))
-                if near:
-                    spot = near[0]
-            if spot is None:
-                # fallback: any free (rare)
+            if pb is None:
+                # fallback: any free
                 free = self.parking.iter_free()
                 if free:
                     spot = free[0]
-            if spot:
-                moves.append(Move(SLOT_TRUCK_PARKING, {"truck_id": t.truck_id, "spot": spot}))
+                    moves.append(Move(SLOT_TRUCK_PARKING, {
+                        "truck_id": t.truck_id,
+                        "spot": spot,
+                        "preferred_bay": None,
+                        "delta_bay": 0
+                    }))
+                continue
+            for off in PARKING_ALLOWED_OFFSETS:
+                bay = pb + off
+                if bay < 0 or bay >= self.yard.n_bays:
+                    continue
+                # find a free spot exactly in this bay
+                near_exact = self.parking.iter_free_in_bay_range(bay, bay)
+                if near_exact:
+                    spot = near_exact[0]
+                    moves.append(Move(SLOT_TRUCK_PARKING, {
+                        "truck_id": t.truck_id,
+                        "spot": spot,
+                        "preferred_bay": pb,
+                        "delta_bay": off
+                    }))
+            # If no exact bay spots found by offsets, try any within ±2 (rare fallback)
+            if not any(m.args.get("truck_id") == t.truck_id for m in moves):
+                near = self.parking.iter_free_in_bay_range(max(0, pb - 2), min(self.yard.n_bays - 1, pb + 2))
+                if near:
+                    spot = near[0]
+                    delta = (self.parking.spot_bay(spot) or pb) - pb
+                    moves.append(Move(SLOT_TRUCK_PARKING, {
+                        "truck_id": t.truck_id,
+                        "spot": spot,
+                        "preferred_bay": pb,
+                        "delta_bay": int(delta)
+                    }))
         return moves
 
     # ----- move listing (broad) -----

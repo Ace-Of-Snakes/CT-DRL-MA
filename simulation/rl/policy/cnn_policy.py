@@ -43,14 +43,15 @@ class CNN3DBackbone(nn.Module):
 class MoveFeaturizer:
     """
     Cheap features from Move:
-    - type one-hot (8)
+    - type one-hot (len(MOVE_TYPES))
     - placement row/bay/tier/start_split normalized (if present), else zeros
     - placement score normalized (if present), else 0
-    Total dim: 8 + 5 = 13
+    - NEW: parking_delta (SLOT_TRUCK_PARKING only): {-1,0,+1} normalized, else 0
+    Total dim: len(MOVE_TYPES) + 6
     """
     @staticmethod
     def feat_dim() -> int:
-        return len(MOVE_TYPES) + 5
+        return len(MOVE_TYPES) + 6
 
     @staticmethod
     def featurize(moves: List[Move],
@@ -62,6 +63,8 @@ class MoveFeaturizer:
             f[TYPE_TO_IDX.get(mv.type, 0)] = 1.0
 
             row = bay = tier = start = score = 0.0
+            parking_delta = 0.0
+
             pl: PlacementResult = mv.args.get("placement", None)
             if pl is not None:
                 row = pl.row / max(1, n_rows - 1)
@@ -70,7 +73,7 @@ class MoveFeaturizer:
                 start = pl.start_split / max(1, split_factor - 1)
                 score = min(1.0, float(pl.score) / 3.0)
             elif mv.type == "SLOT_TRUCK_PARKING":
-                # Spot "P_{bay}_{split}" parsen -> bay normalisieren
+                # spot "P_{bay}_{split}" and explicit preferred/delta
                 spot = mv.args.get("spot", "")
                 try:
                     parts = spot.split("_")
@@ -80,8 +83,16 @@ class MoveFeaturizer:
                         start = int(s) / max(1, split_factor - 1)
                 except Exception:
                     pass
+                try:
+                    d = int(mv.args.get("delta_bay", 0))
+                    # restrict to [-1,0,1] and keep as small integer normalized to [-1,1]
+                    if d < -1: d = -1
+                    if d > +1: d = +1
+                    parking_delta = float(d)
+                except Exception:
+                    parking_delta = 0.0
 
-            out.append(f + [row, bay, tier, start, score])
+            out.append(f + [row, bay, tier, start, score, parking_delta])
         if not out:
             return torch.zeros((0, MoveFeaturizer.feat_dim()), dtype=torch.float32)
         return torch.tensor(out, dtype=torch.float32)

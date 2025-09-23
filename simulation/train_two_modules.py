@@ -98,13 +98,54 @@ class FilteringDrivingPlanParser(DrivingPlanParser):
         all_tr = super().create_trains()
         return [t for t in all_tr if t.train_id in self.whitelist]
 
+def make_special_coordinates(n_rows: int,
+                             n_bays: int,
+                             sb_row_1b: int = 1,
+                             dg_rows_big: Tuple[int, ...] = (3, 4, 5),
+                             dg_rows_small: Tuple[int, ...] = (2, 3),
+                             dg_halfwidth_bays: int = 3,
+                             reefers_include_sb_row: bool = True) -> List[Tuple[int, int, str]]:
+    """
+    Build special-position coordinates for BooleanStorageYard.
+    (bay, row, type) are 1-based; types: 'sb_t', 'r', 'dg'.
+    """
+    coords: List[Tuple[int, int, str]] = []
+
+    sb_row = max(1, min(n_rows, sb_row_1b))
+    center_bay = (n_bays + 1) // 2
+
+    # Swap bodies/trailers row
+    for bay in range(1, n_bays + 1):
+        coords.append((bay, sb_row, "sb_t"))
+
+    # Reefers on outer bays (include SB row allowed)
+    for row in range(1, n_rows + 1):
+        if not reefers_include_sb_row and row == sb_row:
+            continue
+        coords.append((1, row, "r"))
+        coords.append((n_bays, row, "r"))
+
+    # DG rows: big -> (3,4,5); small -> (2,3); exclude SB row
+    yard_is_big = n_rows >= max(dg_rows_big) if dg_rows_big else False
+    dg_rows = [r for r in (dg_rows_big if yard_is_big else dg_rows_small) if 1 <= r <= n_rows and r != sb_row]
+    for row in dg_rows:
+        for delta in range(-dg_halfwidth_bays, dg_halfwidth_bays + 1):
+            b = center_bay + delta
+            if 1 <= b <= n_bays:
+                coords.append((b, row, "dg"))
+
+    return coords
+
 def build_module(name: str,
                  rows: int, bays: int, tiers: int, tracks: int,
                  parser, container_factory: ContainerFactory, truck_factory: TruckFactory,
                  import_cap: int = 400, export_per_import: float = 0.75,
                  overgen: float = 3.0,
                  logdir: str = "", algo: str = "dqn") -> Module:
-    yard = BooleanStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers, coordinates=[], validate=False)
+    # Apply special zones per yard size
+    coordinates = make_special_coordinates(n_rows=rows, n_bays=bays)
+
+    yard = BooleanStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers, coordinates=coordinates, validate=False)
     rail = BooleanRailYard()
     parking = ParkingArea(ParkingArea.make_grid(n_bays=bays, split_factor=20, prefix=f"P_{name}"))
     gate = TerminalGate(container_factory, truck_factory)
@@ -120,7 +161,6 @@ def build_module(name: str,
                            daily_csv_path=os.path.join(mdir, "daily.csv"),
                            yard=yard)
 
-    # NEW: pass stats to env
     env = ContainerTerminalEnv(yard=yard, rail=rail, parking=parking,
                                tlm=tlm, lm=lm, num_tracks=tracks,
                                step_minutes=5, stats=tracker)

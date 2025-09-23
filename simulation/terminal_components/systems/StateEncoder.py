@@ -94,60 +94,81 @@ class TerminalStateEncoder:
         return tensor
 
     def encode_with_forecast(self,
-                             trains: Dict[str, Train],
-                             trucks: Dict[str, Truck],
-                             terminal_trucks: Dict[str, TerminalTruck],
-                             day_plan,  # LogisticsManager.DayPlan
-                             now) -> np.ndarray:
+                            trains: Dict[str, Train],
+                            trucks: Dict[str, Truck],
+                            terminal_trucks: Dict[str, TerminalTruck],
+                            day_plan,  # LogisticsManager.DayPlan
+                            now) -> np.ndarray:
         """
-        Extend the 11-channel tensor with 2 broadcast channels:
-        - 11: trains_arriving_soon_heat (by anchor bay, next ~3h)
-        - 12: trucks_arriving_soon_heat (by preferred bay, next ~2h)
+        Extend the 11-channel tensor with bay-wise forecast channels:
+        Trains arriving heat and Trucks arriving heat across multiple horizons:
+        - horizons (hours): [3, 6, 12, 24, 48]
+        Total extra channels: 10 (5 for trains, 5 for trucks).
         """
         base = self.encode(trains, trucks, terminal_trucks)  # [R, B, T, 11]
         R, B, T, _ = base.shape
-        extra = np.zeros((R, B, T, 2), dtype=np.float32)
 
-        # Trains arriving soon (<= 3 hours)
-        trains_heat = np.zeros(B, dtype=np.float32)
+        # Define horizons (no magic numbers): configurable list
+        TRAIN_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
+        TRUCK_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
+
+        num_extra = len(TRAIN_HEAT_WINDOWS_H) + len(TRUCK_HEAT_WINDOWS_H)
+        extra = np.zeros((R, B, T, num_extra), dtype=np.float32)
+
+        # Trains arriving soon by window
+        trains_heats = [np.zeros(B, dtype=np.float32) for _ in TRAIN_HEAT_WINDOWS_H]
         if day_plan and getattr(day_plan, "todays_trains", None):
             for st in day_plan.todays_trains:
-                # If not yet admitted, use anchor; weight by time-to-arrival
                 if st.train.train_id not in trains:
-                    _day, h, m = self.time_enc.decode(st.arrival_angle)  # decode directly
+                    _day, h, m = self.time_enc.decode(st.arrival_angle)
                     arr_dt = day_plan.date.replace(hour=h, minute=m, second=0, microsecond=0)
                     dt_min = (arr_dt - now).total_seconds() / 60.0
-                    if 0.0 <= dt_min <= 180.0:
+                    if dt_min >= 0.0:
                         anchor = self.rail.get_anchor_bay(st.train.train_id) or (B // 2)
-                        w = max(0.0, 1.0 - dt_min / 180.0)
-                        trains_heat[anchor] += w
+                        for i, hrs in enumerate(TRAIN_HEAT_WINDOWS_H):
+                            window_min = hrs * 60.0
+                            if dt_min <= window_min:
+                                w = max(0.0, 1.0 - dt_min / window_min)
+                                trains_heats[i][anchor] += w
 
-        # Trucks arriving soon (<= 2 hours)
-        trucks_heat = np.zeros(B, dtype=np.float32)
+        # Trucks arriving soon by window
+        trucks_heats = [np.zeros(B, dtype=np.float32) for _ in TRUCK_HEAT_WINDOWS_H]
         if day_plan and getattr(day_plan, "trucks_today", None):
             for tk in day_plan.trucks_today:
                 if tk and tk.arrival_time and tk.arrival_time > now:
                     dt_min = (tk.arrival_time - now).total_seconds() / 60.0
-                    if 0.0 <= dt_min <= 120.0:
-                        # Approximate preferred bay: if pickup -> median of target container bays; if delivery -> center
-                        bay = self.yard.n_bays // 2
-                        if getattr(tk, "pickup_container_ids", None):
-                            bays = []
-                            for cid in tk.pickup_container_ids:
-                                pl = self.yard.get_container_placement(cid)
-                                if pl:
-                                    bays.append(pl.bay)
-                            if bays:
-                                bays.sort()
-                                bay = bays[len(bays)//2]
-                        w = max(0.0, 1.0 - dt_min / 120.0)
-                        trucks_heat[min(max(0, bay), B-1)] += w
+                    bay = self.yard.n_bays // 2
+                    if getattr(tk, "pickup_container_ids", None):
+                        bays = []
+                        for cid in tk.pickup_container_ids:
+                            pl = self.yard.get_container_placement(cid)
+                            if pl:
+                                bays.append(pl.bay)
+                        if bays:
+                            bays.sort()
+                            bay = bays[len(bays)//2]
+                    if dt_min >= 0.0:
+                        for i, hrs in enumerate(TRUCK_HEAT_WINDOWS_H):
+                            window_min = hrs * 60.0
+                            if dt_min <= window_min:
+                                w = max(0.0, 1.0 - dt_min / window_min)
+                                trucks_heats[i][min(max(0, bay), B-1)] += w
 
-        if trains_heat.max() > 0:
-            trains_heat /= trains_heat.max()
-        if trucks_heat.max() > 0:
-            trucks_heat /= trucks_heat.max()
+        # Normalize each channel independently
+        for i in range(len(trains_heats)):
+            mx = trains_heats[i].max()
+            if mx > 0:
+                trains_heats[i] /= mx
+        for i in range(len(trucks_heats)):
+            mx = trucks_heats[i].max()
+            if mx > 0:
+                trucks_heats[i] /= mx
 
-        extra[:, :, :, 0] = trains_heat[None, :, None]
-        extra[:, :, :, 1] = trucks_heat[None, :, None]
+        # Pack into extra tensor: trains first, then trucks
+        for i, heat in enumerate(trains_heats):
+            extra[:, :, :, i] = heat[None, :, None]
+        offset = len(trains_heats)
+        for j, heat in enumerate(trucks_heats):
+            extra[:, :, :, offset + j] = heat[None, :, None]
+
         return np.concatenate([base, extra], axis=-1)

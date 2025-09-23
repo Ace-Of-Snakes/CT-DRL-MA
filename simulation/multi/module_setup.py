@@ -1,3 +1,4 @@
+# simulation/multi/module_setup.py
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
@@ -28,10 +29,58 @@ class TerminalModule:
     lm: LogisticsManager
     env: ContainerTerminalEnv
 
+def make_special_coordinates(n_rows: int,
+                             n_bays: int,
+                             sb_row_1b: int = 1,
+                             dg_rows_big: Tuple[int, ...] = (3, 4, 5),
+                             dg_rows_small: Tuple[int, ...] = (2, 3),
+                             dg_halfwidth_bays: int = 3,
+                             reefers_include_sb_row: bool = True) -> List[Tuple[int, int, str]]:
+    """
+    Build special-position coordinates for BooleanStorageYard.
+    Coordinates are (bay, row, type) in 1-based indexing:
+      - 'sb_t': full swap-body/trailer row (tier 0 handled by yard)
+      - 'r': reefers on outer bays (1 and n_bays), all rows (optionally including SB row)
+      - 'dg': center bay ± dg_halfwidth_bays, on designated DG rows, excluding SB row
+    """
+    coords: List[Tuple[int, int, str]] = []
+
+    # Clamp helpers
+    sb_row = max(1, min(n_rows, sb_row_1b))
+    first_bay = 1
+    last_bay = max(1, n_bays)
+    center_bay = (n_bays + 1) // 2
+
+    # 1) Swap bodies/trailers: full row across all bays
+    for bay in range(1, n_bays + 1):
+        coords.append((bay, sb_row, "sb_t"))
+
+    # 2) Reefers: outer bays on all rows (include SB row if requested)
+    for row in range(1, n_rows + 1):
+        if not reefers_include_sb_row and row == sb_row:
+            continue
+        coords.append((first_bay, row, "r"))
+        coords.append((last_bay, row, "r"))
+
+    # 3) Dangerous Goods: big yard -> rows (3,4,5); small yard -> rows (2,3); always exclude SB row
+    yard_is_big = n_rows >= max(dg_rows_big) if dg_rows_big else False
+    dg_rows = [r for r in (dg_rows_big if yard_is_big else dg_rows_small) if 1 <= r <= n_rows and r != sb_row]
+
+    for row in dg_rows:
+        for delta in range(-dg_halfwidth_bays, dg_halfwidth_bays + 1):
+            b = center_bay + delta
+            if 1 <= b <= n_bays:
+                coords.append((b, row, "dg"))
+
+    return coords
+
 def build_module(name: str,
                  rows: int, bays: int, tiers: int,
                  tracks: int, num_cranes: int = 2) -> TerminalModule:
-    yard = BooleanStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers, coordinates=[], validate=False)
+    # Apply special zones per yard size
+    coordinates = make_special_coordinates(n_rows=rows, n_bays=bays)
+
+    yard = BooleanStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers, coordinates=coordinates, validate=False)
     rail = BooleanRailYard()
     parking = ParkingArea(ParkingArea.make_grid(n_bays=bays, split_factor=20, prefix=f"P_{name}"))
     cf = ContainerFactory()
@@ -42,7 +91,6 @@ def build_module(name: str,
     loader = TrainLoader(cf)
     lm = LogisticsManager(yard, gate, loader, scheduler, parser)
     env = ContainerTerminalEnv(yard, rail, parking, tlm=None, lm=lm, num_tracks=tracks, step_minutes=5, num_cranes=num_cranes)
-    # tlm is instantiated inside your code when building env; keep as in your project if different
     return TerminalModule(name, yard, rail, parking, gate, parser, scheduler, loader, lm, env)
 
 def split_trains_evenly(trains: List[Train], tracks_m1: int = 7, tracks_m2: int = 6) -> Tuple[List[Train], List[Train]]:

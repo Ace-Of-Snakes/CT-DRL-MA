@@ -59,6 +59,14 @@ class RewardEngine:
             bonus = self.w.penalty_yard_to_yard
         return base + bonus
 
+    def truck_first_service_reward(self, wait_minutes: float) -> float:
+        """
+        Reward shaping at the moment a truck receives its first container.
+        Uses the same curve as truck_wait_reward (high reward for fast service, minimum after slow).
+        """
+        return self.truck_wait_reward(wait_minutes)
+
+
     def waiting_penalty(self, num_trucks_present: int, minutes_advanced: float) -> float:
         if self.w.waiting_penalty_per_truck_minute <= 0.0:
             return 0.0

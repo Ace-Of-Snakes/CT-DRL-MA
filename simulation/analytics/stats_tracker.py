@@ -46,7 +46,9 @@ class StatsTracker:
                     "number_trucks_unloaded",
                     "containers_loaded_onto_train",
                     "should_be_loaded_onto_train",
-                    "trucks_departed","min_wait_truck","max_wait_truck","avg_wait_truck"
+                    "trucks_departed",
+                    "min_wait_truck","max_wait_truck","avg_wait_truck",
+                    "min_wait_to_first_load","max_wait_to_first_load","avg_wait_to_first_load"
                 ])
 
     def reset_day_aggregates(self):
@@ -59,7 +61,7 @@ class StatsTracker:
         self.trains_departed: int = 0
         self.containers_arrived_on_train: int = 0
 
-        # per-train load accounting for "should have been loaded"
+        # per-train load accounting
         self._loaded_to_train_by_train: Dict[str, int] = defaultdict(int)
         self._leftover_by_train_at_departure: Dict[str, int] = {}
 
@@ -67,9 +69,10 @@ class StatsTracker:
         self.trucks_arrived: int = 0
         self.trucks_with_containers: int = 0
         self.trucks_without_containers: int = 0
-        self.number_trucks_unloaded: int = 0  # trucks that arrived with containers and departed empty (i.e., unloaded)
+        self.number_trucks_unloaded: int = 0
         self.trucks_departed: int = 0
         self.truck_wait_times: List[float] = []
+        self.truck_first_service_wait_times: List[float] = []  # NEW: wait until first load
         self._truck_arrived_with_containers: Dict[str, bool] = {}
 
     # --- JSON-safety helpers (kept small/fast) ---
@@ -167,6 +170,10 @@ class StatsTracker:
                     inversions += 1
         return inversions, leftovers
 
+    def on_truck_first_service(self, truck: Truck, wait_minutes: float):
+        """Record wait time from truck arrival until the truck receives its first container."""
+        self.truck_first_service_wait_times.append(float(wait_minutes))
+
     # --- Daily flush ---
     def write_day_summary(self, day_index: int, date: datetime):
         inversions, containers_in_yard = self._compute_inversions_and_leftovers()
@@ -176,15 +183,15 @@ class StatsTracker:
         max_w = waits[-1] if waits else 0.0
         avg_w = (sum(waits) / len(waits)) if waits else 0.0
 
-        # Move-derived counts
+        waits_first = sorted(self.truck_first_service_wait_times) if self.truck_first_service_wait_times else []
+        min_wf = waits_first[0] if waits_first else 0.0
+        max_wf = waits_first[-1] if waits_first else 0.0
+        avg_wf = (sum(waits_first) / len(waits_first)) if waits_first else 0.0
+
         containers_loaded_onto_train = (
             self.move_counts.get(YARD_TO_TRAIN, 0) + self.move_counts.get(TRUCK_TO_TRAIN, 0)
         )
-        # TRAIN_TO_YARD moves answer "How many containers were deloaded from the trains?"
-        # If you want this column too, you can add it similarly.
-        # imports_unloaded = self.move_counts.get(TRAIN_TO_YARD, 0)
 
-        # "Should have been loaded": for all trains that departed today sum loaded + leftover
         should_be_loaded_onto_train = 0
         for tid, leftover in self._leftover_by_train_at_departure.items():
             loaded = self._loaded_to_train_by_train.get(tid, 0)
@@ -202,7 +209,8 @@ class StatsTracker:
                 containers_loaded_onto_train,
                 should_be_loaded_onto_train,
                 self.trucks_departed,
-                f"{min_w:.2f}", f"{max_w:.2f}", f"{avg_w:.2f}"
+                f"{min_w:.2f}", f"{max_w:.2f}", f"{avg_w:.2f}",
+                f"{min_wf:.2f}", f"{max_wf:.2f}", f"{avg_wf:.2f}"
             ])
 
     def close(self):
