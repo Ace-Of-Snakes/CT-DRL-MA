@@ -155,14 +155,12 @@ class ContainerTerminalEnv:
                     r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
                     reward += r
                     rec = {"timestamp": self.current_time.isoformat(), "move_type": mv.type, "args": mv.args,
-                        "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r}
-                    # First-service wait reward (YARD_TO_TRUCK / TRAIN_TO_TRUCK)
+                           "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r}
                     if mv.type in ("YARD_TO_TRUCK", "TRAIN_TO_TRUCK"):
                         tk_id = mv.args.get("truck_id")
                         if tk_id:
                             tk = self.trucks.get(tk_id)
                             if tk and tk.loading_start_time is None:
-                                # mark first service and compute wait
                                 tk.loading_start_time = self.current_time
                                 wait_min = 0.0
                                 if tk.arrival_time:
@@ -177,37 +175,42 @@ class ContainerTerminalEnv:
                 else:
                     reward -= 0.1
             else:
-                # crane-less moves: Parking and Terminal‑Truck
-                ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-                if ok:
-                    if mv.type == "YARD_TO_TERMINAL_TRUCK":
-                        # 5 minutes job
+                # Only crane-less moves allowed here
+                if mv.type == "YARD_TO_TERMINAL_TRUCK":
+                    ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                    if ok:
                         r = self.reward_engine.immediate_reward(mv.type, 0.0, TT_JOB_SECONDS)
                         reward += r
                         tt_id = mv.args.get("terminal_truck_id")
                         if tt_id:
                             self._tt_busy_until[tt_id] = self.current_time + timedelta(seconds=TT_JOB_SECONDS)
                         rec = {"timestamp": self.current_time.isoformat(), "move_type": mv.type, "args": mv.args,
-                            "distance_m": 0.0, "time_s": TT_JOB_SECONDS, "reward": r}
+                               "distance_m": 0.0, "time_s": TT_JOB_SECONDS, "reward": r}
+                        info["executed"] = rec
+                        if self.stats:
+                            self.stats.log_move(rec)
                     else:
-                        # SLOT_TRUCK_PARKING or similar
+                        reward -= 0.1
+                elif mv.type == "SLOT_TRUCK_PARKING":
+                    ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                    if ok:
                         r = 0.5
                         reward += r
                         rec = {"timestamp": self.current_time.isoformat(), "move_type": mv.type, "args": mv.args,
-                            "distance_m": 0.0, "time_s": 0.0, "reward": r}
-                        # ensure delta info is visible if present
-                        if mv.type == "SLOT_TRUCK_PARKING":
-                            rec["delta_bay"] = mv.args.get("delta_bay", 0)
-                    info["executed"] = rec
-                    if self.stats:
-                        self.stats.log_move(rec)
+                               "distance_m": 0.0, "time_s": 0.0, "reward": r}
+                        rec["delta_bay"] = mv.args.get("delta_bay", 0)
+                        info["executed"] = rec
+                        if self.stats:
+                            self.stats.log_move(rec)
+                    else:
+                        reward -= 0.1
                 else:
+                    # Invalid: endpoints missing for a move that requires crane endpoints
                     reward -= 0.1
 
         self.current_time += timedelta(minutes=self.step_minutes)
         self._complete_terminal_truck_jobs()
         self.lm.recalc_assignments_before_arrival(self.current_time, self.day_plan)
-
         departed = self._admit_arrivals_and_departures()
         for tid, leftover in departed:
             tr = self._departed_cache.get(tid)
@@ -216,19 +219,14 @@ class ContainerTerminalEnv:
                 info["train_departures"].append(tid)
                 if self.stats:
                     self.stats.on_train_departure(tid, leftover)
-
         self._auto_slot_parking()
-
         events = self._collect_truck_departures()
         info["truck_departures"].extend(events)
-        # NOTE: no departure-based wait reward here anymore (reward handled at first service event)
-
         done = False
         if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
             reward += self.reward_engine.end_of_day_penalty(self.current_time)
             self._rollover_missed_deadlines()
             done = True
-
         next_moves = self._list_moves()
         state = self.encoder.encode_with_forecast(self.trains, self.trucks, self.terminal_trucks, self.day_plan, self.current_time)
         return state, next_moves, reward, done, info
@@ -301,8 +299,8 @@ class ContainerTerminalEnv:
 
             p = self._endpoints_for_move(mv)
 
-            # crane-less moves: Parking and Terminal‑Truck
-            if mv.type == "SLOT_TRUCK_PARKING" or p is None:
+            # Only crane-less moves allowed without endpoints
+            if mv.type in ("SLOT_TRUCK_PARKING", "YARD_TO_TERMINAL_TRUCK"):
                 ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
                 if not ok:
                     continue
@@ -313,26 +311,32 @@ class ContainerTerminalEnv:
                     if tt_id:
                         self._tt_busy_until[tt_id] = now + timedelta(seconds=TT_JOB_SECONDS)
                     rec = {"timestamp": now.isoformat(), "crane_id": crane.id,
-                        "move_type": mv.type, "args": mv.args,
-                        "distance_m": 0.0, "time_s": TT_JOB_SECONDS, "reward": r}
-                else:
+                           "move_type": mv.type, "args": mv.args,
+                           "distance_m": 0.0, "time_s": TT_JOB_SECONDS, "reward": r}
+                else:  # SLOT_TRUCK_PARKING
                     r = 0.5
                     reward += r
                     rec = {"timestamp": now.isoformat(), "crane_id": crane.id,
-                        "move_type": mv.type, "args": mv.args,
-                        "distance_m": 0.0, "time_s": 0.0, "reward": r}
-                    if mv.type == "SLOT_TRUCK_PARKING":
-                        rec["delta_bay"] = mv.args.get("delta_bay", 0)
+                           "move_type": mv.type, "args": mv.args,
+                           "distance_m": 0.0, "time_s": 0.0, "reward": r}
+                    rec["delta_bay"] = mv.args.get("delta_bay", 0)
                 info["executed"].append(rec)
                 if log_cb:
                     try: log_cb(rec)
                     except Exception: pass
                 continue
 
+            # Skip invalid truck/train moves that lack endpoints (e.g., truck not parked)
+            if p is None:
+                # small penalty to discourage selecting invalid moves
+                reward -= 0.1
+                continue
+
             # normal crane move
             cost = self._estimate_move_cost(p[0], p[1])
             ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
             if not ok:
+                reward -= 0.05
                 continue
 
             r = self.reward_engine.immediate_reward(mv.type, cost["distance_m"], cost["time_s"])
@@ -343,9 +347,8 @@ class ContainerTerminalEnv:
             used_cids |= self._move_container_ids(mv)
 
             rec = {"timestamp": now.isoformat(), "crane_id": crane.id,
-                "move_type": mv.type, "args": mv.args,
-                "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r}
-            # First-service wait reward (YARD_TO_TRUCK / TRAIN_TO_TRUCK)
+                   "move_type": mv.type, "args": mv.args,
+                   "distance_m": cost["distance_m"], "time_s": cost["time_s"], "reward": r}
             if mv.type in ("YARD_TO_TRUCK", "TRAIN_TO_TRUCK"):
                 tk_id = mv.args.get("truck_id")
                 if tk_id:
@@ -386,7 +389,6 @@ class ContainerTerminalEnv:
 
         events = self._collect_truck_departures()
         info["truck_departures"].extend(events)
-        # NOTE: no departure-based wait reward here anymore
 
         done = False
         if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
@@ -680,26 +682,27 @@ class ContainerTerminalEnv:
         if t == "TRUCK_TO_YARD":
             tk = self.trucks.get(a.get("truck_id"))
             dst_pl: PlacementResult = a.get("placement")
-            if tk and dst_pl:
+            # Require parked truck for crane endpoints
+            if tk and tk.parking_spot and dst_pl:
                 return self._truck_xyz(tk), self._yard_xyz(dst_pl)
             return None
         if t == "YARD_TO_TRUCK":
             cid = a.get("container_id")
             tk = self.trucks.get(a.get("truck_id"))
             src_pl = self.yard.get_container_placement(cid)
-            if tk and src_pl:
+            if tk and tk.parking_spot and src_pl:
                 return self._yard_xyz(src_pl), self._truck_xyz(tk)
             return None
         if t == "TRAIN_TO_TRUCK":
             tr = self.trains.get(a.get("train_id"))
             tk = self.trucks.get(a.get("truck_id"))
-            if tr and tk:
+            if tr and tk and tk.parking_spot:
                 return self._train_xyz(tr), self._truck_xyz(tk)
             return None
         if t == "TRUCK_TO_TRAIN":
             tr = self.trains.get(a.get("train_id"))
             tk = self.trucks.get(a.get("truck_id"))
-            if tr and tk:
+            if tr and tk and tk.parking_spot:
                 return self._truck_xyz(tk), self._train_xyz(tr)
             return None
         if t == "YARD_TO_TERMINAL_TRUCK":

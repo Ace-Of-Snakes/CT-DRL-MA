@@ -179,6 +179,9 @@ class TerminalLogisticsManager:
         return out
 
     def list_truck_to_yard(self, truck: Truck, top_per_container: Optional[int] = None) -> List[Move]:
+        # Require the truck to be parked before any crane work
+        if not truck or not truck.parking_spot:
+            return []
         if not truck.containers:
             return []
         out: List[Move] = []
@@ -190,6 +193,9 @@ class TerminalLogisticsManager:
         return out
 
     def list_yard_to_truck(self, truck: Truck) -> List[Move]:
+        # Require the truck to be parked before any crane work
+        if not truck or not truck.parking_spot:
+            return []
         if not truck.pickup_container_ids:
             return []
         out: List[Move] = []
@@ -201,6 +207,9 @@ class TerminalLogisticsManager:
         return out
 
     def list_train_to_truck(self, train: Train, truck: Truck) -> List[Move]:
+        # Require the truck to be parked before any crane work
+        if not truck or not truck.parking_spot:
+            return []
         if not truck.pickup_container_ids:
             return []
         out: List[Move] = []
@@ -211,6 +220,9 @@ class TerminalLogisticsManager:
         return out
 
     def list_truck_to_train(self, truck: Truck, train: Train) -> List[Move]:
+        # Require the truck to be parked before any crane work
+        if not truck or not truck.parking_spot:
+            return []
         if not truck.containers:
             return []
         out: List[Move] = []
@@ -258,6 +270,12 @@ class TerminalLogisticsManager:
     def execute(self, move: Move, trains: Dict[str, Train], trucks: Dict[str, Truck], terminal_trucks: Dict[str, TerminalTruck]) -> bool:
         t = move.type
         a = move.args
+
+        # Common precondition: any move involving a Truck requires the truck to be parked
+        def _require_parked(truck_id_key: str) -> bool:
+            tk = trucks.get(a.get(truck_id_key))
+            return bool(tk and tk.parking_spot)
+
         if t == SLOT_TRUCK_PARKING:
             if not self.parking:
                 return False
@@ -295,6 +313,8 @@ class TerminalLogisticsManager:
             return self.yard.move_container(a["container_id"], a["placement"])
 
         if t == TRUCK_TO_YARD:
+            if not _require_parked("truck_id"):
+                return False
             truck = trucks.get(a["truck_id"])
             cid = a["container_id"]
             if not truck:
@@ -306,6 +326,8 @@ class TerminalLogisticsManager:
             return True
 
         if t == YARD_TO_TRUCK:
+            if not _require_parked("truck_id"):
+                return False
             truck = trucks.get(a["truck_id"])
             cid = a["container_id"]
             if not truck:
@@ -320,6 +342,8 @@ class TerminalLogisticsManager:
             return True
 
         if t == TRAIN_TO_TRUCK:
+            if not _require_parked("truck_id"):
+                return False
             train = trains.get(a["train_id"])
             truck = trucks.get(a["truck_id"])
             cid = a["container_id"]
@@ -331,6 +355,8 @@ class TerminalLogisticsManager:
             return truck.add_container(cont)
 
         if t == TRUCK_TO_TRAIN:
+            if not _require_parked("truck_id"):
+                return False
             truck = trucks.get(a["truck_id"])
             train = trains.get(a["train_id"])
             cid = a["container_id"]
@@ -346,24 +372,16 @@ class TerminalLogisticsManager:
             cid = a["container_id"]
             if not tt:
                 return False
-            # nur wenn TT frei (leer) – Busy/Timer macht die Env
             if hasattr(tt, "is_available") and not tt.is_available():
                 return False
             cont = self.yard.get_container(cid)
             if not cont:
                 return False
-            # nur Swap Body / Trailer
             if not (getattr(cont, "is_swap_body", False) or getattr(cont, "is_trailer", False)):
                 return False
-
-            # aus Yard entfernen, Pickup-IDs bei allen Trucks entfernen
             self.yard.remove_container(cont)
             self._remove_pickup_id_from_all_trucks(trucks, cid)
-
-            # auf TT laden (TT hält 1 Stück)
             if not tt.add_container(cont):
-                # Rückrollen: falls add fehlschlägt, Container zurück in Yard (sollte selten sein)
-                # Hier vereinfachen wir und geben False zurück, da zurücklegen Kranlos nicht passt.
                 return False
             return True
 
