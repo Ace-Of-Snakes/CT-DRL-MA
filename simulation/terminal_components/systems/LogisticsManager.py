@@ -45,7 +45,8 @@ class LogisticsManager:
                  train_scheduler: TrainScheduler,
                  parser: DrivingPlanParser,
                  daily_import_cap: Optional[int] = None,
-                 export_per_import: float = 0.75):
+                 export_per_import: float = 0.75,
+                daily_train_import_cap: Optional[int] = None):
         self.yard = yard
         self.gate = terminal_gate
         self.loader = train_loader
@@ -54,31 +55,50 @@ class LogisticsManager:
         self.time = WeeklyTimeEncoder()
         self.daily_import_cap = daily_import_cap
         self.export_per_import = max(0.0, float(export_per_import))
+        self.daily_train_import_cap = daily_train_import_cap
 
     def plan_day(self, day_start: datetime, trains_override: Optional[List[Train]] = None) -> DayPlan:
-        # 1) Build trains and schedule (respect override)
+        # 1) Trains erstellen und einplanen
         trains = trains_override if trains_override is not None else self.parser.create_trains()
         schedule = self.scheduler.schedule_trains(trains)
         day_name = day_start.strftime("%A").lower()
         todays_trains = [st for st in schedule.scheduled_trains
-                         if self.time.decode(st.arrival_angle)[0] == day_name]
+                        if self.time.decode(st.arrival_angle)[0] == day_name]
 
-        # Helper: date check for "due today"
+        # Helper: due_today
         def due_today(c: Container) -> bool:
             d = (c.estimated_departure or c.departure_date)
             return (d is not None) and (d.date() == day_start.date())
 
-        # 2) First: create Export delivery trucks based on operators of today's trains
-        imports_arriving_est = max(1, sum(st.train.get_container_count() for st in todays_trains))
-        target_exports = int(round(self.export_per_import * imports_arriving_est))
-        export_cfg = self._export_operator_split(todays_trains, target_exports)  # operator -> {num_containers, arrival_time}
+        # 2) Züge laden und Wagen umordnen
+        for st in todays_trains:
+            op = st.operator
+            self.loader.load_train(st.train, operator=op, current_date=day_start)
+            self.loader.rearrange_wagons_for_goods(st.train, self.yard)
+
+        # 2a) NEW: Tages‑Cap für Importcontainer auf Zügen anwenden (Round‑Robin Drossel)
+        if self.daily_train_import_cap is not None:
+            self._throttle_train_imports([st.train for st in todays_trains], cap_total=int(self.daily_train_import_cap))
+
+        # 3) Tatsächliche Importmenge heute (nach Throttle)
+        imports_arriving_today = max(0, sum(st.train.get_container_count() for st in todays_trains))
+
+        # 4) Exporte per Lkw planen und gegen daily_import_cap kappen
+        target_exports_pre_cap = int(round(self.export_per_import * imports_arriving_today))
+        if self.daily_import_cap is not None:
+            max_exports_allowed = max(0, int(self.daily_import_cap) - imports_arriving_today)
+            target_exports = min(target_exports_pre_cap, max_exports_allowed)
+        else:
+            target_exports = target_exports_pre_cap
+
+        export_cfg = self._export_operator_split(todays_trains, target_exports)
         export_trucks = self.gate.create_delivery_trucks_for_operators(
             export_operators=export_cfg,
             simulation_date=day_start,
             day_of_week=day_start.strftime("%A")
         )
 
-        # Containers on those export trucks that are due today
+        # Containers auf Export-Lkw, die heute fällig sind
         export_truck_containers_due_today: List[Container] = []
         for t in export_trucks:
             if t and getattr(t, "is_delivery_truck", False) and t.containers:
@@ -86,15 +106,7 @@ class LogisticsManager:
                     if due_today(c):
                         export_truck_containers_due_today.append(c)
 
-        # 3) Load trains with Imports (may be full) and rearrange wagons
-        for st in todays_trains:
-            op = st.operator
-            self.loader.load_train(st.train, operator=op, current_date=day_start)
-            self.loader.rearrange_wagons_for_goods(st.train, self.yard)
-
-        # 4) Assign pickup IDs to trains:
-        #    - Exports due today from yard
-        #    - Exports due today arriving on trucks
+        # 5) Pickup-IDs (Export intent)
         yard_due_pairs = self.yard.get_containers_departing_on(day_start, use_estimated=True, one_based_bay=False)
         yard_exports_due_today = []
         for cid, _bay in yard_due_pairs:
@@ -108,18 +120,16 @@ class LogisticsManager:
             append_to=None
         )
 
-        # 5) Create Import pickup trucks for Import containers on trains
-        #    that are due today; schedule AFTER the trains arrive.
+        # 6) Import‑Pickup‑Lkw (nach Zugankunft)
         import_pickup_trucks = []
         for st in todays_trains:
             arr_day, arr_h, arr_m = self.time.decode(st.arrival_angle)
-            arr_dt = day_start.replace(hour=arr_h, minute=arr_m, second=0, microsecond=0)
+            arr_dt = day_start.replace(hour=arr_h, minute=m_arr if (m_arr := arr_m) is not None else arr_m, second=0, microsecond=0)
             imports_due_today = []
             for c in st.train.get_all_containers():
                 if c.direction == "Import" and due_today(c):
                     imports_due_today.append(c)
             if imports_due_today:
-                # Ensure trucks arrive strictly after the train (e.g., +5..45 minutes jitter)
                 trucks_for_this_train = self.gate.create_pickup_trucks_after(
                     containers=imports_due_today,
                     earliest_time=arr_dt + timedelta(minutes=5),
@@ -127,14 +137,14 @@ class LogisticsManager:
                 )
                 import_pickup_trucks.extend(trucks_for_this_train)
 
-        # 6) Merge trucks for the day
+        # 7) Lkw zusammenführen
         trucks_today = []
         if export_trucks:
             trucks_today.extend([t for t in export_trucks if t])
         if import_pickup_trucks:
             trucks_today.extend([t for t in import_pickup_trucks if t])
 
-        # 7) Compute last departure time (same day only)
+        # 8) Letzte Abfahrtszeit
         last_departure_dt = self._last_departure_datetime(todays_trains, day_start)
 
         return DayPlan(

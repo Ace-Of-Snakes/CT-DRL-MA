@@ -10,7 +10,7 @@ from simulation.terminal_components.systems.train_tools.DPParser import DrivingP
 # Constants
 WEEK_SECONDS = 604800
 HOUR_SECONDS = 3600
-BUFFER_TIME_HOURS = 0.2  # Buffer between trains on same track
+BUFFER_TIME_HOURS = 4  # Buffer between trains on same track
 
 @dataclass
 class ScheduledTrain:

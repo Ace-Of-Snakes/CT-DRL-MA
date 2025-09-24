@@ -41,7 +41,7 @@ class StatsTracker:
                 w.writerow([
                     "day_index","date","moves","cummulative_reward",
                     "inversions","containers_in_yard","trains_departed",
-                    "containers_arrived_on_train",
+                    "containers_arrived_on_train","imports_unloaded",
                     "trucks_arrived","trucks_with_containers","trucks_without_containers",
                     "number_trucks_unloaded",
                     "containers_loaded_onto_train",
@@ -60,6 +60,7 @@ class StatsTracker:
         # arrivals and departures
         self.trains_departed: int = 0
         self.containers_arrived_on_train: int = 0
+        self.imports_unloaded: int = 0  # NEW
 
         # per-train load accounting
         self._loaded_to_train_by_train: Dict[str, int] = defaultdict(int)
@@ -72,7 +73,7 @@ class StatsTracker:
         self.number_trucks_unloaded: int = 0
         self.trucks_departed: int = 0
         self.truck_wait_times: List[float] = []
-        self.truck_first_service_wait_times: List[float] = []  # NEW: wait until first load
+        self.truck_first_service_wait_times: List[float] = []
         self._truck_arrived_with_containers: Dict[str, bool] = {}
 
     # --- JSON-safety helpers (kept small/fast) ---
@@ -117,6 +118,10 @@ class StatsTracker:
             tid = args.get("train_id")
             if tid:
                 self._loaded_to_train_by_train[tid] += 1
+
+        # NEW: imports_unloaded zählt TRAIN_TO_YARD
+        if mt == TRAIN_TO_YARD:
+            self.imports_unloaded += 1
 
     # --- Train events ---
     def on_train_arrival(self, train: Train):
@@ -203,7 +208,7 @@ class StatsTracker:
                 day_index, date.strftime("%Y-%m-%d"),
                 self.day_moves, f"{self.day_reward:.6f}",
                 inversions, containers_in_yard, self.trains_departed,
-                self.containers_arrived_on_train,
+                self.containers_arrived_on_train, self.imports_unloaded,
                 self.trucks_arrived, self.trucks_with_containers, self.trucks_without_containers,
                 self.number_trucks_unloaded,
                 containers_loaded_onto_train,
