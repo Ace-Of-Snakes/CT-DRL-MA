@@ -139,10 +139,11 @@ def make_special_coordinates(n_rows: int,
 def build_module(name: str,
                  rows: int, bays: int, tiers: int, tracks: int,
                  parser, container_factory: ContainerFactory, truck_factory: TruckFactory,
-                 import_cap: int = 400, export_per_import: float = 0.75,
+                 import_cap: int = 400, train_import_cap: Optional[int] = None,
+                 export_per_import: float = 0.75,
                  overgen: float = 3.0,
                  logdir: str = "", algo: str = "dqn") -> Module:
-    # Apply special zones per yard size
+    # Special zones derived from yard shape
     coordinates = make_special_coordinates(n_rows=rows, n_bays=bays)
 
     yard = BooleanStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers, coordinates=coordinates, validate=False)
@@ -152,7 +153,8 @@ def build_module(name: str,
     scheduler = TrainScheduler(num_tracks=tracks)
     loader = TrainLoader(container_factory, overgeneration_factor=overgen)
     lm = LogisticsManager(yard, gate, loader, scheduler, parser,
-                          daily_import_cap=import_cap, export_per_import=export_per_import)
+                          daily_import_cap=import_cap, export_per_import=export_per_import,
+                          daily_train_import_cap=train_import_cap)
     tlm = TerminalLogisticsManager(yard, rail, parking)
 
     mdir = os.path.join(logdir, name)
@@ -175,8 +177,9 @@ def main():
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--logdir", type=str, default="runs/dual_modules")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--import-cap", type=int, default=400, help="Per-module daily import cap")
-    ap.add_argument("--export-per-import", type=float, default=0.75, help="Exports per import (e.g., 0.6 or 0.75)")
+    ap.add_argument("--import-cap", type=int, default=400, help="Per-module daily cap: imports by train + exports by truck")
+    ap.add_argument("--train-import-cap", type=int, default=None, help="Per-module cap on import containers on trains per day")
+    ap.add_argument("--export-per-import", type=float, default=0.75, help="Exports per import ratio")
     ap.add_argument("--overgen", type=float, default=3.0, help="TrainLoader overgeneration factor")
     ap.add_argument("--load-m1", type=str, default=None)
     ap.add_argument("--load-m2", type=str, default=None)
@@ -203,11 +206,13 @@ def main():
     parser_m2 = FilteringDrivingPlanParser(whitelist_ids=m2_ids)
     m1 = build_module("M1", rows=5, bays=58, tiers=5, tracks=7,
                       parser=parser_m1, container_factory=container_factory, truck_factory=truck_factory,
-                      import_cap=args.import_cap, export_per_import=args.export_per_import,
+                      import_cap=args.import_cap, train_import_cap=args.train_import_cap,
+                      export_per_import=args.export_per_import,
                       overgen=args.overgen, logdir=outdir, algo=args.algo)
     m2 = build_module("M2", rows=3, bays=58, tiers=3, tracks=6,
                       parser=parser_m2, container_factory=container_factory, truck_factory=truck_factory,
-                      import_cap=args.import_cap, export_per_import=args.export_per_import,
+                      import_cap=args.import_cap, train_import_cap=args.train_import_cap,
+                      export_per_import=args.export_per_import,
                       overgen=args.overgen, logdir=outdir, algo=args.algo)
 
     if args.load_m1:
@@ -297,8 +302,8 @@ def main():
                 m2.agent.update()
 
             # Fill daily imports_unloaded from TRAIN_TO_YARD move counts
-            m1.tracker.imports_unloaded = m1.tracker.move_counts.get("TRAIN_TO_YARD", 0)
-            m2.tracker.imports_unloaded = m2.tracker.move_counts.get("TRAIN_TO_YARD", 0)
+            # m1.tracker.imports_unloaded = m1.tracker.move_counts.get("TRAIN_TO_YARD", 0)
+            # m2.tracker.imports_unloaded = m2.tracker.move_counts.get("TRAIN_TO_YARD", 0)
 
             m1.tracker.write_day_summary(day_index=d, date=day_start)
             m2.tracker.write_day_summary(day_index=d, date=day_start)
