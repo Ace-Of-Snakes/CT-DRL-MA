@@ -58,32 +58,30 @@ class LogisticsManager:
         self.daily_train_import_cap = daily_train_import_cap
 
     def plan_day(self, day_start: datetime, trains_override: Optional[List[Train]] = None) -> DayPlan:
-        # 1) Trains erstellen und einplanen
+        # 1) Trains for the day
         trains = trains_override if trains_override is not None else self.parser.create_trains()
         schedule = self.scheduler.schedule_trains(trains)
         day_name = day_start.strftime("%A").lower()
         todays_trains = [st for st in schedule.scheduled_trains
                         if self.time.decode(st.arrival_angle)[0] == day_name]
 
-        # Helper: due_today
         def due_today(c: Container) -> bool:
-            d = (c.estimated_departure or c.departure_date)
+            d = c.departure_date
             return (d is not None) and (d.date() == day_start.date())
 
-        # 2) Züge laden und Wagen umordnen
+        # 2) Load imports and rearrange wagons
         for st in todays_trains:
             op = st.operator
             self.loader.load_train(st.train, operator=op, current_date=day_start)
             self.loader.rearrange_wagons_for_goods(st.train, self.yard)
 
-        # 2a) NEW: Tages‑Cap für Importcontainer auf Zügen anwenden (Round‑Robin Drossel)
         if self.daily_train_import_cap is not None:
             self._throttle_train_imports([st.train for st in todays_trains], cap_total=int(self.daily_train_import_cap))
 
-        # 3) Tatsächliche Importmenge heute (nach Throttle)
+        # 3) Imports arriving today
         imports_arriving_today = max(0, sum(st.train.get_container_count() for st in todays_trains))
 
-        # 4) Exporte per Lkw planen und gegen daily_import_cap kappen
+        # 4) Export containers target = 0.75 × imports (containers), then one container per truck
         target_exports_pre_cap = int(round(self.export_per_import * imports_arriving_today))
         if self.daily_import_cap is not None:
             max_exports_allowed = max(0, int(self.daily_import_cap) - imports_arriving_today)
@@ -92,13 +90,13 @@ class LogisticsManager:
             target_exports = target_exports_pre_cap
 
         export_cfg = self._export_operator_split(todays_trains, target_exports)
-        export_trucks = self.gate.create_delivery_trucks_for_operators(
+        export_trucks = self.gate.create_export_trucks_with_buffer(
             export_operators=export_cfg,
             simulation_date=day_start,
-            day_of_week=day_start.strftime("%A")
+            day_of_week=day_start.strftime("%A"),
+            buffer_hours=2
         )
 
-        # Containers auf Export-Lkw, die heute fällig sind
         export_truck_containers_due_today: List[Container] = []
         for t in export_trucks:
             if t and getattr(t, "is_delivery_truck", False) and t.containers:
@@ -106,8 +104,8 @@ class LogisticsManager:
                     if due_today(c):
                         export_truck_containers_due_today.append(c)
 
-        # 5) Pickup-IDs (Export intent)
-        yard_due_pairs = self.yard.get_containers_departing_on(day_start, use_estimated=True, one_based_bay=False)
+        # 5) Pickup assignments for Export containers due today (yard + trucks)
+        yard_due_pairs = self.yard.get_containers_departing_on(day_start, use_estimated=False, one_based_bay=False)
         yard_exports_due_today = []
         for cid, _bay in yard_due_pairs:
             c = self.yard.get_container(cid)
@@ -120,31 +118,29 @@ class LogisticsManager:
             append_to=None
         )
 
-        # 6) Import‑Pickup‑Lkw (nach Zugankunft)
+        # 6) Import pickup trucks by distribution (due today)
         import_pickup_trucks = []
         for st in todays_trains:
-            arr_day, arr_h, arr_m = self.time.decode(st.arrival_angle)
-            arr_dt = day_start.replace(hour=arr_h, minute=m_arr if (m_arr := arr_m) is not None else arr_m, second=0, microsecond=0)
             imports_due_today = []
             for c in st.train.get_all_containers():
                 if c.direction == "Import" and due_today(c):
                     imports_due_today.append(c)
             if imports_due_today:
-                trucks_for_this_train = self.gate.create_pickup_trucks_after(
+                trucks_for_this_train = self.gate.create_pickup_trucks_by_distribution(
                     containers=imports_due_today,
-                    earliest_time=arr_dt + timedelta(minutes=5),
+                    simulation_date=day_start,
                     day_of_week=day_start.strftime("%A")
                 )
                 import_pickup_trucks.extend(trucks_for_this_train)
 
-        # 7) Lkw zusammenführen
+        # 7) Combine trucks
         trucks_today = []
         if export_trucks:
             trucks_today.extend([t for t in export_trucks if t])
         if import_pickup_trucks:
             trucks_today.extend([t for t in import_pickup_trucks if t])
 
-        # 8) Letzte Abfahrtszeit
+        # 8) Last departure
         last_departure_dt = self._last_departure_datetime(todays_trains, day_start)
 
         return DayPlan(
@@ -170,13 +166,12 @@ class LogisticsManager:
         if not imminent:
             return
 
-        # Export containers due today (yard)
-        due_pairs = self.yard.get_containers_departing_on(now, use_estimated=True, one_based_bay=False)
+        due_pairs = self.yard.get_containers_departing_on(now, use_estimated=False, one_based_bay=False)
         due_export = []
         for cid, _ in due_pairs:
             c = self.yard.get_container(cid)
             if c and c.direction == "Export":
-                d = c.estimated_departure or c.departure_date
+                d = c.departure_date
                 if d and d.date() == now.date():
                     due_export.append(c)
         due_ids = {c.container_id for c in due_export}
@@ -185,7 +180,6 @@ class LogisticsManager:
             for w in tr.wagons:
                 w.pickup_container_ids.intersection_update(due_ids)
 
-        # Capacity-agnostic top-up (intent-only)
         self._assign_pickups_to_trains(due_export, imminent, append_to=None)
 
     # ---------------- helpers ----------------

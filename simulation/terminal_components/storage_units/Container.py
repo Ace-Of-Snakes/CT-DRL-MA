@@ -64,7 +64,7 @@ class Container:
         return 0
     
     def days_until_departure(self, current_date: datetime) -> float:
-        """Calculate days until estimated departure."""
-        if self.estimated_departure and current_date:
-            return max(0, (self.estimated_departure - current_date).days)
+        """Calculate days until actual (scheduled) departure; estimator not used."""
+        if self.departure_date and current_date:
+            return max(0, (self.departure_date - current_date).days)
         return float('inf')

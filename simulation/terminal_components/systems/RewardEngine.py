@@ -94,7 +94,6 @@ class RewardEngine:
     def end_of_day_penalty(self, now: datetime) -> float:
         leftovers = len(self.yard.containers)
         pen = self.w.endday_leftover_weight * leftovers
-        # inversions
         by_slot = {}
         for cid, rec in self.yard.containers.items():
             key = (rec.placement.row, rec.placement.bay)
@@ -105,8 +104,9 @@ class RewardEngine:
             dep = []
             for _tier, cid in lst:
                 c = self.yard.get_container(cid)
-                if not c: continue
-                d = c.estimated_departure or c.departure_date
+                if not c:
+                    continue
+                d = c.departure_date
                 dep.append(d)
             for i in range(1, len(dep)):
                 if dep[i-1] > dep[i]:

@@ -166,9 +166,9 @@ class StatsTracker:
             deps = []
             for _tier, cid in lst:
                 c = self.yard.get_container(cid)
-                if not c: 
+                if not c:
                     continue
-                d = c.estimated_departure or c.departure_date
+                d = c.departure_date
                 deps.append(d)
             for i in range(1, len(deps)):
                 if deps[i-1] > deps[i]:

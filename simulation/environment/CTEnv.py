@@ -578,13 +578,8 @@ class ContainerTerminalEnv:
         return departed
 
     def _rollover_missed_deadlines(self) -> None:
-        # Noch im Yard befindliche Container mit Frist <= heute → auf morgen 23:59 schieben
-        next_day = (self.current_time + timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
-        for cid, rec in self.yard.containers.items():
-            c = rec.container
-            d = c.estimated_departure or c.departure_date
-            if d.date() <= self.current_time.date():
-                c.estimated_departure = next_day
+        # No rollover via estimated departures; departure_date is authoritative.
+        return None
 
     # ---- RMGC Kinematik/Endpunkte ----
 

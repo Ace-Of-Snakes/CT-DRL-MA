@@ -189,34 +189,28 @@ class TruckFactory:
         return trucks
     
     def _group_containers_for_pickup(self, containers: List[Container]) -> List[List[Container]]:
-        """Group containers into batches for pickup trucks."""
         groups = []
         current_group = []
         current_used_length = 0.0
-        
-        # Sort by estimated departure if available
+
         sorted_containers = sorted(
             containers,
-            key=lambda c: (c.estimated_departure or datetime.max, c.container_id)
+            key=lambda c: (c.departure_date or datetime.max, c.container_id)
         )
-        
+
         for container in sorted_containers:
             if current_used_length + container.length_m <= TRUCK_LENGTH:
                 current_group.append(container)
                 current_used_length += container.length_m
             else:
-                if current_used_length >= TRUCK_LENGTH * MIN_TRUCK_LOAD_FACTOR:
+                if current_group:
                     groups.append(current_group)
-                    current_group = [container]
-                    current_used_length = container.length_m
-                else:
-                    # Continue filling to meet minimum load
-                    current_group.append(container)
-                    current_used_length += container.length_m
-        
+                current_group = [container]
+                current_used_length = container.length_m
+
         if current_group:
             groups.append(current_group)
-        
+
         return groups
     
     def _create_delivery_truck(self,

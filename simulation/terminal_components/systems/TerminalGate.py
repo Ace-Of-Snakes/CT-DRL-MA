@@ -435,6 +435,110 @@ class TerminalGate:
                 t.arrival_time = earliest_time + timedelta(minutes=int(jitter))
         return trucks
 
+    def _group_containers_for_pickup(self, containers: List[Container]) -> List[List[Container]]:
+        groups = []
+        current_group = []
+        current_used_length = 0.0
+
+        sorted_containers = sorted(
+            containers,
+            key=lambda c: (c.departure_date or datetime.max, c.container_id)
+        )
+
+        for container in sorted_containers:
+            if current_used_length + container.length_m <= TRUCK_MAX_LENGTH:
+                current_group.append(container)
+                current_used_length += container.length_m
+            else:
+                if current_group:
+                    groups.append(current_group)
+                current_group = [container]
+                current_used_length = container.length_m
+
+        if current_group:
+            groups.append(current_group)
+
+        return groups
+
+    def create_export_trucks_with_buffer(self,
+                                        export_operators: Dict[str, Dict],
+                                        simulation_date: datetime,
+                                        day_of_week: str,
+                                        buffer_hours: int = 2) -> List[Truck]:
+        """
+        Create export delivery trucks (one container per truck).
+        - Containers due today: truck arrival = earliest train arrival for operator - buffer_hours
+        - Containers not due today: truck arrival sampled from day-of-week distribution (KDE)
+        """
+        trucks: List[Truck] = []
+        day_key = day_of_week.lower()
+
+        for operator, cfg in (export_operators or {}).items():
+            n = int(cfg.get("num_containers", 0))
+            if n <= 0:
+                continue
+
+            # Decode earliest train arrival for the operator (provided by LM)
+            earliest_dt = simulation_date
+            angle = cfg.get("arrival_time", {}).get("angle")
+            if angle is not None:
+                _, h, m = self.time_encoder.decode(angle)
+                earliest_dt = simulation_date.replace(hour=h, minute=m, second=0, microsecond=0)
+
+            # Generate export containers
+            containers = self.container_factory.create_containers(
+                operator=operator,
+                direction="Export",
+                n_containers=n,
+                base_arrival_date=simulation_date,
+                current_date=simulation_date
+            )
+
+            due_today = [c for c in containers if c.departure_date and c.departure_date.date() == simulation_date.date()]
+            later = [c for c in containers if c not in due_today]
+
+            # Due today: arrive buffer_hours before earliest train arrival
+            pretrain_arrival = max(earliest_dt - timedelta(hours=int(buffer_hours)), simulation_date)
+            for c in due_today:
+                t = Truck(arrival_time=pretrain_arrival)
+                t.is_delivery_truck = True
+                t.is_pickup_truck = False
+                t.add_container(c)
+                trucks.append(t)
+
+            # Later: arrive per KDE distribution (one container per truck)
+            for c in later:
+                arr = self.truck_factory._sample_arrival_time(
+                    day_key=day_key,
+                    is_delivery=True,
+                    base_date=simulation_date
+                )
+                t = Truck(arrival_time=arr)
+                t.is_delivery_truck = True
+                t.is_pickup_truck = False
+                t.add_container(c)
+                trucks.append(t)
+
+        return trucks
+
+    def create_pickup_trucks_by_distribution(self,
+                                            containers: List[Container],
+                                            simulation_date: datetime,
+                                            day_of_week: str) -> List[Truck]:
+        """
+        Create Import pickup trucks by day-of-week distribution (KDE).
+        No 'must-be-after-train-arrival' constraint — they may arrive earlier and wait.
+        """
+        if not containers:
+            return []
+        day_key = day_of_week.lower()
+        return self.truck_factory._generate_pickup_trucks(
+            containers=containers,
+            day_key=day_key,
+            base_date=simulation_date,
+            parking_spot_prefix="P"
+        )
+
     def cleanup(self):
         """Clean up resources."""
         self.executor.shutdown(wait=True)
