@@ -5,9 +5,9 @@ from datetime import datetime
 from collections import defaultdict
 import numpy as np
 
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.vehicles.Truck import Truck
+from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
+from simulation.core.vehicles.train import Train
+from simulation.core.vehicles.truck import Truck
 
 YARD_TO_TRAIN = "YARD_TO_TRAIN"
 TRUCK_TO_TRAIN = "TRUCK_TO_TRAIN"

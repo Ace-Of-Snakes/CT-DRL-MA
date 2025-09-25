@@ -1,8 +1,8 @@
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
+from simulation.core.vehicles.train import Train
+from simulation.planning.time_encoder import WeeklyTimeEncoder
 import os
 
 # Constants

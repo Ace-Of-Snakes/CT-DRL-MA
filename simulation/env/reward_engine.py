@@ -2,8 +2,8 @@
 from typing import Dict, Tuple, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.systems.TerminalManager import (
+from simulation.core.facilities.yard import BooleanStorageYard
+from simulation.operations.terminal_manager import (
     YARD_TO_YARD, TRAIN_TO_YARD, YARD_TO_TRAIN, TRUCK_TO_YARD, YARD_TO_TRUCK,
     TRAIN_TO_TRUCK, TRUCK_TO_TRAIN, YARD_TO_TERMINAL_TRUCK
 )

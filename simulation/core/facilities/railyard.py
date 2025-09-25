@@ -1,7 +1,7 @@
 # simulation/terminal_components/systems/railyard.py
 from dataclasses import dataclass
 from typing import Dict, Optional, Union
-from simulation.terminal_components.vehicles.Train import Train
+from simulation.core.vehicles.train import Train
 
 TrackId = Union[int, str]
 

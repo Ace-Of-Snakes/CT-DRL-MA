@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import Mock, MagicMock
 from datetime import datetime
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.Wagon import (
+from simulation2.core.Container import Container
+from simulation2.core.Wagon import (
     Wagon,
     WAGON_LENGTH_STANDARD,
     MIN_CONTAINER_LENGTH

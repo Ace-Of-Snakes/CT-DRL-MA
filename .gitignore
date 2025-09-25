@@ -130,9 +130,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
-env/
 venv/
-ENV/
 env.bak/
 venv.bak/
 
@@ -199,7 +197,7 @@ precomputed/
 # random data
 *.json
 *.csv
-
+*.txt
 # unnecessary folders
 data/
 deprecated_components/

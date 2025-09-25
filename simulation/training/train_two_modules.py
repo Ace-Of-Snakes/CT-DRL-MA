@@ -10,19 +10,19 @@ import numpy as np
 from tqdm import tqdm
 
 # Core terminal imports
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-from simulation.terminal_components.systems.TerminalManager import TerminalLogisticsManager
-from simulation.terminal_components.systems import TerminalManager as TM  # to set PROXIMITY
-from simulation.terminal_components.systems.railyard import BooleanRailYard
-from simulation.terminal_components.systems.parking import ParkingArea
-from simulation.terminal_components.systems.LogisticsManager import LogisticsManager
-from simulation.terminal_components.systems.train_tools.DPParser import DrivingPlanParser
-from simulation.terminal_components.systems.train_tools.TrainScheduler import TrainScheduler
-from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
-from simulation.terminal_components.vehicles.TruckFactory import TruckFactory
-from simulation.terminal_components.systems.TerminalGate import TerminalGate
-from simulation.environment.CTEnv import ContainerTerminalEnv
+from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
+from simulation.operations.terminal_manager import TerminalLogisticsManager
+from simulation.operations import terminal_manager as TM  # to set PROXIMITY
+from simulation.core.facilities.railyard import BooleanRailYard
+from simulation.core.facilities.parking import ParkingArea
+from simulation.planning.logistics_manager import LogisticsManager
+from simulation.planning.driving_plan_parser import DrivingPlanParser
+from simulation.planning.train_scheduler import TrainScheduler
+from simulation.planning.train_loader import TrainLoader
+from simulation.core.factories.container_factory import ContainerFactory
+from simulation.core.factories.truck_factory import TruckFactory
+from simulation.operations.gate import TerminalGate
+from simulation.env.env import ContainerTerminalEnv
 from simulation.analytics.stats_tracker import StatsTracker
 
 # Agents

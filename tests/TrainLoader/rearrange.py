@@ -2,9 +2,9 @@
 import unittest
 from datetime import datetime, timedelta
 
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
+from simulation2.core.Train import Train
+from simulation2.core.Container import Container
+from simulation2.facilities.BooleanStorage import BooleanStorageYard
 from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
 
 

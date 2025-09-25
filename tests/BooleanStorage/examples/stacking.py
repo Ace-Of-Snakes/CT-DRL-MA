@@ -2,9 +2,9 @@
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage.constants import CONTAINER_LENGTH_TO_SUB_BAYS
+from simulation2.facilities.BooleanStorage import BooleanStorageYard, PlacementResult
+from simulation2.core.Container import Container
+from simulation2.facilities.constants import CONTAINER_LENGTH_TO_SUB_BAYS
 
 def make_container(container_id: str, length_ft: int, goods_type: str = "Regular") -> Container:
     return Container(

@@ -10,8 +10,8 @@ import sys
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
+from simulation2.core.Container import Container
+from simulation2.factories.ContainerFactory import ContainerFactory
 
 
 class TestContainerFactory(unittest.TestCase):

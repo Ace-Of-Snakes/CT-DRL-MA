@@ -1,20 +1,27 @@
 # simulation/env/ContainerTerminalEnv.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Callable, Any
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Callable, Any
 import math
 
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.vehicles.TerminalTruck import TerminalTruck
-from simulation.terminal_components.systems.railyard import BooleanRailYard, RailSlot
-from simulation.terminal_components.systems.parking import ParkingArea
-from simulation.terminal_components.systems.TerminalManager import TerminalLogisticsManager, Move
-from simulation.terminal_components.systems.StateEncoder import TerminalStateEncoder
-from simulation.terminal_components.systems.LogisticsManager import LogisticsManager, DayPlan
-from simulation.terminal_components.systems.RewardEngine import RewardEngine
+# facilities imports
+from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
+from simulation.core.facilities.parking import ParkingArea
+from simulation.core.facilities.railyard import BooleanRailYard, RailSlot
+
+# vehicles imports
+from simulation.core.vehicles.train import Train
+from simulation.core.vehicles.truck import Truck
+from simulation.core.vehicles.terminal_truck import TerminalTruck
+
+# Env imports
+from simulation.env.reward_engine import RewardEngine
+from simulation.env.state_encoder import TerminalStateEncoder
+
+
+from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
+from simulation.planning.logistics_manager import LogisticsManager, DayPlan
 from simulation.analytics.stats_tracker import StatsTracker
 
 TT_JOB_SECONDS = 300.0  # 5 minutes
@@ -388,7 +395,7 @@ class ContainerTerminalEnv:
         # Only if enabled; otherwise agent parks via SLOT_TRUCK_PARKING
         if not self.auto_park or not self.day_plan:
             return
-        from simulation.terminal_components.systems.TerminalGate import TerminalGate
+        from simulation.operations.gate import TerminalGate
         pmoves = self.tlm.list_parking_moves(self.lm.gate, self.day_plan.trucks_today, self.current_time)
         for mv in pmoves:
             try:

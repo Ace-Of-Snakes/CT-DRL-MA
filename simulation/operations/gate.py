@@ -5,11 +5,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
-from simulation.terminal_components.vehicles.TruckFactory import TruckFactory
-from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
+from simulation.core.vehicles.truck import Truck
+from simulation.core.containers.container import Container
+from simulation.core.factories.container_factory import ContainerFactory
+from simulation.core.factories.truck_factory import TruckFactory
+from simulation.planning.time_encoder import WeeklyTimeEncoder
 
 # ==================== CONSTANTS ====================
 # Container type groups

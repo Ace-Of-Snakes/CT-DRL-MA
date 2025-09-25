@@ -5,8 +5,8 @@ import os
 import numpy as np
 from datetime import datetime, timedelta
 from scipy.stats import gaussian_kde
-from simulation.terminal_components.vehicles.TruckFactory import TruckFactory, TRUCK_LENGTH
-from simulation.terminal_components.storage_units.Container import Container
+from simulation2.factories.TruckFactory import TruckFactory, TRUCK_LENGTH
+from simulation2.core.Container import Container
 
 
 class TestTruckFactory(unittest.TestCase):

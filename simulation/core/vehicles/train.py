@@ -4,8 +4,8 @@ import random
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from collections import OrderedDict
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.Wagon import Wagon
+from simulation.core.containers.container import Container
+from simulation.core.vehicles.wagon import Wagon
 
 # ==================== TRAIN CONSTANTS ====================
 DEFAULT_NUM_WAGONS = 10

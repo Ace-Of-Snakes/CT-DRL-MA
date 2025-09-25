@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
-from simulation.terminal_components.vehicles.Truck import (
+from simulation2.core.Truck import (
     Truck,
     TRUCK_MAX_LENGTH_STANDARD,
     TRUCK_MIN_CONTAINER_LENGTH,
@@ -15,7 +15,7 @@ from simulation.terminal_components.vehicles.Truck import (
     EXCLUSIVE_CONTAINER_TYPES,
     TRUCK_ID_PREFIX
 )
-from simulation.terminal_components.storage_units.Container import Container
+from simulation2.core.Container import Container
 
 
 class TestTruckInitialization(unittest.TestCase):

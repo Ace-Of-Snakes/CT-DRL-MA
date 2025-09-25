@@ -12,8 +12,8 @@ from simulation.terminal_components.systems.TerminalGate import (
     SHORT_DWELL_THRESHOLD, SHORT_DWELL_EARLY_ARRIVAL_HOURS,
     CONTAINER_BATCH_SIZE
 )
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.vehicles.Truck import Truck
+from simulation2.core.Container import Container
+from simulation2.core.Truck import Truck
 
 
 class TestTerminalGate(unittest.TestCase):

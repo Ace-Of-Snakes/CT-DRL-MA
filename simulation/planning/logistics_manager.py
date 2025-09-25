@@ -5,15 +5,15 @@ from datetime import datetime, timedelta
 import random
 from collections import defaultdict
 
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.systems.TerminalGate import TerminalGate, Order
-from simulation.terminal_components.systems.train_tools.DPParser import DrivingPlanParser
-from simulation.terminal_components.systems.train_tools.TrainScheduler import TrainScheduler, TrainSchedule, ScheduledTrain
-from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
-from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.vehicles.Truck import Truck
-from simulation.terminal_components.storage_units.Container import Container
+from simulation.core.facilities.yard import BooleanStorageYard
+from simulation.operations.gate import TerminalGate, Order
+from simulation.planning.driving_plan_parser import DrivingPlanParser
+from simulation.planning.train_scheduler import TrainScheduler, TrainSchedule, ScheduledTrain
+from simulation.planning.time_encoder import WeeklyTimeEncoder
+from simulation.planning.train_loader import TrainLoader
+from simulation.core.vehicles.train import Train
+from simulation.core.vehicles.truck import Truck
+from simulation.core.containers.container import Container
 
 RECALC_WINDOW_MIN = 30
 

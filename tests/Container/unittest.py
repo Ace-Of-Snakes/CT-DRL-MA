@@ -8,7 +8,7 @@ from typing import List, Tuple
 import statistics
 
 # Import the classes (adjust path as needed)
-from simulation.terminal_components.storage_units.Container import (
+from simulation2.core.Container import (
     Container, CONTAINER_LENGTHS, CONTAINER_HEIGHT_STANDARD, 
     CONTAINER_HEIGHT_HIGH_CUBE, CONTAINER_WIDTH_STANDARD, CONTAINER_WIDTH_SPECIAL
 )

@@ -2,8 +2,8 @@
 import torch
 import torch.nn as nn
 from typing import List, Dict, Tuple
-from simulation.terminal_components.systems.TerminalManager import Move
-from simulation.terminal_components.storage.BooleanStorage import PlacementResult
+from simulation.operations.terminal_manager import Move
+from simulation.core.facilities.yard import PlacementResult
 
 MOVE_TYPES = [
     "YARD_TO_YARD",

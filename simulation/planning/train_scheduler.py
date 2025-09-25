@@ -3,9 +3,9 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.systems.train_tools.TimeEncoder import WeeklyTimeEncoder
-from simulation.terminal_components.systems.train_tools.DPParser import DrivingPlanParser
+from simulation.core.vehicles.train import Train
+from simulation.planning.time_encoder import WeeklyTimeEncoder
+from simulation.planning.driving_plan_parser import DrivingPlanParser
 
 # Constants
 WEEK_SECONDS = 604800

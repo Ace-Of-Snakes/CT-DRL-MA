@@ -2,8 +2,8 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, Tuple, List, Optional, Set
 from dataclasses import dataclass
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage.constants import (
+from simulation.core.containers.container import Container
+from simulation.core.facilities.constants import (
     BAY_SPLIT_FACTOR, CONTAINER_LENGTH_TO_SUB_BAYS
 )
 

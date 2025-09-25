@@ -1,7 +1,7 @@
 import unittest
 import json
 import tempfile
-from simulation.terminal_components.vehicles.Train import Train
+from simulation2.core.Train import Train
 from simulation.terminal_components.systems.tools.TimeEncoder import WeeklyTimeEncoder
 from simulation.terminal_components.systems.tools.DPParser import DrivingPlanParser
 

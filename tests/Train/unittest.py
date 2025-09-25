@@ -1,8 +1,8 @@
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.vehicles.Train import (
+from simulation2.core.Container import Container
+from simulation2.core.Train import (
     Train,
     Wagon,
     TRAIN_STATUS_ARRIVING,

@@ -4,8 +4,8 @@ import time
 import matplotlib.pyplot as plt
 from typing import List, Tuple
 from datetime import datetime
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard, PlacementResult
+from simulation2.core.Container import Container
+from simulation2.facilities.BooleanStorage import BooleanStorageYard, PlacementResult
 from datetime import datetime, timedelta
 np.random.seed(42)
 

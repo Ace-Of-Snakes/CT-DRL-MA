@@ -9,9 +9,9 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
 # Import required components
-from simulation.terminal_components.storage_units.Container import Container, ContainerFactory
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.vehicles.Truck import Truck
+from simulation2.core.Container import Container, ContainerFactory
+from simulation2.core.Train import Train
+from simulation2.core.Truck import Truck
 from simulation.terminal_components.systems.BooleanStorage import BooleanStorageYard
 from simulation.terminal_components.systems.BooleanLogistics import BooleanLogistics
 

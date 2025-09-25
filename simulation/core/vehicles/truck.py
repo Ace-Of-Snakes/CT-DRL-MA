@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 import random
 from typing import List, Dict, Optional, Set
-from simulation.terminal_components.storage_units.Container import Container
+from simulation.core.containers.container import Container
 
 # ==================== TRUCK CONSTANTS ====================
 

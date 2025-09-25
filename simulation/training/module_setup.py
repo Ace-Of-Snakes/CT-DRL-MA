@@ -3,18 +3,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
-from simulation.terminal_components.systems.railyard import BooleanRailYard
-from simulation.terminal_components.systems.parking import ParkingArea
-from simulation.terminal_components.systems.train_tools.DPParser import DrivingPlanParser
-from simulation.terminal_components.systems.train_tools.TrainScheduler import TrainScheduler
-from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
-from simulation.terminal_components.systems.LogisticsManager import LogisticsManager
-from simulation.terminal_components.systems.TerminalGate import TerminalGate
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
-from simulation.terminal_components.vehicles.TruckFactory import TruckFactory
-from simulation.environment.CTEnv import ContainerTerminalEnv
-from simulation.terminal_components.vehicles.Train import Train
+from simulation.core.facilities.yard import BooleanStorageYard
+from simulation.core.facilities.railyard import BooleanRailYard
+from simulation.core.facilities.parking import ParkingArea
+from simulation.planning.driving_plan_parser import DrivingPlanParser
+from simulation.planning.train_scheduler import TrainScheduler
+from simulation.planning.train_loader import TrainLoader
+from simulation.planning.logistics_manager import LogisticsManager
+from simulation.operations.gate import TerminalGate
+from simulation.core.factories.container_factory import ContainerFactory
+from simulation.core.factories.truck_factory import TruckFactory
+from simulation.env.env import ContainerTerminalEnv
+from simulation.core.vehicles.train import Train
 
 @dataclass
 class TerminalModule:

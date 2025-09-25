@@ -2,11 +2,11 @@ import numpy as np
 from typing import List, Optional, Dict
 from dataclasses import dataclass
 from datetime import datetime
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.storage_units.Wagon import Wagon
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
-from simulation.terminal_components.storage.BooleanStorage import BooleanStorageYard
+from simulation.core.vehicles.train import Train
+from simulation.core.containers.container import Container
+from simulation.core.vehicles.wagon import Wagon
+from simulation.core.factories.container_factory import ContainerFactory
+from simulation.core.facilities.yard import BooleanStorageYard
 
 # ==================== CONSTANTS ====================
 OVERGENERATION_FACTOR = 5.0  # Generate 5x more containers than wagons

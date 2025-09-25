@@ -2,8 +2,8 @@
 
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-from simulation.terminal_components.storage_units.Container import Container
-from simulation.terminal_components.vehicles.Truck import Truck
+from simulation.core.containers.container import Container
+from simulation.core.vehicles.truck import Truck
 
 # ==================== TERMINAL TRUCK CONSTANTS ====================
 

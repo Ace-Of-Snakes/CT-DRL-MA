@@ -3,7 +3,7 @@ import random
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from collections import OrderedDict
-from simulation.terminal_components.storage_units.Container import Container
+from simulation.core.containers.container import Container
 
 # ==================== WAGON CONSTANTS ====================
 WAGON_LENGTH_STANDARD = 24.4

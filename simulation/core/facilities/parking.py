@@ -1,6 +1,6 @@
 # simulation/terminal_components/systems/parking.py
 from typing import Optional, Set, Dict, List, Tuple
-from simulation.terminal_components.vehicles.Truck import Truck
+from simulation.core.vehicles.truck import Truck
 
 class ParkingArea:
     """

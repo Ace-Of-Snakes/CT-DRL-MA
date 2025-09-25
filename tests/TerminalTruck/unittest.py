@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock
-from simulation.terminal_components.vehicles.TerminalTruck import (
+from simulation2.core.TerminalTruck import (
     TerminalTruck,
     TERMINAL_TRUCK_MAX_LENGTH,
     TERMINAL_TRUCK_STATUS_IDLE,
@@ -13,7 +13,7 @@ from simulation.terminal_components.vehicles.TerminalTruck import (
     TERMINAL_TRUCK_MIN_TASK_TIME,
     TERMINAL_TRUCK_MAX_TASK_TIME
 )
-from simulation.terminal_components.storage_units.Container import Container
+from simulation2.core.Container import Container
 
 
 class TestTerminalTruckInitialization(unittest.TestCase):

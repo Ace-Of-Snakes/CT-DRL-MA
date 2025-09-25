@@ -4,8 +4,8 @@ import time
 from typing import Dict, List
 import json
 from datetime import datetime
-from simulation.terminal_components.vehicles.Train import Train
-from simulation.terminal_components.storage_units.ContainerFactory import ContainerFactory
+from simulation2.core.Train import Train
+from simulation2.factories.ContainerFactory import ContainerFactory
 from simulation.terminal_components.systems.train_tools.TrainLoader import TrainLoader
 
 def run_performance_test():

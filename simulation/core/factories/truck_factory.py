@@ -4,8 +4,8 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 from scipy.stats import gaussian_kde
-from simulation.terminal_components.vehicles.Truck import Truck, TRUCK_MAX_LENGTH_STANDARD
-from simulation.terminal_components.storage_units.Container import Container
+from simulation.core.vehicles.truck import Truck, TRUCK_MAX_LENGTH_STANDARD
+from simulation.core.containers.container import Container
 
 # Constants for truck generation
 TRUCK_LENGTH = 24.4  # 80 feet in meters (fixed)
