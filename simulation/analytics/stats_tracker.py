@@ -1,11 +1,12 @@
 # simulation/analytics/stats_tracker.py
-import csv, os
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
 from collections import defaultdict
 import numpy as np
+import csv, os
 
 from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
+
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 

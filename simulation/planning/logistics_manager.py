@@ -5,12 +5,13 @@ from datetime import datetime, timedelta
 import random
 from collections import defaultdict
 
-from simulation.core.facilities.yard import BooleanStorageYard
-from simulation.operations.gate import TerminalGate, Order
 from simulation.planning.driving_plan_parser import DrivingPlanParser
 from simulation.planning.train_scheduler import TrainScheduler, TrainSchedule, ScheduledTrain
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.planning.train_loader import TrainLoader
+
+from simulation.operations.gate import TerminalGate, Order
+from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container

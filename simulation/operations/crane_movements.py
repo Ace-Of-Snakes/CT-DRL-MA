@@ -5,6 +5,7 @@ import math
 import numpy as np
 from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
 from simulation.core.facilities.railyard import BooleanRailYard
+
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck

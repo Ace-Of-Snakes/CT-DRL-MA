@@ -4,10 +4,11 @@ from typing import Any, Dict, List, Optional, Iterable
 from datetime import datetime
 import numpy as np
 
-from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
+
+from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.core.facilities.parking import ParkingArea
 from simulation.operations.gate import TerminalGate

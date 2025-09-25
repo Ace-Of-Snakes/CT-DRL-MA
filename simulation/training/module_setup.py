@@ -6,15 +6,18 @@ from typing import List, Tuple, Dict, Optional
 from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.core.facilities.parking import ParkingArea
+
 from simulation.planning.driving_plan_parser import DrivingPlanParser
 from simulation.planning.train_scheduler import TrainScheduler
 from simulation.planning.train_loader import TrainLoader
 from simulation.planning.logistics_manager import LogisticsManager
-from simulation.operations.gate import TerminalGate
+
 from simulation.core.factories.container_factory import ContainerFactory
 from simulation.core.factories.truck_factory import TruckFactory
-from simulation.env.env import ContainerTerminalEnv
 from simulation.core.vehicles.train import Train
+
+from simulation.operations.gate import TerminalGate
+from simulation.env.env import ContainerTerminalEnv
 
 @dataclass
 class TerminalModule:

@@ -2,8 +2,8 @@ import numpy as np
 from typing import List, Optional, Dict
 from dataclasses import dataclass
 from datetime import datetime
-from simulation.core.vehicles.train import Train
 from simulation.core.containers.container import Container
+from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.wagon import Wagon
 from simulation.core.factories.container_factory import ContainerFactory
 from simulation.core.facilities.yard import BooleanStorageYard

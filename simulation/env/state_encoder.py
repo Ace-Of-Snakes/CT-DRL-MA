@@ -1,10 +1,11 @@
 # simulation/terminal_components/systems/StateEncoder.py
 import numpy as np
 from typing import Dict
-from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
+
+from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 
