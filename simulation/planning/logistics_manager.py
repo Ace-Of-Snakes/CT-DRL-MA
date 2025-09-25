@@ -83,12 +83,7 @@ class LogisticsManager:
         imports_arriving_today = max(0, sum(st.train.get_container_count() for st in todays_trains))
 
         # 4) Export containers target = 0.75 × imports (containers), then one container per truck
-        target_exports_pre_cap = int(round(self.export_per_import * imports_arriving_today))
-        if self.daily_import_cap is not None:
-            max_exports_allowed = max(0, int(self.daily_import_cap) - imports_arriving_today)
-            target_exports = min(target_exports_pre_cap, max_exports_allowed)
-        else:
-            target_exports = target_exports_pre_cap
+        target_exports = int(round(self.export_per_import * imports_arriving_today))
 
         export_cfg = self._export_operator_split(todays_trains, target_exports)
         export_trucks = self.gate.create_export_trucks_with_buffer(

@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 from simulation.operations.terminal_manager import Move
-from simulation.env.state_encoder import TerminalStateEncoder
 from simulation.rl.policy.cnn_policy import CNN3DBackbone, MoveFeaturizer, MoveEncoder, QScorer
 
 @dataclass

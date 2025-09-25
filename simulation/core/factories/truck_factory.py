@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 from scipy.stats import gaussian_kde
-from simulation.core.vehicles.truck import Truck, TRUCK_MAX_LENGTH_STANDARD
+from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container
 
 # Constants for truck generation
