@@ -1,4 +1,4 @@
-# simulation/terminal_components/systems/railyard.py
+# simulation/core/facilities/railyard.py
 from dataclasses import dataclass
 from typing import Dict, Optional, Union
 from simulation.core.vehicles.train import Train

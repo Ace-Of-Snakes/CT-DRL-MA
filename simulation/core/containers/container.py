@@ -1,3 +1,4 @@
+# simulation/core/containers/container.py
 from dataclasses import dataclass, field
 from typing import Optional, Literal
 from datetime import datetime
@@ -33,9 +34,7 @@ class Container:
     is_high_cube: bool = False
     is_swap_body: bool = False
     is_trailer: bool = False
-    
-    # Estimation field
-    estimated_departure: Optional[datetime] = None
+
     
     @property
     def length(self) -> float:

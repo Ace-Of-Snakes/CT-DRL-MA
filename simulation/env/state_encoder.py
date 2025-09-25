@@ -1,4 +1,4 @@
-# simulation/terminal_components/systems/StateEncoder.py
+# simulation/env/state_encoder.py
 import numpy as np
 from typing import Dict
 from simulation.core.vehicles.train import Train

@@ -12,8 +12,6 @@ from simulation.env.state_encoder import TerminalStateEncoder
 from simulation.rl.policy.cnn_policy import CNN3DBackbone, MoveFeaturizer, MoveEncoder, QScorer
 
 @dataclass
-# simulation/rl/agents/dqn_agent.py
-@dataclass
 class DQNConfig:
     in_channels: int = 21     # 11 base + 10 forecast channels (3,6,12,24,48 for trains and trucks)
     state_hidden: int = 128

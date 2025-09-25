@@ -1,4 +1,4 @@
-# simulation/terminal_components/Truck.py
+# simulation/core/vehicles/truck.py
 
 from datetime import datetime, timedelta
 import random

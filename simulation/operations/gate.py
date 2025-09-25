@@ -1,5 +1,4 @@
-# simulation/terminal_components/systems/TerminalGate.py
-
+# simulation/operations/gate.py
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Set
@@ -434,31 +433,6 @@ class TerminalGate:
                 jitter = np.random.randint(5, 45)  # 5..45 minutes after earliest_time
                 t.arrival_time = earliest_time + timedelta(minutes=int(jitter))
         return trucks
-
-    def _group_containers_for_pickup(self, containers: List[Container]) -> List[List[Container]]:
-        groups = []
-        current_group = []
-        current_used_length = 0.0
-
-        sorted_containers = sorted(
-            containers,
-            key=lambda c: (c.departure_date or datetime.max, c.container_id)
-        )
-
-        for container in sorted_containers:
-            if current_used_length + container.length_m <= TRUCK_MAX_LENGTH:
-                current_group.append(container)
-                current_used_length += container.length_m
-            else:
-                if current_group:
-                    groups.append(current_group)
-                current_group = [container]
-                current_used_length = container.length_m
-
-        if current_group:
-            groups.append(current_group)
-
-        return groups
 
     def create_export_trucks_with_buffer(self,
                                         export_operators: Dict[str, Dict],

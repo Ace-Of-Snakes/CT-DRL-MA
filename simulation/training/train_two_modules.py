@@ -1,4 +1,4 @@
-# scripts/train_two_modules.py
+# simulation/training/train_two_modules.py
 import os
 import argparse
 import random

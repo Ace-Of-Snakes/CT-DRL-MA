@@ -1,4 +1,4 @@
-# simulation/terminal_components/TerminalTruck.py
+# simulation/core/vehicles/terminal_truck.py
 
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any

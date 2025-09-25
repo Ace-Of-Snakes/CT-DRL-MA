@@ -1,4 +1,4 @@
-# simulation/terminal_components/storage/constants.py
+# simulation/core/facilities/constants.py
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np

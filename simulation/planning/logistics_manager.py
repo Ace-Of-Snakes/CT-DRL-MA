@@ -1,4 +1,4 @@
-# simulation/terminal_components/systems/LogisticsManager.py
+# simulation/planning/logistics_manager.py
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta

@@ -1,4 +1,4 @@
-# simulation/terminal_components/systems/parking.py
+# simulation/core/facilities/parking.py
 from typing import Optional, Set, Dict, List, Tuple
 from simulation.core.vehicles.truck import Truck
 

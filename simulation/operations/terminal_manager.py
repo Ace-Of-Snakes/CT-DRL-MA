@@ -1,4 +1,4 @@
-# simulation/terminal_components/systems/TerminalManager.py
+# simulation/operations/terminal_manager.py
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Iterable
 from datetime import datetime

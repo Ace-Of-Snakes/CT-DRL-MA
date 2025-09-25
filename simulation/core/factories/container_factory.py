@@ -1,3 +1,4 @@
+# simulation/core/factories/container_factory.py
 import os
 import json
 import pickle
@@ -264,118 +265,6 @@ class ContainerFactory:
         
         return dwell_times
     
-    def _vectorized_estimate_departures(self, containers: List[Container], current_date: datetime):
-        """
-        Vectorized departure estimation for a batch of containers.
-        Modifies containers in-place for efficiency.
-        
-        Args:
-            containers: List of containers to estimate
-            current_date: Current simulation date
-        """
-        n = len(containers)
-        if n == 0:
-            return
-        
-        # Extract arrays for vectorized computation
-        arrival_dates = np.array([c.arrival_date for c in containers])
-        departure_dates = np.array([c.departure_date for c in containers])
-        
-        # Convert to days for computation
-        current_ts = current_date.timestamp()
-        arrival_ts = np.array([d.timestamp() for d in arrival_dates])
-        departure_ts = np.array([d.timestamp() for d in departure_dates])
-        
-        days_in_terminal = np.maximum(0, (current_ts - arrival_ts) / 86400)
-        total_stay = (departure_ts - arrival_ts) / 86400
-        remaining_days = np.maximum(0, (departure_ts - current_ts) / 86400)
-        
-        # Vectorized accuracy calculation
-        accuracy = self._vectorized_calculate_accuracy(total_stay, remaining_days)
-        
-        # Vectorized error generation
-        error_days = np.zeros(n)
-        non_perfect = accuracy < 0.99
-        
-        if np.any(non_perfect):
-            max_errors = np.maximum(7, total_stay * 0.3)
-            std_devs = max_errors * (1.0 - accuracy)
-            
-            # Generate all random values at once
-            random_errors = np.random.normal(0, std_devs)
-            error_days[non_perfect] = np.clip(
-                random_errors[non_perfect],
-                -max_errors[non_perfect],
-                max_errors[non_perfect]
-            )
-        
-        # Calculate estimated departures
-        estimated_ts = departure_ts + (error_days * 86400)
-        
-        # Ensure reasonable estimates for containers in terminal
-        in_terminal = days_in_terminal > 0
-        too_early = estimated_ts < current_ts
-        needs_adjustment = in_terminal & too_early
-        estimated_ts[needs_adjustment] = current_ts + 86400  # Add 1 day
-        
-        # Convert back to datetime and assign to containers
-        for i, container in enumerate(containers):
-            container.estimated_departure = datetime.fromtimestamp(estimated_ts[i])
-    
-    def _vectorized_calculate_accuracy(self, total_stay: np.ndarray, remaining_days: np.ndarray) -> np.ndarray:
-        """
-        Vectorized accuracy calculation based on StandardDepartureEstimator logic.
-        
-        Args:
-            total_stay: Array of total days containers will stay
-            remaining_days: Array of days remaining until departure
-            
-        Returns:
-            Array of accuracy values between 0 and 1
-        """
-        # Constants from StandardDepartureEstimator
-        MIN_ACCURACY_DAYS = 2
-        MIN_ACCURACY_BOOST = 7
-        MAX_HOLDING_DAYS = 160
-        MIN_ACCURACY_PERCENT = 0.30
-        MIN_ACC_BOOST_PERCENT = 0.85
-        LATE_ACCURACY_PERCENT = 0.45
-        PEAK_UNCERTAINTY_DAY = 120
-        
-        n = len(total_stay)
-        accuracy = np.ones(n)
-        
-        # Perfect accuracy for short stays or imminent departures
-        perfect = (total_stay <= MIN_ACCURACY_DAYS) | (remaining_days <= MIN_ACCURACY_DAYS)
-        
-        # Boost accuracy in final week
-        boost = (~perfect) & (remaining_days <= MIN_ACCURACY_BOOST)
-        accuracy[boost] = MIN_ACC_BOOST_PERCENT
-        
-        # Very long stays
-        very_long = (~perfect) & (~boost) & (total_stay >= MAX_HOLDING_DAYS)
-        accuracy[very_long] = LATE_ACCURACY_PERCENT
-        
-        # Interpolate with dip at peak uncertainty
-        normal = (~perfect) & (~boost) & (~very_long)
-        
-        # Before peak uncertainty
-        before_peak = normal & (total_stay <= PEAK_UNCERTAINTY_DAY)
-        if np.any(before_peak):
-            progress = ((total_stay[before_peak] - MIN_ACCURACY_DAYS) / 
-                       (PEAK_UNCERTAINTY_DAY - MIN_ACCURACY_DAYS))
-            accuracy[before_peak] = 1.0 - (1.0 - MIN_ACCURACY_PERCENT) * progress
-        
-        # After peak uncertainty
-        after_peak = normal & (total_stay > PEAK_UNCERTAINTY_DAY)
-        if np.any(after_peak):
-            progress = ((total_stay[after_peak] - PEAK_UNCERTAINTY_DAY) / 
-                       (MAX_HOLDING_DAYS - PEAK_UNCERTAINTY_DAY))
-            accuracy[after_peak] = (MIN_ACCURACY_PERCENT + 
-                                   (LATE_ACCURACY_PERCENT - MIN_ACCURACY_PERCENT) * progress)
-        
-        return accuracy
-    
     def create_batch(self,
                     operators_directions: List[Tuple[str, Direction, int]],
                     base_arrival_date: Optional[datetime] = None,
@@ -435,17 +324,6 @@ class ContainerFactory:
             is_trailer=bool(sample['is_trailer'])
         )
     
-    def update_estimations(self, containers: List[Container], current_date: datetime):
-        """
-        Update departure estimations for existing containers.
-        
-        Args:
-            containers: List of containers to update
-            current_date: Current simulation date
-        """
-        if self.use_estimator and containers:
-            self.estimator.estimate_batch(containers, current_date)
-    
     def get_available_operators(self, direction: Direction) -> List[str]:
         """
         Get list of available operators for a given direction.
@@ -483,9 +361,7 @@ class ContainerFactory:
 # Example usage
 if __name__ == "__main__":
     # Initialize factory with new structure
-    factory = ContainerFactory(
-        use_estimator=True
-    )
+    factory = ContainerFactory()
     
     # Check loaded models
     model_summary = factory.get_kde_model_summary()

@@ -1,3 +1,4 @@
+# simulation/core/factories/truck_factory.py
 import os
 import pickle
 import numpy as np

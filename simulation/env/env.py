@@ -1,4 +1,4 @@
-# simulation/env/ContainerTerminalEnv.py
+# simulation/env/env.py
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -395,7 +395,7 @@ class ContainerTerminalEnv:
         # Only if enabled; otherwise agent parks via SLOT_TRUCK_PARKING
         if not self.auto_park or not self.day_plan:
             return
-        from simulation.operations.gate import TerminalGate
+
         pmoves = self.tlm.list_parking_moves(self.lm.gate, self.day_plan.trucks_today, self.current_time)
         for mv in pmoves:
             try:
