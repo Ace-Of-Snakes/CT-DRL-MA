@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from scipy.stats import gaussian_kde
 from simulation.terminal_components.storage_units.Container import Container, Direction, GoodsType
-from simulation.estimators.EstimatorDeparture import StandardDepartureEstimator
 
 
 class ContainerFactory:
@@ -21,8 +20,8 @@ class ContainerFactory:
                  import_dist_file: str = "simulation/data/train_operator_container_type_distribution_import.json",
                  export_dist_file: str = "simulation/data/train_operator_container_type_distribution_export.json",
                  container_data_file: str = "simulation/data/container_data.csv",
-                 models_folder: str = "simulation/data/models",
-                 use_estimator: bool = True):
+                 models_folder: str = "simulation/data/models"
+                 ):
         """
         Initialize factory with all necessary data loaded into memory.
         
@@ -49,11 +48,6 @@ class ContainerFactory:
         
         self.import_kde_models = self._load_kde_models(import_models_folder)
         self.export_kde_models = self._load_kde_models(export_models_folder)
-        
-        # Initialize departure estimator
-        self.use_estimator = use_estimator
-        if use_estimator:
-            self.estimator = StandardDepartureEstimator()
         
         # ID counter for unique container IDs
         self._id_counter = 0
@@ -127,42 +121,29 @@ class ContainerFactory:
                          current_date: Optional[datetime] = None) -> List[Container]:
         """
         Create containers for a given operator and direction.
-        
-        Args:
-            operator: Operator name (must exist in appropriate operator_dict)
-            direction: "Import" or "Export"
-            n_containers: Number of containers to create
-            base_arrival_date: Base arrival date (defaults to now)
-            current_date: Current simulation date for estimation (defaults to arrival)
-            
-        Returns:
-            List of Container objects with estimated departures
+        Estimation removed: only scheduled (true) departure is set.
         """
-        # Select the appropriate operator dictionary based on direction
         if direction == "Import":
             operator_dict = self.import_operator_dict
-        else:  # Export
+        else:
             operator_dict = self.export_operator_dict
-        
+
         if operator not in operator_dict:
             raise ValueError(f"Unknown operator: {operator} for direction: {direction}")
-        
+
         if base_arrival_date is None:
             base_arrival_date = datetime.now()
-        
+
         # Sample container properties
         samples = self._sample_containers(operator, direction, n_containers)
-        
+
         # Create Container objects
         containers = []
         for sample in samples:
             container = self._create_single_container(sample, direction, base_arrival_date)
             containers.append(container)
-        
-        # Apply batch estimation if enabled
-        if self.use_estimator and containers:
-            self.estimator.estimate_batch(containers, current_date or base_arrival_date)
-        
+
+        # No estimator; return as-is
         return containers
     
     def _sample_containers(self, 

@@ -306,6 +306,7 @@ class TerminalLogisticsManager:
             if not ok:
                 return False
             self.yard.remove_container(cont)
+            # remove intent on the train
             train.remove_pickup_container(cid)
             return True
 
@@ -338,6 +339,7 @@ class TerminalLogisticsManager:
             self.yard.remove_container(cont)
             if not truck.add_container(cont):
                 return False
+            # clear pickup intent for truck
             truck.remove_pickup_container_id(cid)
             return True
 
@@ -352,7 +354,11 @@ class TerminalLogisticsManager:
             cont = train.remove_container(cid)
             if not cont or not truck.can_accommodate_container(cont):
                 return False
-            return truck.add_container(cont)
+            if not truck.add_container(cont):
+                return False
+            # IMPORTANT: clear pickup intent for truck so it can depart
+            truck.remove_pickup_container_id(cid)
+            return True
 
         if t == TRUCK_TO_TRAIN:
             if not _require_parked("truck_id"):
@@ -365,7 +371,12 @@ class TerminalLogisticsManager:
             cont = truck.remove_container(cid)
             if not cont or not train.has_space_for_container(cont):
                 return False
-            return train.add_container(cont)
+            ok = train.add_container(cont)
+            if not ok:
+                return False
+            # remove intent on the train (mirrors YARD_TO_TRAIN)
+            train.remove_pickup_container(cid)
+            return True
 
         if t == YARD_TO_TERMINAL_TRUCK:
             tt = terminal_trucks.get(a["terminal_truck_id"])
