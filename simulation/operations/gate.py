@@ -11,8 +11,6 @@ from simulation.core.factories.truck_factory import TruckFactory
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 
 # ==================== CONSTANTS ====================
-# Container type groups
-SPECIAL_CONTAINER_TYPES = {"Trailer", "Swap Body"}
 
 # Truck capacity
 TRUCK_MAX_LENGTH = 24.4  # 80 feet in meters
@@ -176,7 +174,8 @@ class TerminalGate:
         types = np.array([c.container_type for c in containers])
         
         # Vectorized classification
-        is_special = np.isin(types, list(SPECIAL_CONTAINER_TYPES))
+        is_special = np.array([bool(getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False))
+                       for c in containers], dtype=bool)
         
         special_containers = container_array[is_special].tolist()
         regular_containers = container_array[~is_special].tolist()
@@ -188,7 +187,8 @@ class TerminalGate:
             truck = self._create_single_pickup_truck(
                 [container], simulation_date, day_of_week
             )
-            trucks.append(truck)
+            if truck:
+                trucks.append(truck)
         
         # Bundle regular containers efficiently
         if regular_containers:
@@ -271,7 +271,7 @@ class TerminalGate:
         for bundle in bundles:
             truck = self._create_single_pickup_truck(bundle, simulation_date, day_of_week)
             trucks.append(truck)
-        return trucks
+        return [t for t in trucks if t is not None]
     
     def _create_single_pickup_truck(self,
                                    containers: List[Container],
@@ -464,8 +464,7 @@ class TerminalGate:
                 operator=operator,
                 direction="Export",
                 n_containers=n,
-                base_arrival_date=simulation_date,
-                current_date=simulation_date
+                base_arrival_date=simulation_date
             )
 
             due_today = [c for c in containers if c.departure_date and c.departure_date.date() == simulation_date.date()]

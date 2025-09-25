@@ -101,7 +101,7 @@ class LogisticsManager:
                         export_truck_containers_due_today.append(c)
 
         # 5) Pickup assignments for Export containers due today (yard + trucks)
-        yard_due_pairs = self.yard.get_containers_departing_on(day_start, use_estimated=False, one_based_bay=False)
+        yard_due_pairs = self.yard.get_containers_departing_on(day_start, one_based_bay=False)
         yard_exports_due_today = []
         for cid, _bay in yard_due_pairs:
             c = self.yard.get_container(cid)

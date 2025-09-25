@@ -9,7 +9,6 @@ from simulation.core.containers.container import Container
 # ==================== WAGON CONSTANTS ====================
 WAGON_LENGTH_STANDARD = 24.4
 MIN_CONTAINER_LENGTH = 6
-MAX_CONTAINERS_PER_WAGON = 10
 
 class Wagon:
     """

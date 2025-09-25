@@ -1,33 +1,25 @@
-# simulation/env/state_encoder.py
+# python
 import numpy as np
 from typing import Dict
+from datetime import datetime
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
-
 from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 
 class TerminalStateEncoder:
-    """
-    4D tensor [rows, bays, tiers, channels]:
-    0: occupancy, 1: regular, 2: reefer, 3: dg, 4: sb/trailer,
-    5: accessible, 6: wanted_by_train, 7: wanted_by_truck,
-    8: days_until_departure (normalized),
-    9: train_pickup_demand_per_bay (broadcast),
-    10: train_anchor_heat (broadcast),
-    + Forecast channels (11: trains_arriving_heat, 12: trucks_arriving_heat)
-    """
     def __init__(self, yard: BooleanStorageYard, rail: BooleanRailYard):
         self.yard = yard
         self.rail = rail
-        self.time_enc = WeeklyTimeEncoder()  # use our own decoder for angles
+        self.time_enc = WeeklyTimeEncoder()
 
     def encode(self,
                trains: Dict[str, Train],
                trucks: Dict[str, Truck],
-               terminal_trucks: Dict[str, TerminalTruck]) -> np.ndarray:
+               terminal_trucks: Dict[str, TerminalTruck],
+               now: datetime) -> np.ndarray:
         R, B, T = self.yard.n_rows, self.yard.n_bays, self.yard.n_tiers
         C = 11
         tensor = np.zeros((R, B, T, C), dtype=np.float32)
@@ -47,7 +39,6 @@ class TerminalStateEncoder:
                 tensor[r, b, t, 1] = 1.0
             tensor[r, b, t, 5] = 1.0 if rec.is_accessible else 0.0
             try:
-                now = c.arrival_date  # keep your current convention
                 days = c.days_until_departure(now)
                 tensor[r, b, t, 8] = float(min(30.0, max(0.0, days))) / 30.0
             except:
@@ -95,28 +86,18 @@ class TerminalStateEncoder:
         return tensor
 
     def encode_with_forecast(self,
-                            trains: Dict[str, Train],
-                            trucks: Dict[str, Truck],
-                            terminal_trucks: Dict[str, TerminalTruck],
-                            day_plan,  # LogisticsManager.DayPlan
-                            now) -> np.ndarray:
-        """
-        Extend the 11-channel tensor with bay-wise forecast channels:
-        Trains arriving heat and Trucks arriving heat across multiple horizons:
-        - horizons (hours): [3, 6, 12, 24, 48]
-        Total extra channels: 10 (5 for trains, 5 for trucks).
-        """
-        base = self.encode(trains, trucks, terminal_trucks)  # [R, B, T, 11]
+                             trains: Dict[str, Train],
+                             trucks: Dict[str, Truck],
+                             terminal_trucks: Dict[str, TerminalTruck],
+                             day_plan,
+                             now: datetime) -> np.ndarray:
+        base = self.encode(trains, trucks, terminal_trucks, now)
         R, B, T, _ = base.shape
-
-        # Define horizons (no magic numbers): configurable list
         TRAIN_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
         TRUCK_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
-
         num_extra = len(TRAIN_HEAT_WINDOWS_H) + len(TRUCK_HEAT_WINDOWS_H)
         extra = np.zeros((R, B, T, num_extra), dtype=np.float32)
 
-        # Trains arriving soon by window
         trains_heats = [np.zeros(B, dtype=np.float32) for _ in TRAIN_HEAT_WINDOWS_H]
         if day_plan and getattr(day_plan, "todays_trains", None):
             for st in day_plan.todays_trains:
@@ -132,7 +113,6 @@ class TerminalStateEncoder:
                                 w = max(0.0, 1.0 - dt_min / window_min)
                                 trains_heats[i][anchor] += w
 
-        # Trucks arriving soon by window
         trucks_heats = [np.zeros(B, dtype=np.float32) for _ in TRUCK_HEAT_WINDOWS_H]
         if day_plan and getattr(day_plan, "trucks_today", None):
             for tk in day_plan.trucks_today:
@@ -155,7 +135,6 @@ class TerminalStateEncoder:
                                 w = max(0.0, 1.0 - dt_min / window_min)
                                 trucks_heats[i][min(max(0, bay), B-1)] += w
 
-        # Normalize each channel independently
         for i in range(len(trains_heats)):
             mx = trains_heats[i].max()
             if mx > 0:
@@ -165,7 +144,6 @@ class TerminalStateEncoder:
             if mx > 0:
                 trucks_heats[i] /= mx
 
-        # Pack into extra tensor: trains first, then trucks
         for i, heat in enumerate(trains_heats):
             extra[:, :, :, i] = heat[None, :, None]
         offset = len(trains_heats)

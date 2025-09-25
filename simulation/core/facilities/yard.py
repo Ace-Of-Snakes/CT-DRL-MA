@@ -448,7 +448,6 @@ class BooleanStorageYard:
     def get_containers_departing_on(
         self,
         day: datetime,
-        use_estimated: bool = False,  # default off
         one_based_bay: bool = True
     ) -> List[tuple[str, int]]:
         target = day.date()
@@ -470,10 +469,9 @@ class BooleanStorageYard:
     def get_containers_departing_on_by_bay(
         self,
         day: datetime,
-        use_estimated: bool = False,
         one_based_bay: bool = True
     ) -> Dict[int, List[str]]:
-        items = self.get_containers_departing_on(day, use_estimated=False, one_based_bay=one_based_bay)
+        items = self.get_containers_departing_on(day, one_based_bay=one_based_bay)
         grouped: Dict[int, List[str]] = {}
         for cid, bay in items:
             grouped.setdefault(bay, []).append(cid)

@@ -13,7 +13,6 @@ from simulation.core.facilities.yard import BooleanStorageYard
 OVERGENERATION_FACTOR = 5.0  # Generate 5x more containers than wagons
 TRAIN_DIRECTION = "Import"  # Trains only handle imports (Train -> Truck)
 WAGON_UTILIZATION_TARGET = 0.85  # Target 85% wagon utilization
-MIN_CONTAINER_LENGTH = 6.0  # Minimum container length in meters (20ft container)
 
 
 @dataclass
@@ -79,8 +78,7 @@ class TrainLoader:
         containers = self.factory.create_containers(
             operator=operator,
             direction=TRAIN_DIRECTION,  # Always Import for trains
-            n_containers=num_to_generate,
-            current_date=current_date
+            n_containers=num_to_generate
         )
         
         if not containers:

@@ -118,8 +118,7 @@ class ContainerFactory:
                          operator: str, 
                          direction: Direction,
                          n_containers: int = 1,
-                         base_arrival_date: Optional[datetime] = None,
-                         current_date: Optional[datetime] = None) -> List[Container]:
+                         base_arrival_date: Optional[datetime] = None) -> List[Container]:
         """
         Create containers for a given operator and direction.
         Estimation removed: only scheduled (true) departure is set.

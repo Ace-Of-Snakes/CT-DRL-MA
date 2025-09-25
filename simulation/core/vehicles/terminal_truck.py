@@ -22,9 +22,6 @@ VALID_TERMINAL_TRUCK_STATUSES = {
 # ID generation constants
 TERMINAL_TRUCK_ID_PREFIX = "TTR"
 
-# Container type restrictions
-TERMINAL_TRUCK_ALLOWED_TYPES = {"Trailer", "Swap Body"}  # Only these types allowed
-
 # Task time limits (seconds)
 TERMINAL_TRUCK_MIN_TASK_TIME = 0.0
 TERMINAL_TRUCK_MAX_TASK_TIME = 300.0  # 5 minutes max for internal moves
@@ -75,30 +72,14 @@ class TerminalTruck(Truck):
         self.is_pickup_truck = False
         self.is_delivery_truck = False
         self.is_terminal_truck = True
-    
-    def add_container(self, container: Container) -> bool:
-        """
-        Add a container to the terminal truck.
-        Only swap bodies and trailers are allowed, and only one at a time.
-        
-        Args:
-            container: Container object to add
-            
-        Returns:
-            True if container was added successfully, False otherwise
-        """
-        assert container is not None, "TerminalTruck.add_container requires a Container"
-        assert isinstance(container, Container), "TerminalTruck.add_container expects a Container"
 
-        # Only allow specific container types
-        if container.container_type not in TERMINAL_TRUCK_ALLOWED_TYPES:
+    def add_container(self, container: Container) -> bool:
+        assert container is not None and isinstance(container, Container)
+        # Nur SwapBody oder Trailer via Flags
+        if not (getattr(container, "is_swap_body", False) or getattr(container, "is_trailer", False)):
             return False
-        
-        # Don't allow multiple containers (terminal trucks carry one at a time)
         if self.containers:
             return False
-        
-        # Use parent's add_container which already handles exclusive types
         return super().add_container(container)
     
     def assign_task(self, 
