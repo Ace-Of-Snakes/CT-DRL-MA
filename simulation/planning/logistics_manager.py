@@ -83,9 +83,9 @@ class LogisticsManager:
         # 4) Export containers target = 0.75 × imports (containers), then one container per truck
         target_exports = int(round(self.export_per_import * imports_arriving_today))
 
-        print(f"LogisticsManager: {len(todays_trains)} trains arriving today, "
-              f"{imports_arriving_today} import containers, "
-              f"targeting {target_exports} export containers/trucks")
+        # print(f"LogisticsManager: {len(todays_trains)} trains arriving today, "
+        #       f"{imports_arriving_today} import containers, "
+        #       f"targeting {target_exports} export containers/trucks")
 
         export_cfg = self._export_operator_split(todays_trains, target_exports)
         export_trucks = self.gate.create_export_trucks_with_buffer(
