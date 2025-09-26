@@ -1,7 +1,7 @@
 # simulation/rl/policy/cnn_policy.py
 import torch
 import torch.nn as nn
-from typing import List, Dict, Tuple
+from typing import List, Tuple
 from simulation.operations.terminal_manager import Move
 from simulation.core.facilities.yard import PlacementResult
 

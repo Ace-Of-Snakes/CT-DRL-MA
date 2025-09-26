@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from scipy.stats import gaussian_kde
-from simulation.core.containers.container import Container, Direction, GoodsType
+from simulation.core.containers.container import Container, Direction
 
 
 class ContainerFactory:

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Callable, Any
 
 # facilities imports
-from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
+from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.facilities.parking import ParkingArea
 from simulation.core.facilities.railyard import BooleanRailYard, RailSlot
 
@@ -401,14 +401,12 @@ class ContainerTerminalEnv:
                 for tk in self.trucks.values():
                     out.extend(self.tlm.list_train_to_truck(tr, tk))
                     out.extend(self.tlm.list_truck_to_train(tk, tr))
-        # Terminal‑Truck (only if resource is free)
+        # Terminal‑Truck
         for ttr in self.terminal_trucks.values():
             if self._tt_is_available(ttr):
                 out.extend(self.tlm.list_yard_to_terminal_truck(ttr))
-        # Parking
-        if self.day_plan:
-            pmv = self.tlm.list_parking_moves(self.lm.gate, self.day_plan.trucks_today, self.current_time)
-            out.extend(pmv)
+        # Parking (ACTIVE trucks only; not day plan)
+        out.extend(self.tlm.list_parking_moves_active(self.trucks))
         # Yard <-> Yard
         out.extend(self.tlm.list_yard_to_yard())
         return out

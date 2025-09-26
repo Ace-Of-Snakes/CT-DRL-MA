@@ -1,7 +1,7 @@
 # simulation/operations/gate.py
 import numpy as np
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from simulation.core.vehicles.truck import Truck
@@ -157,59 +157,59 @@ class TerminalGate:
                 print(f"Error processing {task_type}: {e}")
         
         return all_trucks
-    
-    def _process_imports(self,
-                        containers: List[Container],
-                        simulation_date: datetime,
-                        day_of_week: str) -> List[Truck]:
+
+    def _process_imports(
+        self,
+        containers: List[Container],
+        simulation_date: datetime,
+        day_of_week: str
+    ) -> List[Truck]:
         """
         Generate pickup trucks for import containers.
-        Uses vectorized operations for speed.
+        Reuses self.executor (no per-call thread pools).
         """
         if not containers:
             return []
-        
-        # Separate special containers using numpy for speed
+
+        # Separate special containers (one per truck) vs. regular (bundle into trucks)
         container_array = np.array(containers, dtype=object)
-        types = np.array([c.container_type for c in containers])
-        
-        # Vectorized classification
-        is_special = np.array([bool(getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False))
-                       for c in containers], dtype=bool)
-        
+        is_special = np.array(
+            [bool(getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False)) for c in containers],
+            dtype=bool
+        )
         special_containers = container_array[is_special].tolist()
         regular_containers = container_array[~is_special].tolist()
-        
-        trucks = []
-        
-        # Generate trucks for special containers (one truck each)
-        for container in special_containers:
-            truck = self._create_single_pickup_truck(
-                [container], simulation_date, day_of_week
-            )
-            if truck:
-                trucks.append(truck)
-        
-        # Bundle regular containers efficiently
+
+        trucks: List[Truck] = []
+
+        # Special: one truck per container (fast path, sequential is fine)
+        for c in special_containers:
+            t = self._create_single_pickup_truck([c], simulation_date, day_of_week)
+            if t:
+                trucks.append(t)
+
+        # Regular: bundle, then create trucks in batches using self.executor
         if regular_containers:
             bundles = self._bundle_containers_vectorized(regular_containers)
-            
-            # Create trucks for bundles in parallel batches
-            batch_size = max(1, len(bundles) // MAX_WORKERS)
-            bundle_batches = [bundles[i:i+batch_size] 
-                            for i in range(0, len(bundles), batch_size)]
-            
-            with ThreadPoolExecutor(max_workers=min(len(bundle_batches), MAX_WORKERS)) as executor:
+            if bundles:
+                # Keep a bounded number of tasks to avoid flooding the pool
+                batch_size = max(1, len(bundles) // MAX_WORKERS)
+                bundle_batches = [bundles[i:i + batch_size] for i in range(0, len(bundles), batch_size)]
+
                 futures = [
-                    executor.submit(self._create_pickup_trucks_batch, 
-                                  batch, simulation_date, day_of_week)
+                    self.executor.submit(self._create_pickup_trucks_batch, batch, simulation_date, day_of_week)
                     for batch in bundle_batches
                 ]
-                
-                for future in as_completed(futures):
-                    trucks.extend(future.result())
-        
+                for fut in as_completed(futures):
+                    try:
+                        res = fut.result()
+                        if res:
+                            trucks.extend(res)
+                    except Exception as e:
+                        print(f"Error creating pickup trucks batch: {e}")
+
         return trucks
+
     
     def _bundle_containers_vectorized(self, containers: List[Container]) -> List[List[Container]]:
         """
@@ -287,83 +287,79 @@ class TerminalGate:
         )
         return pickup_trucks[0] if pickup_trucks else None
     
-    def _process_exports(self,
-                        export_operators: Dict[str, Dict],
-                        simulation_date: datetime,
-                        day_of_week: str) -> List[Truck]:
+    def _process_exports(
+        self,
+        export_operators: Dict[str, Dict],
+        simulation_date: datetime,
+        day_of_week: str
+    ) -> List[Truck]:
         """
         Generate delivery trucks for export containers.
-        Handles short-dwell operators with early arrival.
+        Reuses self.executor for per-operator work (no per-call thread pools).
         """
-        all_trucks = []
-        
-        # Process operators in parallel
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = []
-            
-            for operator, config in export_operators.items():
-                future = executor.submit(
-                    self._process_single_operator,
-                    operator, config, simulation_date, day_of_week
-                )
-                futures.append(future)
-            
-            for future in as_completed(futures):
-                try:
-                    trucks = future.result()
-                    if trucks:
-                        all_trucks.extend(trucks)
-                except Exception as e:
-                    print(f"Error processing operator: {e}")
-        
+        if not export_operators:
+            return []
+
+        all_trucks: List[Truck] = []
+        futures = [
+            self.executor.submit(self._process_single_operator, operator, cfg, simulation_date, day_of_week)
+            for operator, cfg in export_operators.items()
+        ]
+
+        for fut in as_completed(futures):
+            try:
+                trucks = fut.result()
+                if trucks:
+                    all_trucks.extend(trucks)
+            except Exception as e:
+                print(f"Error processing operator: {e}")
+
         return all_trucks
     
-    def _process_single_operator(self,
-                                operator: str,
-                                config: Dict,
-                                simulation_date: datetime,
-                                day_of_week: str) -> List[Truck]:
-        """Process a single export operator."""
-        num_containers = config.get('num_containers', 0)
+    def _process_single_operator(
+        self,
+        operator: str,
+        config: Dict,
+        simulation_date: datetime,
+        day_of_week: str
+    ) -> List[Truck]:
+        """
+        Process a single export operator.
+        NOTE: fixed ContainerFactory arg mismatch (remove unsupported current_date).
+        """
+        num_containers = int(config.get("num_containers", 0))
         if num_containers <= 0:
             return []
-        
-        # Determine arrival time based on operator characteristics
+
+        # Determine arrival time (short-dwell operators arrive earlier than earliest train)
         arrival_time = simulation_date
-        
         if operator in self.short_dwell_operators:
-            # Short-dwell operators: arrive early
-            train_arrival = config.get('arrival_time', {})
+            train_arrival = config.get("arrival_time", {})
             if train_arrival:
-                # Decode train arrival time
-                angle = train_arrival.get('angle', 0)
-                day, hour, minute = self.time_encoder.decode(angle)
-                
-                # Set arrival time earlier than train
-                arrival_time = simulation_date.replace(hour=hour, minute=minute)
-                arrival_time -= timedelta(hours=SHORT_DWELL_EARLY_ARRIVAL_HOURS)
-        
-        # Generate containers in batches for efficiency
-        containers = []
+                angle = float(train_arrival.get("angle", 0.0))
+                _day, hour, minute = self.time_encoder.decode(angle)
+                arrival_time = simulation_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                arrival_time -= timedelta(hours=int(SHORT_DWELL_EARLY_ARRIVAL_HOURS))
+
+        # Generate export containers (batched), using the correct signature
+        containers: List[Container] = []
         for i in range(0, num_containers, CONTAINER_BATCH_SIZE):
             batch_size = min(CONTAINER_BATCH_SIZE, num_containers - i)
             batch = self.container_factory.create_containers(
                 operator=operator,
                 direction="Export",
                 n_containers=batch_size,
-                base_arrival_date=arrival_time,
-                current_date=simulation_date
+                base_arrival_date=arrival_time
             )
             containers.extend(batch)
-        
-        # Generate delivery trucks
+
+        # Build delivery trucks (truck_factory packs multiple containers if they fit)
         trucks = self.truck_factory._generate_delivery_trucks(
             containers=containers,
             day_key=day_of_week.lower(),
             base_date=arrival_time,
             parking_spot_prefix="D"
         )
-        
         return trucks
     
     def get_arrived_trucks(self, 

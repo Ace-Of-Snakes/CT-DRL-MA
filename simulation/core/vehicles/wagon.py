@@ -1,8 +1,5 @@
 # simulation/core/vehicles/wagon.py
-from datetime import datetime, timedelta
-import random
-from typing import Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass
+from typing import List, Optional, Set
 from collections import OrderedDict
 from simulation.core.containers.container import Container
 

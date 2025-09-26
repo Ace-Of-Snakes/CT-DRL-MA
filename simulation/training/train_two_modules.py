@@ -3,7 +3,7 @@ import os
 import argparse
 import random
 from dataclasses import dataclass
-from typing import List, Tuple, Set, Dict, Any, Optional
+from typing import List, Tuple, Set, Any, Optional
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -142,7 +142,7 @@ def make_special_coordinates(n_rows: int,
 def build_module(name: str,
                  rows: int, bays: int, tiers: int, tracks: int,
                  parser, container_factory: ContainerFactory, truck_factory: TruckFactory,
-                 import_cap: int = 400, train_import_cap: Optional[int] = None,
+                 train_import_cap: Optional[int] = 220,
                  export_per_import: float = 0.75,
                  overgen: float = 3.0,
                  logdir: str = "", algo: str = "dqn") -> Module:
@@ -156,7 +156,7 @@ def build_module(name: str,
     scheduler = TrainScheduler(num_tracks=tracks)
     loader = TrainLoader(container_factory, overgeneration_factor=overgen)
     lm = LogisticsManager(yard, gate, loader, scheduler, parser,
-                          daily_import_cap=import_cap, export_per_import=export_per_import,
+                          export_per_import=export_per_import,
                           daily_train_import_cap=train_import_cap)
     tlm = TerminalLogisticsManager(yard, rail, parking)
 
@@ -180,7 +180,6 @@ def main():
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--logdir", type=str, default="runs/dual_modules")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--import-cap", type=int, default=400, help="Per-module daily cap: imports by train + exports by truck")
     ap.add_argument("--train-import-cap", type=int, default=None, help="Per-module cap on import containers on trains per day")
     ap.add_argument("--export-per-import", type=float, default=0.75, help="Exports per import ratio")
     ap.add_argument("--overgen", type=float, default=3.0, help="TrainLoader overgeneration factor")
@@ -209,12 +208,12 @@ def main():
     parser_m2 = FilteringDrivingPlanParser(whitelist_ids=m2_ids)
     m1 = build_module("M1", rows=5, bays=58, tiers=5, tracks=7,
                       parser=parser_m1, container_factory=container_factory, truck_factory=truck_factory,
-                      import_cap=args.import_cap, train_import_cap=args.train_import_cap,
+                    train_import_cap=args.train_import_cap,
                       export_per_import=args.export_per_import,
                       overgen=args.overgen, logdir=outdir, algo=args.algo)
     m2 = build_module("M2", rows=3, bays=58, tiers=3, tracks=6,
                       parser=parser_m2, container_factory=container_factory, truck_factory=truck_factory,
-                      import_cap=args.import_cap, train_import_cap=args.train_import_cap,
+                      train_import_cap=args.train_import_cap,
                       export_per_import=args.export_per_import,
                       overgen=args.overgen, logdir=outdir, algo=args.algo)
 

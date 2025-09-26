@@ -70,8 +70,15 @@ class TerminalLogisticsManager:
             for d in dests:
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
-                    seen.add(key)
-                    out.append(d)
+                    seen.add(key); out.append(d)
+        # Widen search for special goods if nothing found nearby
+        if not out and getattr(container, "goods_type", "") in ("Reefer", "DangerousGoods"):
+            ga = self._goods_anchor(container)
+            dests = self.yard.search_placement_all_tiers(container, target_bay=ga, max_proximity=self.yard.n_bays)
+            for d in dests:
+                key = (d.row, d.bay, d.tier, d.start_split)
+                if key not in seen:
+                    seen.add(key); out.append(d)
         out.sort(key=lambda p: (p.tier, p.score))
         return out
 
@@ -92,16 +99,19 @@ class TerminalLogisticsManager:
             return self._goods_anchor(truck.containers[0])
         return None
 
-    def list_parking_moves(self, gate: TerminalGate, todays_trucks: List[Truck], current_time: datetime) -> List[Move]:
-        if not self.parking or not todays_trucks:
-            return []
-        arrived = gate.get_arrived_trucks(todays_trucks, current_time)
-        candidates = [t for t in arrived if not t.parking_spot]
-        if not candidates:
+    def list_parking_moves_active(self, active_trucks: Dict[str, Truck]) -> List[Move]:
+        """
+        Parking suggestions for already-admitted trucks in the env.
+        Only for trucks without a parking_spot.
+        Prefers exact bay (pb-1, pb, pb+1); falls back to any within ±2 bays.
+        """
+        if not self.parking or not active_trucks:
             return []
         moves: List[Move] = []
-        # Allowed bay offsets from preferred bay: left (-1), exact (0), right (+1)
         PARKING_ALLOWED_OFFSETS = (-1, 0, +1)
+
+        # Trucks admitted to env and not yet parked
+        candidates = [t for t in active_trucks.values() if t and not t.parking_spot]
         for t in candidates:
             pb = self._preferred_bay_for_truck(t)
             if pb is None:
@@ -116,11 +126,12 @@ class TerminalLogisticsManager:
                         "delta_bay": 0
                     }))
                 continue
+
+            # try exact bay with small offsets first
             for off in PARKING_ALLOWED_OFFSETS:
                 bay = pb + off
                 if bay < 0 or bay >= self.yard.n_bays:
                     continue
-                # find a free spot exactly in this bay
                 near_exact = self.parking.iter_free_in_bay_range(bay, bay)
                 if near_exact:
                     spot = near_exact[0]
@@ -130,18 +141,23 @@ class TerminalLogisticsManager:
                         "preferred_bay": pb,
                         "delta_bay": off
                     }))
-            # If no exact bay spots found by offsets, try any within ±2 (rare fallback)
+                    break
+
+            # Fallback within ±2
             if not any(m.args.get("truck_id") == t.truck_id for m in moves):
                 near = self.parking.iter_free_in_bay_range(max(0, pb - 2), min(self.yard.n_bays - 1, pb + 2))
                 if near:
                     spot = near[0]
-                    delta = (self.parking.spot_bay(spot) or pb) - pb
+                    # spot_bay() may return None if prefixes include underscores; guard it
+                    b = self.parking.spot_bay(spot)
+                    delta = (b - pb) if b is not None else 0
                     moves.append(Move(SLOT_TRUCK_PARKING, {
                         "truck_id": t.truck_id,
                         "spot": spot,
                         "preferred_bay": pb,
                         "delta_bay": int(delta)
                     }))
+        # print(len(moves), "parking moves for", len(candidates), "active trucks")
         return moves
 
     # ----- move listing (broad) -----

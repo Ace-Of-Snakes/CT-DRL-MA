@@ -1,6 +1,6 @@
 # simulation/rl/agents/ppo_agent.py
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn

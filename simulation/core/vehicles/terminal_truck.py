@@ -1,7 +1,7 @@
 # simulation/core/vehicles/terminal_truck.py
 
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional
 from simulation.core.containers.container import Container
 from simulation.core.vehicles.truck import Truck
 

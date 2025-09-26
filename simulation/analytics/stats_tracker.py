@@ -1,5 +1,5 @@
 # simulation/analytics/stats_tracker.py
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 from datetime import datetime
 from collections import defaultdict
 import numpy as np

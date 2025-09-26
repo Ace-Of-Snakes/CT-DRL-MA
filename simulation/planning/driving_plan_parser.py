@@ -1,7 +1,6 @@
 # simulation/planning/driving_plan_parser.py
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from simulation.core.vehicles.train import Train
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 import os
@@ -9,7 +8,7 @@ import os
 # Constants
 DRIVING_PLAN_PATH = "simulation/data/driving_plan.json"
 WAGON_COUNT = int(os.getenv("WAGON_COUNT", "29"))  # set to "27" to shorten by 2 wagons
-WAGON_LENGTH = 24.384  # Default from Train class
+WAGON_LENGTH = 24.4  # Default from Train class
 ARRIVAL_IDX_DAY = 0
 ARRIVAL_IDX_TIME = 1
 ARRIVAL_IDX_DAY_COMPLETE = 2

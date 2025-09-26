@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timedelta
 from simulation.core.vehicles.train import Train
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.planning.driving_plan_parser import DrivingPlanParser
@@ -53,6 +52,7 @@ class TrainSchedule:
         if track_id not in self.track_occupancy:
             self.track_occupancy[track_id] = []
         self.track_occupancy[track_id].append(scheduled_train)
+        self.track_occupancy[track_id].sort(key=lambda st: st.arrival_seconds)
     
     def get_utilization(self) -> float:
         """Calculate overall track utilization."""

@@ -1,6 +1,6 @@
 # simulation/core/vehicles/truck.py
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
 from typing import List, Dict, Optional, Set
 from simulation.core.containers.container import Container

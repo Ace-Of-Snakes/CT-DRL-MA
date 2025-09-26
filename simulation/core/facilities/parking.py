@@ -1,5 +1,5 @@
 # simulation/core/facilities/parking.py
-from typing import Optional, Set, Dict, List, Tuple
+from typing import Optional, Set, List
 from simulation.core.vehicles.truck import Truck
 
 class ParkingArea:

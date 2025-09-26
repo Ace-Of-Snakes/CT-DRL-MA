@@ -1,6 +1,6 @@
 # simulation/planning/logistics_manager.py
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import random
 from collections import defaultdict
@@ -10,7 +10,7 @@ from simulation.planning.train_scheduler import TrainScheduler, TrainSchedule, S
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.planning.train_loader import TrainLoader
 
-from simulation.operations.gate import TerminalGate, Order
+from simulation.operations.gate import TerminalGate
 from simulation.core.facilities.yard import BooleanStorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
@@ -45,16 +45,14 @@ class LogisticsManager:
                  train_loader: TrainLoader,
                  train_scheduler: TrainScheduler,
                  parser: DrivingPlanParser,
-                 daily_import_cap: Optional[int] = None,
                  export_per_import: float = 0.75,
-                daily_train_import_cap: Optional[int] = None):
+                daily_train_import_cap: Optional[int] = 220):
         self.yard = yard
         self.gate = terminal_gate
         self.loader = train_loader
         self.scheduler = train_scheduler
         self.parser = parser
         self.time = WeeklyTimeEncoder()
-        self.daily_import_cap = daily_import_cap
         self.export_per_import = max(0.0, float(export_per_import))
         self.daily_train_import_cap = daily_train_import_cap
 
@@ -260,26 +258,99 @@ class LogisticsManager:
         return latest
     
     def _throttle_train_imports(self, trains: List[Train], cap_total: int) -> None:
-        """Remove import containers from trains (round-robin) until total <= cap_total."""
-        total = sum(tr.get_container_count() for tr in trains)
+        """
+        Remove import containers across today's trains until total <= cap_total.
+        Balanced strategy:
+        - Compute equal target removals per train (+1 for first 'remainder' trains).
+        - For each train, remove from alternating wagons (0,2,4,... then 1,3,5,...).
+        - Within a wagon, remove the middle container (not first/last) to avoid local bias.
+        """
+        if not trains:
+            return
+        # Consider only trains that actually have containers
+        active = [tr for tr in trains if tr.get_container_count() > 0]
+        if not active:
+            return
+
+        total = sum(tr.get_container_count() for tr in active)
         if total <= cap_total:
             return
-        to_remove = total - cap_total
-        # Round-robin over trains, pop containers from wagons
-        while to_remove > 0:
+
+        to_remove_total = total - cap_total
+        n = len(active)
+        base = to_remove_total // n
+        rem = to_remove_total % n
+
+        targets = [base + (1 if i < rem else 0) for i in range(n)]
+        removed_so_far = [0] * n
+        remaining = to_remove_total
+
+        # Multiple passes in case some trains can't reach their target due to low count
+        pass_idx = 0
+        while remaining > 0 and pass_idx < 3:
             changed = False
-            for tr in trains:
-                if to_remove <= 0:
-                    break
-                if tr.get_container_count() == 0:
+            for i, tr in enumerate(active):
+                need = targets[i] - removed_so_far[i]
+                if need <= 0:
                     continue
-                # remove one arbitrary container (last wagon with any container)
-                for w in reversed(tr.wagons):
-                    ids = list(w.containers.keys())
-                    if ids:
-                        tr.remove_container(ids[-1])
-                        to_remove -= 1
-                        changed = True
-                        break
+                took = self._remove_from_train_balanced(tr, need, start_offset=(pass_idx + i) & 1)
+                if took > 0:
+                    removed_so_far[i] += took
+                    remaining -= took
+                    changed = True
+                if remaining <= 0:
+                    break
             if not changed:
-                break  # can't remove more (shouldn't happen)
+                break
+            pass_idx += 1
+
+    def _remove_from_train_balanced(self, train: Train, k: int, start_offset: int = 0) -> int:
+        """
+        Remove up to k containers from a train in a balanced pattern:
+        - First sweep: every other wagon starting from start_offset parity (0 or 1).
+        - Second sweep: the other parity wagons.
+        - Within a wagon, remove the middle container (avoids head/tail bias).
+        - Final sweep: round-robin over all wagons if still needed.
+        Returns the number actually removed.
+        """
+        removed = 0
+        n_w = len(train.wagons)
+        if n_w == 0 or k <= 0:
+            return 0
+
+        def pop_middle_from_wagon(w) -> str | None:
+            if not w.containers:
+                return None
+            keys = list(w.containers.keys())
+            mid = len(keys) // 2
+            return keys[mid]
+
+        par = start_offset & 1
+        orders = [list(range(par, n_w, 2)), list(range(1 - par, n_w, 2))]
+        for order in orders:
+            for wi in order:
+                if removed >= k:
+                    return removed
+                w = train.wagons[wi]
+                cid = pop_middle_from_wagon(w)
+                if cid is None:
+                    continue
+                ok = train.remove_container(cid)
+                if ok:
+                    removed += 1
+                if removed >= k:
+                    return removed
+
+        # Final sweep if still needed
+        for wi in range(n_w):
+            if removed >= k:
+                break
+            w = train.wagons[wi]
+            cid = pop_middle_from_wagon(w)
+            if cid is None:
+                continue
+            ok = train.remove_container(cid)
+            if ok:
+                removed += 1
+
+        return removed

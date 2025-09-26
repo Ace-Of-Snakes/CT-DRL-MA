@@ -1,6 +1,6 @@
 # simulation/core/containers/container.py
 from dataclasses import dataclass, field
-from typing import Optional, Literal
+from typing import Literal
 from datetime import datetime
 
 # Type definitions

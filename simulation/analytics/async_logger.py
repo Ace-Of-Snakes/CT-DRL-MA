@@ -1,6 +1,6 @@
 # simulation/analytics/async_logger.py
-import threading, queue, json, time, os
-from typing import Optional, Dict, Any
+import threading, queue, json, os
+from typing import Dict, Any
 
 class AsyncNDJSONLogger:
     def __init__(self, filepath: str, flush_every: int = 1000):

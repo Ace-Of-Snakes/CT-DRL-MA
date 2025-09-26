@@ -1,14 +1,12 @@
 # simulation/operations/crane_movements.py
 from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass
-import math
-import numpy as np
 
+from simulation.operations._rmgc_math import move_time as _jit_move_time
 from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
-from simulation.core.vehicles.terminal_truck import TerminalTruck
 
 
 @dataclass
@@ -123,11 +121,11 @@ class TerminalRMGC:
         return (x, y, z)
 
     def _truck_xyz(self, truck: Truck) -> Tuple[float, float, float]:
-        # Expect parking_spot like "P_{bay}_{split}"
         bay, split = 0, 0
         if isinstance(truck.parking_spot, str):
             try:
-                _, b, s = truck.parking_spot.split("_")
+                parts = truck.parking_spot.split("_")
+                b, s = parts[-2], parts[-1]
                 bay, split = int(b), int(s)
             except Exception:
                 bay, split = 0, 0
@@ -143,38 +141,20 @@ class TerminalRMGC:
         z = 0.0
         return (x, y, z)
 
-    # -------- timing model --------
-    def _axis_time(self, dist: float, vmax: float, acc: float) -> float:
-        if dist <= 0.0:
-            return 0.0
-        t_acc = vmax / acc
-        d_acc = 0.5 * acc * t_acc * t_acc
-        if dist <= 2.0 * d_acc:
-            return 2.0 * math.sqrt(dist / acc)
-        return 2.0 * t_acc + (dist - 2.0 * d_acc) / vmax
-
+    # -------- timing model (JIT) --------
     def _move_time(self, p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
-        dx = abs(p2[0] - p1[0])
-        dy = abs(p2[1] - p1[1])
-
-        # Lower to pick at source z
-        hoist_down = self._axis_time(
-            abs(self.perf.max_hook_height_m - p1[2]), self.perf.hoist_speed_mps, self.perf.hoist_acc_mps2
+        """
+        Wrapper that calls numba-compiled move_time (pure numeric). Kept for clarity.
+        """
+        return _jit_move_time(
+            p1[0], p1[1], p1[2],
+            p2[0], p2[1], p2[2],
+            self.perf.trolley_speed_mps, self.perf.trolley_acc_mps2,
+            self.perf.gantry_speed_mps, self.perf.gantry_acc_mps2,
+            self.perf.hoist_speed_mps, self.perf.hoist_acc_mps2,
+            self.perf.max_hook_height_m,
+            self.perf.handling_time_s
         )
-        # Lift up to plane height
-        hoist_up = self._axis_time(
-            abs(self.perf.max_hook_height_m - p1[2]), self.perf.hoist_speed_mps, self.perf.hoist_acc_mps2
-        )
-        # In-plane move (critical path between gantry and trolley)
-        plane = max(
-            self._axis_time(dx, self.perf.gantry_speed_mps, self.perf.gantry_acc_mps2),
-            self._axis_time(dy, self.perf.trolley_speed_mps, self.perf.trolley_acc_mps2),
-        )
-        # Lower to destination z
-        hoist_lower = self._axis_time(
-            abs(self.perf.max_hook_height_m - p2[2]), self.perf.hoist_speed_mps, self.perf.hoist_acc_mps2
-        )
-        return hoist_down + hoist_up + plane + hoist_lower + self.perf.handling_time_s
 
     def estimate_move_cost(
         self,
