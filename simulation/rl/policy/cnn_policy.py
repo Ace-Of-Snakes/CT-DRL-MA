@@ -77,8 +77,8 @@ class MoveFeaturizer:
                 spot = mv.args.get("spot", "")
                 try:
                     parts = spot.split("_")
-                    if len(parts) == 3:
-                        _, b, s = parts
+                    if len(parts) >= 3:
+                        b, s = parts[-2], parts[-1]
                         bay = int(b) / max(1, n_bays - 1)
                         start = int(s) / max(1, split_factor - 1)
                 except Exception:

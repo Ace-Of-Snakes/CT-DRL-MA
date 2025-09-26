@@ -140,6 +140,7 @@ class ContainerTerminalEnv:
             self.trains, self.trucks, self.terminal_trucks, self.day_plan, self.current_time
         )
         moves = self._list_moves()
+        assert len(self.parking.iter_free()) > 0, "No free parking spots initialized"
         return state, moves
 
     def step_dual_agent(
@@ -412,9 +413,9 @@ class ContainerTerminalEnv:
         return out
 
     def _auto_slot_parking(self) -> None:
-        if not self.auto_park or not self.day_plan:
+        if not self.auto_park:
             return
-        pmoves = self.tlm.list_parking_moves(self.lm.gate, self.day_plan.trucks_today, self.current_time)
+        pmoves = self.tlm.list_parking_moves_active(self.trucks)
         for mv in pmoves:
             try:
                 self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)

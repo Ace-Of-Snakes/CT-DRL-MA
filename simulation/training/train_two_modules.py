@@ -180,7 +180,7 @@ def main():
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--logdir", type=str, default="runs/dual_modules")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--train-import-cap", type=int, default=None, help="Per-module cap on import containers on trains per day")
+    ap.add_argument("--train-import-cap", type=int, default=220, help="Per-module cap on import containers on trains per day")
     ap.add_argument("--export-per-import", type=float, default=0.75, help="Exports per import ratio")
     ap.add_argument("--overgen", type=float, default=3.0, help="TrainLoader overgeneration factor")
     ap.add_argument("--load-m1", type=str, default=None)

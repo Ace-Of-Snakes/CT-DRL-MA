@@ -83,6 +83,10 @@ class LogisticsManager:
         # 4) Export containers target = 0.75 × imports (containers), then one container per truck
         target_exports = int(round(self.export_per_import * imports_arriving_today))
 
+        print(f"LogisticsManager: {len(todays_trains)} trains arriving today, "
+              f"{imports_arriving_today} import containers, "
+              f"targeting {target_exports} export containers/trucks")
+
         export_cfg = self._export_operator_split(todays_trains, target_exports)
         export_trucks = self.gate.create_export_trucks_with_buffer(
             export_operators=export_cfg,
@@ -160,7 +164,7 @@ class LogisticsManager:
         if not imminent:
             return
 
-        due_pairs = self.yard.get_containers_departing_on(now, use_estimated=False, one_based_bay=False)
+        due_pairs = self.yard.get_containers_departing_on(now, one_based_bay=False)
         due_export = []
         for cid, _ in due_pairs:
             c = self.yard.get_container(cid)
