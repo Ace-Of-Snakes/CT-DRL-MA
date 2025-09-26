@@ -225,12 +225,15 @@ def main():
     start_day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     best_sum_reward = -1e18
 
+    carry_trains_m1, carry_trucks_m1 = {}, {}
+    carry_trains_m2, carry_trucks_m2 = {}, {}
+
     try:
         for d in range(args.days):
             day_start = start_day + timedelta(days=d)
 
-            m1.env.reset(day_start, day_index=d)
-            m2.env.reset(day_start, day_index=d)
+            m1.env.reset(day_start, day_index=d, carryover_trains=carry_trains_m1, carryover_trucks=carry_trucks_m1)
+            m2.env.reset(day_start, day_index=d, carryover_trains=carry_trains_m2, carryover_trucks=carry_trucks_m2)
             m1.tracker.reset_day_aggregates()
             m2.tracker.reset_day_aggregates()
 
@@ -309,6 +312,10 @@ def main():
 
             m1.tracker.write_day_summary(day_index=d, date=day_start)
             m2.tracker.write_day_summary(day_index=d, date=day_start)
+
+            # Carry‑Over für nächsten Tag übernehmen
+            carry_trains_m1, carry_trucks_m1 = m1.env.get_carryover()
+            carry_trains_m2, carry_trucks_m2 = m2.env.get_carryover()
 
             m1.agent.save(os.path.join(ckpt_dir, "m1_last.pt"))
             m2.agent.save(os.path.join(ckpt_dir, "m2_last.pt"))

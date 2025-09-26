@@ -166,27 +166,34 @@ class TruckFactory:
         
         return trucks
     
-    def _generate_pickup_trucks(self,
-                               containers: List[Container],
-                               day_key: str,
-                               base_date: Optional[datetime],
-                               parking_spot_prefix: str) -> List[Truck]:
-        """Generate trucks for picking up containers from the terminal."""
+    def _generate_pickup_trucks(
+        self,
+        containers: List[Container],
+        day_key: str,
+        base_date: Optional[datetime]
+    ) -> List[Truck]:
+        """
+        Erzeuge exakt einen Pickup‑LKW pro Container.
+        Keine Bündelung. Ankunftszeit aus Pickup‑KDE (6..22 Uhr) am selben Tag.
+        """
         if not containers:
             return []
-        
-        trucks = []
-        container_groups = self._group_containers_for_pickup(containers)
-        
-        for group in container_groups:
-            truck = self._create_pickup_truck(
-                containers=group,
+        trucks: List[Truck] = []
+        for c in containers:
+            arrival_time = self._sample_arrival_time(
                 day_key=day_key,
-                base_date=base_date,
-                parking_spot_prefix=parking_spot_prefix
+                is_delivery=False,
+                base_date=base_date
             )
-            trucks.append(truck)
-        
+            t = Truck(
+                max_length=TRUCK_LENGTH,
+                arrival_time=arrival_time,
+                parking_spot=None
+            )
+            t.add_pickup_container_id(c.container_id)
+            t.is_pickup_truck = True
+            t.is_delivery_truck = False
+            trucks.append(t)
         return trucks
     
     def _group_containers_for_pickup(self, containers: List[Container]) -> List[List[Container]]:

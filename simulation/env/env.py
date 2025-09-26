@@ -91,6 +91,9 @@ class ContainerTerminalEnv:
         # Terminal‑Truck busy times (env-managed)
         self._tt_busy_until: Dict[str, datetime] = {}
 
+        # --- NEU: einmalig zugelassene LKW merken ---
+        self._admitted_truck_ids: set[str] = set()
+
         # Cranes and zones
         self.num_cranes = max(1, int(num_cranes))
         self.cranes: List[CraneState] = []
@@ -106,23 +109,34 @@ class ContainerTerminalEnv:
         day_start: datetime,
         day_index: int = 0,
         trains_override: Optional[List[Train]] = None,
+        carryover_trains: Optional[Dict[str, Train]] = None,
+        carryover_trucks: Optional[Dict[str, Truck]] = None
     ) -> Tuple[Any, List[Move]]:
+        """
+        Setzt den Tag auf 00:00 zurück, übernimmt physisch anwesende Züge/LKW als Carry‑Over
+        und erzeugt neuen Tagesplan.
+        """
+        # Lazy‑Init für Carry‑Over Felder
+        if not hasattr(self, "_carryover_trains"):
+            self._carryover_trains = {}
+        if not hasattr(self, "_carryover_trucks"):
+            self._carryover_trucks = {}
         self.day_index = day_index
         self.current_time = day_start.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # Plan day and clear state
+        # Tagesplan erstellen und Zustand leeren
         self.day_plan = self.lm.plan_day(self.current_time, trains_override=trains_override)
         self._scheduled_trains = list(self.day_plan.todays_trains)
         self.trains.clear()
         self.trucks.clear()
         self.terminal_trucks.clear()
         self._tt_busy_until.clear()
+        self._admitted_truck_ids.clear()
 
-        # Re-sync RMGC to reflect current env references/track count
-        # (yard/rail instances are typically unchanged, but this keeps layout in sync)
+        # RMGC Layout synchronisieren
         self.rmgc.set_layout(yard=self.yard, rail=self.rail, num_tracks=self.num_tracks)
 
-        # Two terminal trucks per module
+        # Terminal‑Trucks neu
         for i in range(2):
             tt = TerminalTruck()
             if not getattr(tt, "truck_id", None):
@@ -132,6 +146,24 @@ class ContainerTerminalEnv:
         self.cranes = [CraneState(i, None) for i in range(self.num_cranes)]
         self.crane_zones = self._make_crane_zones(overlap_bays=4)
 
+        # Carry‑Over übernehmen (ohne erneute Arrival‑Events)
+        if carryover_trains:
+            for tid, tr in carryover_trains.items():
+                if tr and (tr.departure_time is None or tr.departure_time > self.current_time):
+                    if self.rail.get_slot(tr.train_id) is None:
+                        anchor = self.rail.get_anchor_bay(tr.train_id)
+                        if anchor is None:
+                            anchor = max(0, min(self.yard.n_bays - 1, self.yard.n_bays // 2))
+                        track_id = int(getattr(tr, "rail_track", 0) or 0)
+                        self.rail.slot_train(tr, RailSlot(track_id=track_id, anchor_bay=anchor))
+                    self.trains[tid] = tr
+
+        if carryover_trucks:
+            for tid, tk in carryover_trucks.items():
+                if tk and tk.departure_time is None:
+                    self.trucks[tid] = tk
+
+        # Heutige Plan‑Ankünfte zulassen
         self._admit_arrivals()
         if self.auto_park:
             self._auto_slot_parking()
@@ -148,6 +180,10 @@ class ContainerTerminalEnv:
         agent,
         log_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[Any, List[Move], float, bool, Dict]:
+        """
+        Führt Schritte aus; Tagesende ist strikt 23:59 desselben Tages.
+        Carry‑Over wird gesammelt und in reset() des Folgetages übergeben.
+        """
         reward = 0.0
         info: Dict[str, Any] = {"executed": [], "train_departures": [], "truck_departures": []}
         now = self.current_time
@@ -217,7 +253,6 @@ class ContainerTerminalEnv:
                 continue
             mv = filtered[a_idx]
 
-            # Non-crane moves
             if mv.type in ("SLOT_TRUCK_PARKING", "YARD_TO_TERMINAL_TRUCK"):
                 ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
                 if not ok:
@@ -237,7 +272,7 @@ class ContainerTerminalEnv:
                         "time_s": TT_JOB_SECONDS,
                         "reward": r,
                     }
-                else:  # SLOT_TRUCK_PARKING
+                else:
                     r = 0.5
                     reward += r
                     rec = {
@@ -258,11 +293,9 @@ class ContainerTerminalEnv:
                         pass
                 continue
 
-            # Crane move: use RMGC to build endpoints and cost
             mv_dict = {"type": mv.type, "args": mv.args}
             endpoints = self.rmgc.endpoints_for_move(mv_dict, self.trains, self.trucks, self.yard)
             if endpoints is None:
-                # Preconditions (e.g., truck not parked) or non-crane move: small penalty
                 reward -= 0.1
                 continue
 
@@ -333,8 +366,10 @@ class ContainerTerminalEnv:
         events = self._collect_truck_departures()
         info["truck_departures"].extend(events)
 
+        # Tagesende strikt um 23:59
         done = False
-        if self.current_time >= self.day_plan.last_departure_dt and not self.trains:
+        day_end = self.day_plan.date.replace(hour=23, minute=59, second=0, microsecond=0)
+        if self.current_time >= day_end:
             reward += self.reward_engine.end_of_day_penalty(self.current_time)
             self._rollover_missed_deadlines()
             done = True
@@ -463,10 +498,16 @@ class ContainerTerminalEnv:
             still.append(st)
         self._scheduled_trains = still
 
+        # --- FIX: LKW nur einmal zulassen ---
         for t in self.day_plan.trucks_today:
-            if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
+            if not t or not t.arrival_time:
+                continue
+            if t.truck_id in self._admitted_truck_ids:
+                continue  # bereits zugelassen
+            if t.arrival_time <= self.current_time:
                 t.status = "waiting"
                 self.trucks[t.truck_id] = t
+                self._admitted_truck_ids.add(t.truck_id)
                 if self.stats:
                     self.stats.on_truck_arrival(t)
 
@@ -504,18 +545,37 @@ class ContainerTerminalEnv:
 
         self._scheduled_trains = still
 
+        # --- FIX: LKW nur einmal zulassen ---
         for t in self.day_plan.trucks_today:
-            if t and t.truck_id not in self.trucks and t.arrival_time and t.arrival_time <= self.current_time:
+            if not t or not t.arrival_time:
+                continue
+            if t.truck_id in self._admitted_truck_ids:
+                continue
+            if t.arrival_time <= self.current_time:
                 t.status = "waiting"
                 self.trucks[t.truck_id] = t
+                self._admitted_truck_ids.add(t.truck_id)
                 if self.stats:
                     self.stats.on_truck_arrival(t)
 
         return departed
 
     def _rollover_missed_deadlines(self) -> None:
-        # No rollover via estimated departures; departure_date is authoritative.
-        return None
+        """
+        Sammle physisch anwesende Züge/LKW (nicht departiert) für den nächsten Tag.
+        """
+        self._carryover_trains = {
+            tid: tr for tid, tr in self.trains.items()
+            if tr and (tr.departure_time is None or tr.departure_time > self.current_time)
+        }
+        self._carryover_trucks = {
+            tid: tk for tid, tk in self.trucks.items()
+            if tk and tk.departure_time is None
+        }
+
+    def get_carryover(self) -> Tuple[Dict[str, Train], Dict[str, Truck]]:
+        """Auslesen der Carry‑Over Objekte nach Tagesende."""
+        return dict(getattr(self, "_carryover_trains", {}) or {}), dict(getattr(self, "_carryover_trucks", {}) or {})
 
     # ---- zone/eligibility and move metadata ----
     def _eligible_for_crane(self, mv: Move, crane_id: int, zones: List[Tuple[int, int]]) -> bool:

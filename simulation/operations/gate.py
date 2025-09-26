@@ -165,50 +165,16 @@ class TerminalGate:
         day_of_week: str
     ) -> List[Truck]:
         """
-        Generate pickup trucks for import containers.
-        Reuses self.executor (no per-call thread pools).
+        Erzeuge Pickup‑LKW 1:1 pro Container (keine Bündelung).
         """
         if not containers:
             return []
-
-        # Separate special containers (one per truck) vs. regular (bundle into trucks)
-        container_array = np.array(containers, dtype=object)
-        is_special = np.array(
-            [bool(getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False)) for c in containers],
-            dtype=bool
+        day_key = day_of_week.lower()
+        return self.truck_factory._generate_pickup_trucks(
+            containers=containers,
+            day_key=day_key,
+            base_date=simulation_date
         )
-        special_containers = container_array[is_special].tolist()
-        regular_containers = container_array[~is_special].tolist()
-
-        trucks: List[Truck] = []
-
-        # Special: one truck per container (fast path, sequential is fine)
-        for c in special_containers:
-            t = self._create_single_pickup_truck([c], simulation_date, day_of_week)
-            if t:
-                trucks.append(t)
-
-        # Regular: bundle, then create trucks in batches using self.executor
-        if regular_containers:
-            bundles = self._bundle_containers_vectorized(regular_containers)
-            if bundles:
-                # Keep a bounded number of tasks to avoid flooding the pool
-                batch_size = max(1, len(bundles) // MAX_WORKERS)
-                bundle_batches = [bundles[i:i + batch_size] for i in range(0, len(bundles), batch_size)]
-
-                futures = [
-                    self.executor.submit(self._create_pickup_trucks_batch, batch, simulation_date, day_of_week)
-                    for batch in bundle_batches
-                ]
-                for fut in as_completed(futures):
-                    try:
-                        res = fut.result()
-                        if res:
-                            trucks.extend(res)
-                    except Exception as e:
-                        print(f"Error creating pickup trucks batch: {e}")
-
-        return trucks
 
     
     def _bundle_containers_vectorized(self, containers: List[Container]) -> List[List[Container]]:
@@ -262,30 +228,47 @@ class TerminalGate:
         
         return bundles
     
-    def _create_pickup_trucks_batch(self,
-                                   bundles: List[List[Container]],
-                                   simulation_date: datetime,
-                                   day_of_week: str) -> List[Truck]:
-        """Create pickup trucks for a batch of container bundles."""
-        trucks = []
+    def _create_pickup_trucks_batch(
+        self,
+        bundles: List[List[Container]],
+        simulation_date: datetime,
+        day_of_week: str
+    ) -> List[Truck]:
+        """
+        Erzeuge für jede Containerliste LKWs; gibt die zusammengeführte Liste zurück.
+        """
+        if not bundles:
+            return []
+        trucks: List[Truck] = []
+        day_key = day_of_week.lower()
         for bundle in bundles:
-            truck = self._create_single_pickup_truck(bundle, simulation_date, day_of_week)
-            trucks.append(truck)
-        return [t for t in trucks if t is not None]
+            ts = self.truck_factory._generate_pickup_trucks(
+                containers=bundle,
+                day_key=day_key,
+                base_date=simulation_date
+            )
+            if ts:
+                trucks.extend(ts)
+        return trucks
     
-    def _create_single_pickup_truck(self,
-                                   containers: List[Container],
-                                   simulation_date: datetime,
-                                   day_of_week: str) -> Truck:
-        """Create a single pickup truck."""
-        # Use truck factory to generate pickup truck
-        pickup_trucks = self.truck_factory._generate_pickup_trucks(
+    def _create_single_pickup_truck(
+        self,
+        containers: List[Container],
+        simulation_date: datetime,
+        day_of_week: str
+    ) -> List[Truck]:
+        """
+        Hält Abwärtskompatibilität: erzeugt LKW(s) für die übergebene Containerliste.
+        Gibt Liste (nicht mehr nur den ersten Truck) zurück.
+        """
+        if not containers:
+            return []
+        day_key = day_of_week.lower()
+        return self.truck_factory._generate_pickup_trucks(
             containers=containers,
-            day_key=day_of_week.lower(),
-            base_date=simulation_date,
-            parking_spot_prefix="P"
+            day_key=day_key,
+            base_date=simulation_date
         )
-        return pickup_trucks[0] if pickup_trucks else None
     
     def _process_exports(
         self,
@@ -357,8 +340,7 @@ class TerminalGate:
         trucks = self.truck_factory._generate_delivery_trucks(
             containers=containers,
             day_key=day_of_week.lower(),
-            base_date=arrival_time,
-            parking_spot_prefix="D"
+            base_date=arrival_time
         )
         return trucks
     
@@ -420,8 +402,7 @@ class TerminalGate:
         trucks = self.truck_factory._generate_pickup_trucks(
             containers=containers,
             day_key=day_key,
-            base_date=earliest_time,
-            parking_spot_prefix="P"
+            base_date=earliest_time
         )
         # Enforce 'after' timing
         for i, t in enumerate(trucks or []):
@@ -504,8 +485,7 @@ class TerminalGate:
         return self.truck_factory._generate_pickup_trucks(
             containers=containers,
             day_key=day_key,
-            base_date=simulation_date,
-            parking_spot_prefix="P"
+            base_date=simulation_date
         )
 
     def cleanup(self):
