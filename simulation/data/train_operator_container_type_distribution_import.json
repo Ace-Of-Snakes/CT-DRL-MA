@@ -1,0 +1,916 @@
+{
+    "BOX": {
+        "40GH": {
+            "P_for_operator": 0.5379916419490357,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.001496
+        },
+        "20G": {
+            "P_for_operator": 0.27948749048968474,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.012585
+        },
+        "40G": {
+            "P_for_operator": 0.1526832872060072,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.00455
+        },
+        "45GH": {
+            "P_for_operator": 0.011213902151260875,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40RH": {
+            "P_for_operator": 0.005744781731373565,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.003839
+        },
+        "40O": {
+            "P_for_operator": 0.003837205455888677,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40OH": {
+            "P_for_operator": 0.003296909285375616,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 0.0017421794885931349,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GH": {
+            "P_for_operator": 0.0008710897442965674,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40DC": {
+            "P_for_operator": 0.0008269839344587665,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.026667
+        },
+        "20R": {
+            "P_for_operator": 0.0007939045770804159,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.027778
+        },
+        "40PW": {
+            "P_for_operator": 0.0004079787409996582,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 0.0003748993836213075,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.029412
+        },
+        "20DC": {
+            "P_for_operator": 0.0002646348590268053,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20B": {
+            "P_for_operator": 0.00013231742951340264,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20T": {
+            "P_for_operator": 8.821161967560177e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45G": {
+            "P_for_operator": 5.5132262297251105e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HH": {
+            "P_for_operator": 4.410580983780088e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45DC": {
+            "P_for_operator": 3.307935737835066e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45HC": {
+            "P_for_operator": 2.205290491890044e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20H": {
+            "P_for_operator": 2.205290491890044e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40H": {
+            "P_for_operator": 2.205290491890044e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HC": {
+            "P_for_operator": 1.102645245945022e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20OH": {
+            "P_for_operator": 1.102645245945022e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "26F": {
+            "P_for_operator": 1.102645245945022e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40PH": {
+            "P_for_operator": 1.102645245945022e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "KOMBI": {
+        "30O": {
+            "P_for_operator": 0.31079409581924633,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.191828
+        },
+        "24T": {
+            "P_for_operator": 0.1495011132184382,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.076669
+        },
+        "TRA": {
+            "P_for_operator": 0.11692916632308073,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.00141
+        },
+        "24OT": {
+            "P_for_operator": 0.06539127566586955,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.003783
+        },
+        "24WB": {
+            "P_for_operator": 0.05277480003298425,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30T": {
+            "P_for_operator": 0.047579780654737364,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.809359
+        },
+        "30SI": {
+            "P_for_operator": 0.046755174404221986,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.044092
+        },
+        "22WB": {
+            "P_for_operator": 0.04180753690112971,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.001972
+        },
+        "22T": {
+            "P_for_operator": 0.04040570627525357,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.059184
+        },
+        "30B": {
+            "P_for_operator": 0.03718974189824359,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.055432
+        },
+        "30G": {
+            "P_for_operator": 0.031829801269893626,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.090674
+        },
+        "30WB": {
+            "P_for_operator": 0.024903108765564442,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.172185
+        },
+        "23WB": {
+            "P_for_operator": 0.013358621258349138,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.006173
+        },
+        "40G": {
+            "P_for_operator": 0.008246062505153789,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.14
+        },
+        "45GH": {
+            "P_for_operator": 0.0025562793765976748,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20T": {
+            "P_for_operator": 0.0025562793765976748,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.032258
+        },
+        "23T": {
+            "P_for_operator": 0.0013193700008246063,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45WB": {
+            "P_for_operator": 0.0012369093757730683,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20WB": {
+            "P_for_operator": 0.0011544487507215305,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45G": {
+            "P_for_operator": 0.0009895275006184547,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20G": {
+            "P_for_operator": 0.0009895275006184547,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45DC": {
+            "P_for_operator": 0.0005772243753607652,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40GH": {
+            "P_for_operator": 0.00041230312525768946,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30GH": {
+            "P_for_operator": 0.00032984250020615157,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.5
+        },
+        "MTRA": {
+            "P_for_operator": 0.00016492125010307578,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45HC": {
+            "P_for_operator": 0.00016492125010307578,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HC": {
+            "P_for_operator": 8.246062505153789e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "IGS": {
+        "40HC": {
+            "P_for_operator": 0.6324228980704474,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.000423
+        },
+        "20DC": {
+            "P_for_operator": 0.22956865679619434,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.004191
+        },
+        "40DC": {
+            "P_for_operator": 0.11433000160350633,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40GH": {
+            "P_for_operator": 0.007483029557966754,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40G": {
+            "P_for_operator": 0.0053450211128333956,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20G": {
+            "P_for_operator": 0.0053450211128333956,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20HC": {
+            "P_for_operator": 0.001389705489336683,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40O": {
+            "P_for_operator": 0.0012828050670800149,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40RH": {
+            "P_for_operator": 0.0006414025335400074,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.083333
+        },
+        "20T": {
+            "P_for_operator": 0.0005879523224116735,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 0.00042760168902667166,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20R": {
+            "P_for_operator": 0.0003207012667700037,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45HC": {
+            "P_for_operator": 0.00021380084451333583,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 0.00021380084451333583,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40OH": {
+            "P_for_operator": 0.00016035063338500186,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GH": {
+            "P_for_operator": 0.00016035063338500186,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "23WB": {
+            "P_for_operator": 5.345021112833396e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45G": {
+            "P_for_operator": 5.345021112833396e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "DBI": {
+        "23WB": {
+            "P_for_operator": 0.6853277374725831,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40GH": {
+            "P_for_operator": 0.17111312637084528,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.003081
+        },
+        "20G": {
+            "P_for_operator": 0.08933693268095158,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.01983
+        },
+        "40G": {
+            "P_for_operator": 0.03048549012991395,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.004151
+        },
+        "24WB": {
+            "P_for_operator": 0.006073899105787076,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45GH": {
+            "P_for_operator": 0.00343765817445588,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 0.0029209549519149656,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45WB": {
+            "P_for_operator": 0.0021195377087902816,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "TRA": {
+            "P_for_operator": 0.0015079298127214443,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.006993
+        },
+        "40RH": {
+            "P_for_operator": 0.0014024801754681964,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30O": {
+            "P_for_operator": 0.0013919352117428717,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40O": {
+            "P_for_operator": 0.001328665429390923,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45HC": {
+            "P_for_operator": 0.0008435970980259828,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40OH": {
+            "P_for_operator": 0.0007381474607727349,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45G": {
+            "P_for_operator": 0.0006748776784207862,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GH": {
+            "P_for_operator": 0.0002847140205837692,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30WB": {
+            "P_for_operator": 0.00025307912940779483,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "22WB": {
+            "P_for_operator": 0.00017926438333052135,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HC": {
+            "P_for_operator": 0.00016871941960519654,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20T": {
+            "P_for_operator": 8.435970980259827e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45DC": {
+            "P_for_operator": 8.435970980259827e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HH": {
+            "P_for_operator": 7.38147460772735e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20R": {
+            "P_for_operator": 6.326978235194871e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.166667
+        },
+        "MTRA": {
+            "P_for_operator": 2.1089927450649568e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45GW": {
+            "P_for_operator": 2.1089927450649568e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40PW": {
+            "P_for_operator": 2.1089927450649568e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20WB": {
+            "P_for_operator": 1.0544963725324784e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 1.0544963725324784e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20OH": {
+            "P_for_operator": 1.0544963725324784e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40F": {
+            "P_for_operator": 1.0544963725324784e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "HEL": {
+        "23WB": {
+            "P_for_operator": 0.3052729848055627,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.105979
+        },
+        "MTRA": {
+            "P_for_operator": 0.28499227401493693,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.086524
+        },
+        "40HC": {
+            "P_for_operator": 0.1684264743754829,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.000573
+        },
+        "40GH": {
+            "P_for_operator": 0.08962142673190832,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.000718
+        },
+        "20G": {
+            "P_for_operator": 0.06721607004893124,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.055556
+        },
+        "45WB": {
+            "P_for_operator": 0.016578676281225856,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "24WB": {
+            "P_for_operator": 0.013745815091424156,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.042155
+        },
+        "45HC": {
+            "P_for_operator": 0.011395827968065929,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40RH": {
+            "P_for_operator": 0.009528714911151173,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 0.006824620139067731,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40G": {
+            "P_for_operator": 0.00634174607262426,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.010152
+        },
+        "TRA": {
+            "P_for_operator": 0.004764357455575586,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.040541
+        },
+        "30O": {
+            "P_for_operator": 0.0026075199587947463,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20R": {
+            "P_for_operator": 0.0021890291012104045,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GH": {
+            "P_for_operator": 0.0015773886170486738,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.122449
+        },
+        "20HC": {
+            "P_for_operator": 0.001545197012619109,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.020833
+        },
+        "24JB": {
+            "P_for_operator": 0.0011588977594643318,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.416667
+        },
+        "22WB": {
+            "P_for_operator": 0.001126706155034767,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GG": {
+            "P_for_operator": 0.0009979397373165077,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.193548
+        },
+        "20T": {
+            "P_for_operator": 0.0008047901107391193,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.76
+        },
+        "45DC": {
+            "P_for_operator": 0.0006438320885912954,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45GH": {
+            "P_for_operator": 0.0005150656708730364,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "24T": {
+            "P_for_operator": 0.000418490857584342,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.230769
+        },
+        "40OH": {
+            "P_for_operator": 0.0003541076487252125,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20WB": {
+            "P_for_operator": 0.0003541076487252125,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40WB": {
+            "P_for_operator": 0.0001287664177182591,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30G": {
+            "P_for_operator": 0.0001287664177182591,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30WB": {
+            "P_for_operator": 0.0001287664177182591,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40O": {
+            "P_for_operator": 9.657481328869431e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 9.657481328869431e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45G": {
+            "P_for_operator": 9.657481328869431e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "22T": {
+            "P_for_operator": 9.657481328869431e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.333333
+        },
+        "20B": {
+            "P_for_operator": 6.438320885912955e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.5
+        },
+        "45GW": {
+            "P_for_operator": 3.219160442956477e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "26T": {
+            "P_for_operator": 3.219160442956477e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20RH": {
+            "P_for_operator": 3.219160442956477e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30T": {
+            "P_for_operator": 3.219160442956477e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45R": {
+            "P_for_operator": 3.219160442956477e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "EGS": {
+        "40GH": {
+            "P_for_operator": 0.7136639739495272,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.00566
+        },
+        "20GV": {
+            "P_for_operator": 0.19296762477299767,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.004868
+        },
+        "40G": {
+            "P_for_operator": 0.06597156991671363,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.002848
+        },
+        "20G": {
+            "P_for_operator": 0.01202329513432275,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.049479
+        },
+        "40T": {
+            "P_for_operator": 0.004633978333020226,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HC": {
+            "P_for_operator": 0.004258250360072641,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45GH": {
+            "P_for_operator": 0.0018473292003256309,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20T": {
+            "P_for_operator": 0.0015342225562026426,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.081633
+        },
+        "20GH": {
+            "P_for_operator": 0.0006888346170705743,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.045455
+        },
+        "40RH": {
+            "P_for_operator": 0.0005949026238336778,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.052632
+        },
+        "45G": {
+            "P_for_operator": 0.00046965996618448245,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "22T": {
+            "P_for_operator": 0.00028179597971068947,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.333333
+        },
+        "20DC": {
+            "P_for_operator": 0.0002191746508860918,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 0.00018786398647379298,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30B": {
+            "P_for_operator": 0.00015655332206149415,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40DC": {
+            "P_for_operator": 0.00015655332206149415,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20R": {
+            "P_for_operator": 9.393199323689649e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40OH": {
+            "P_for_operator": 9.393199323689649e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30T": {
+            "P_for_operator": 3.131066441229883e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 1.0
+        },
+        "30G": {
+            "P_for_operator": 3.131066441229883e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "30WB": {
+            "P_for_operator": 3.131066441229883e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 3.131066441229883e-05,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40O": {
+            "P_for_operator": 3.131066441229883e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    },
+    "MET": {
+        "40G": {
+            "P_for_operator": 0.4294441199376947,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.001729
+        },
+        "40HC": {
+            "P_for_operator": 0.3044197819314642,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0006
+        },
+        "20G": {
+            "P_for_operator": 0.2565225856697819,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.075522
+        },
+        "40RH": {
+            "P_for_operator": 0.002640673676012461,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40O": {
+            "P_for_operator": 0.002263434579439252,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20R": {
+            "P_for_operator": 0.0009248442367601246,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.013158
+        },
+        "40OH": {
+            "P_for_operator": 0.0008639992211838006,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20HC": {
+            "P_for_operator": 0.0007666471962616822,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20O": {
+            "P_for_operator": 0.0006814641744548286,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45HC": {
+            "P_for_operator": 0.0006814641744548286,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40R": {
+            "P_for_operator": 0.0005110981308411214,
+            "P_to_be_Reefer": 1.0,
+            "P_to_be_DangerousGoods": 0.02381
+        },
+        "40GH": {
+            "P_for_operator": 0.00012169003115264798,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20B": {
+            "P_for_operator": 4.867601246105919e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "45DC": {
+            "P_for_operator": 3.650700934579439e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20GH": {
+            "P_for_operator": 2.4338006230529594e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "40HH": {
+            "P_for_operator": 2.4338006230529594e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        },
+        "20T": {
+            "P_for_operator": 1.2169003115264797e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 1.0
+        },
+        "40F": {
+            "P_for_operator": 1.2169003115264797e-05,
+            "P_to_be_Reefer": 0.0,
+            "P_to_be_DangerousGoods": 0.0
+        }
+    }
+}
