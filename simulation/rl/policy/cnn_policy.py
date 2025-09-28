@@ -45,13 +45,12 @@ class MoveFeaturizer:
     Cheap features from Move:
     - type one-hot (len(MOVE_TYPES))
     - placement row/bay/tier/start_split normalized (if present), else zeros
-    - placement score normalized (if present), else 0
-    - NEW: parking_delta (SLOT_TRUCK_PARKING only): {-1,0,+1} normalized, else 0
-    Total dim: len(MOVE_TYPES) + 6
+    - parking_delta (SLOT_TRUCK_PARKING only): {-1,0,+1} normalized, else 0
+    Total dim: len(MOVE_TYPES) + 5
     """
     @staticmethod
     def feat_dim() -> int:
-        return len(MOVE_TYPES) + 6
+        return len(MOVE_TYPES) + 5
 
     @staticmethod
     def featurize(moves: List[Move],
@@ -62,7 +61,7 @@ class MoveFeaturizer:
             f = [0.0] * len(MOVE_TYPES)
             f[TYPE_TO_IDX.get(mv.type, 0)] = 1.0
 
-            row = bay = tier = start = score = 0.0
+            row = bay = tier = start = 0.0
             parking_delta = 0.0
 
             pl: PlacementResult = mv.args.get("placement", None)
@@ -71,9 +70,7 @@ class MoveFeaturizer:
                 bay = pl.bay / max(1, n_bays - 1)
                 tier = pl.tier / max(1, n_tiers - 1)
                 start = pl.start_split / max(1, split_factor - 1)
-                score = min(1.0, float(pl.score) / 3.0)
             elif mv.type == "SLOT_TRUCK_PARKING":
-                # spot "P_{bay}_{split}" and explicit preferred/delta
                 spot = mv.args.get("spot", "")
                 try:
                     parts = spot.split("_")
@@ -85,14 +82,13 @@ class MoveFeaturizer:
                     pass
                 try:
                     d = int(mv.args.get("delta_bay", 0))
-                    # restrict to [-1,0,1] and keep as small integer normalized to [-1,1]
                     if d < -1: d = -1
                     if d > +1: d = +1
                     parking_delta = float(d)
                 except Exception:
                     parking_delta = 0.0
 
-            out.append(f + [row, bay, tier, start, score, parking_delta])
+            out.append(f + [row, bay, tier, start, parking_delta])
         if not out:
             return torch.zeros((0, MoveFeaturizer.feat_dim()), dtype=torch.float32)
         return torch.tensor(out, dtype=torch.float32)

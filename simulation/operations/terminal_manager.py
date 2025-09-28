@@ -89,7 +89,7 @@ class TerminalLogisticsManager:
                 if key not in seen:
                     seen.add(key); out.append(d)
 
-        out.sort(key=lambda p: (p.tier, p.score))
+        out.sort(key=lambda p: (p.tier, p.bay, p.row, p.start_split))
         return out
 
     # ----- parking: within ±2 bays of the "work bay" -----

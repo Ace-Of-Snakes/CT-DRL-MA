@@ -16,7 +16,6 @@ class PlacementResult:
     bay: int
     tier: int
     start_split: int
-    score: float = 0.0
 
 
 @dataclass
@@ -146,6 +145,7 @@ class BooleanStorageYard:
         """
         Find all valid placements near target_bay across all tiers.
         Vectorized across rows via a single 2D sliding-window sum per tier.
+        Note: no 'score' attached; results use a neutral deterministic order.
         """
         n_splits = self.container_length_map.get(container.length_ft, 0)
         if n_splits <= 0:
@@ -155,7 +155,6 @@ class BooleanStorageYard:
         target_bay = max(0, min(target_bay, self.n_bays - 1))
         min_split = max(0, target_bay - max_proximity) * self.split_factor
         max_split_excl = min(self.n_bays, target_bay + max_proximity + 1) * self.split_factor
-        # Note: stop_exclusive is the window edge; _find_runs_2d clamps to valid start indices internally.
 
         results: List["PlacementResult"] = []
 
@@ -173,16 +172,13 @@ class BooleanStorageYard:
 
             bays = starts // self.split_factor
             start_splits = starts % self.split_factor
-            center_bays = (starts + n_splits / 2.0) / self.split_factor
-            scores = np.abs(center_bays - target_bay)
 
-            # Build PlacementResult list
-            for r, b, ss, sc in zip(rows.tolist(), bays.tolist(), start_splits.tolist(), scores.tolist()):
-                results.append(
-                    PlacementResult(row=int(r), bay=int(b), tier=int(tier), start_split=int(ss), score=float(sc))
-                )
+            # Build PlacementResult list (no scoring)
+            for r, b, ss in zip(rows.tolist(), bays.tolist(), start_splits.tolist()):
+                results.append(PlacementResult(row=int(r), bay=int(b), tier=int(tier), start_split=int(ss)))
 
-        results.sort(key=lambda p: (p.tier, p.score))
+        # Neutral deterministic ordering: tier -> bay -> row -> start_split
+        results.sort(key=lambda p: (p.tier, p.bay, p.row, p.start_split))
         return results
     
     def _get_available_mask(self, container: "Container", tier: int) -> np.ndarray:

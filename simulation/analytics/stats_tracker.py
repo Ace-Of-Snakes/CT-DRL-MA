@@ -84,8 +84,7 @@ class StatsTracker:
                 "row": int(obj.row),
                 "bay": int(obj.bay),
                 "tier": int(obj.tier),
-                "start_split": int(obj.start_split),
-                "score": float(obj.score),
+                "start_split": int(obj.start_split)
             }
         if isinstance(obj, datetime):
             return obj.isoformat()
