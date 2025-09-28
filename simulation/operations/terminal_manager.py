@@ -63,22 +63,32 @@ class TerminalLogisticsManager:
         return self._zone_anchors["reg"]
 
     def _search_goods_aware(self, container, anchors: Iterable[int]) -> List[PlacementResult]:
+        """
+        Goods-aware search with robust fallback:
+        - Try near the provided anchors (track anchor, goods anchor) within PROXIMITY.
+        - If nothing is found, fall back to a global search centered at the goods anchor
+        with max_proximity = yard.n_bays (i.e., entire yard), for ALL goods types.
+        """
         seen = set()
         out: List[PlacementResult] = []
+
+        # 1) near provided anchors
         for a in anchors:
             dests = self.yard.search_placement_all_tiers(container, target_bay=a, max_proximity=PROXIMITY)
             for d in dests:
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
                     seen.add(key); out.append(d)
-        # Widen search for special goods if nothing found nearby
-        if not out and getattr(container, "goods_type", "") in ("Reefer", "DangerousGoods"):
+
+        # 2) global fallback around goods anchor for any goods type
+        if not out:
             ga = self._goods_anchor(container)
             dests = self.yard.search_placement_all_tiers(container, target_bay=ga, max_proximity=self.yard.n_bays)
             for d in dests:
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
                     seen.add(key); out.append(d)
+
         out.sort(key=lambda p: (p.tier, p.score))
         return out
 
@@ -101,21 +111,21 @@ class TerminalLogisticsManager:
 
     def list_parking_moves_active(self, active_trucks: Dict[str, Truck]) -> List[Move]:
         """
-        Parking suggestions for already-admitted trucks in the env.
-        Only for trucks without a parking_spot.
-        Prefers exact bay (pb-1, pb, pb+1); falls back to any within ±2 bays.
+        Parking suggestions for already-admitted trucks (without a parking_spot).
+        Preferences:
+        - exact preferred bay offsets (-1, 0, +1)
+        - fallback within ±2 bays
+        - final fallback: any free spot in the parking area (prevents deadlock)
         """
         if not self.parking or not active_trucks:
             return []
         moves: List[Move] = []
         PARKING_ALLOWED_OFFSETS = (-1, 0, +1)
 
-        # Trucks admitted to env and not yet parked
         candidates = [t for t in active_trucks.values() if t and not t.parking_spot]
         for t in candidates:
             pb = self._preferred_bay_for_truck(t)
             if pb is None:
-                # fallback: any free
                 free = self.parking.iter_free()
                 if free:
                     spot = free[0]
@@ -127,7 +137,8 @@ class TerminalLogisticsManager:
                     }))
                 continue
 
-            # try exact bay with small offsets first
+            placed = False
+            # exact/offsets first
             for off in PARKING_ALLOWED_OFFSETS:
                 bay = pb + off
                 if bay < 0 or bay >= self.yard.n_bays:
@@ -141,14 +152,14 @@ class TerminalLogisticsManager:
                         "preferred_bay": pb,
                         "delta_bay": off
                     }))
+                    placed = True
                     break
 
-            # Fallback within ±2
-            if not any(m.args.get("truck_id") == t.truck_id for m in moves):
+            # within ±2 bays
+            if not placed:
                 near = self.parking.iter_free_in_bay_range(max(0, pb - 2), min(self.yard.n_bays - 1, pb + 2))
                 if near:
                     spot = near[0]
-                    # spot_bay() may return None if prefixes include underscores; guard it
                     b = self.parking.spot_bay(spot)
                     delta = (b - pb) if b is not None else 0
                     moves.append(Move(SLOT_TRUCK_PARKING, {
@@ -157,7 +168,20 @@ class TerminalLogisticsManager:
                         "preferred_bay": pb,
                         "delta_bay": int(delta)
                     }))
-        # print(len(moves), "parking moves for", len(candidates), "active trucks")
+                    placed = True
+
+            # final fallback: any free spot
+            if not placed:
+                free_any = self.parking.iter_free()
+                if free_any:
+                    spot = free_any[0]
+                    moves.append(Move(SLOT_TRUCK_PARKING, {
+                        "truck_id": t.truck_id,
+                        "spot": spot,
+                        "preferred_bay": pb,
+                        "delta_bay": 0
+                    }))
+
         return moves
 
     # ----- move listing (broad) -----

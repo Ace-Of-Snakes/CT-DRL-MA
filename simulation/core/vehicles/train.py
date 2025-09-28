@@ -229,18 +229,18 @@ class Train:
         return self._total_pickup_ids == 0
     
     def has_space_for_container(self, container: Container) -> bool:
-        """Check space availability - O(1) average case."""
+        """
+        Check real space availability: does any wagon have enough remaining length
+        for this container (with a tiny epsilon for float precision)?
+        """
         if not container:
             return False
-        
-        # if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
-        #     return len(self.empty_wagons) > 0
-        # else:
-            # Check if any wagon with space doesn't have exclusive container
-        # for idx in self.wagons_with_space:
-        #     if not self.wagons[idx].has_exclusive_container():
-        #         return True
-        return len(self.wagons_with_space) > 0
+        need = float(getattr(container, "length_m", getattr(container, "length", 0.0)))
+        eps = 1e-3
+        for w in self.wagons:
+            if w.get_available_length() + eps >= need:
+                return True
+        return False
     
     # Keep existing time/status methods unchanged
     def start_loading(self, current_time: datetime) -> None:

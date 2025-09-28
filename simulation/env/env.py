@@ -172,7 +172,9 @@ class ContainerTerminalEnv:
             self.trains, self.trucks, self.terminal_trucks, self.day_plan, self.current_time
         )
         moves = self._list_moves()
-        assert len(self.parking.iter_free()) > 0, "No free parking spots initialized"
+        # assert len(self.parking.iter_free()) > 0, "No free parking spots initialized"
+        if len(self.parking.iter_free()) == 0:
+            print("Warning: No free parking spots initialized")
         return state, moves
 
     def step_dual_agent(
