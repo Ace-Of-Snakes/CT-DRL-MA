@@ -258,6 +258,7 @@ class ContainerTerminalEnv:
             if mv.type in ("SLOT_TRUCK_PARKING", "YARD_TO_TERMINAL_TRUCK"):
                 ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
                 if not ok:
+                    reward -= 0.5
                     continue
                 if mv.type == "YARD_TO_TERMINAL_TRUCK":
                     r = self.reward_engine.immediate_reward(mv.type, 0.0, TT_JOB_SECONDS)
