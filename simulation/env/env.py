@@ -231,119 +231,146 @@ class ContainerTerminalEnv:
         used_bays, used_cids = set(), set()
 
         for crane in idle:
-            cand = [m for m in all_moves if self._eligible_for_crane(m, crane.id, zones)]
-            if not cand:
-                continue
+                    cand = [m for m in all_moves if self._eligible_for_crane(m, crane.id, zones)]
+                    if not cand:
+                        continue
 
-            filtered = []
-            for mv in cand:
-                cids = self._move_container_ids(mv)
-                bays = self._move_bays(mv)
-                if cids and (used_cids & cids):
-                    continue
-                if bays and (used_bays & bays):
-                    continue
-                filtered.append(mv)
-            if not filtered:
-                continue
+                    filtered = []
+                    for mv in cand:
+                        cids = self._move_container_ids(mv)
+                        bays = self._move_bays(mv)
+                        if cids and (used_cids & cids):
+                            continue
+                        if bays and (used_bays & bays):
+                            continue
+                        filtered.append(mv)
+                    if not filtered:
+                        continue
 
-            state = self.encoder.encode_with_forecast(
-                self.trains, self.trucks, self.terminal_trucks, self.day_plan, now
-            )
-            a_idx = agent.act(state, filtered)
-            if a_idx < 0 or a_idx >= len(filtered):
-                continue
-            mv = filtered[a_idx]
+                    state = self.encoder.encode_with_forecast(
+                        self.trains, self.trucks, self.terminal_trucks, self.day_plan, now
+                    )
+                    a_idx = agent.act(state, filtered)  # Records action with default reward=0.0, success=False
+                    
+                    # Check for invalid action index
+                    if a_idx < 0 or a_idx >= len(filtered):
+                        if hasattr(agent, 'record_outcome'):
+                            agent.record_outcome(False, -1.0)  # Penalty for invalid action
+                        reward -= 1.0
+                        continue
+                    
+                    mv = filtered[a_idx]
 
-            if mv.type in ("SLOT_TRUCK_PARKING", "YARD_TO_TERMINAL_TRUCK"):
-                ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-                if not ok:
-                    reward -= 0.5
-                    continue
-                if mv.type == "YARD_TO_TERMINAL_TRUCK":
-                    r = self.reward_engine.immediate_reward(mv.type, 0.0, TT_JOB_SECONDS)
+                    # Handle non-crane moves (parking, terminal trucks)
+                    if mv.type in ("SLOT_TRUCK_PARKING", "YARD_TO_TERMINAL_TRUCK"):
+                        ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                        if not ok:
+                            if hasattr(agent, 'record_outcome'):
+                                agent.record_outcome(False, -0.5)
+                            reward -= 0.5
+                            continue
+                        
+                        if mv.type == "YARD_TO_TERMINAL_TRUCK":
+                            r = self.reward_engine.immediate_reward(mv.type, 0.0, TT_JOB_SECONDS)
+                            if hasattr(agent, 'record_outcome'):
+                                agent.record_outcome(True, r)
+                            reward += r
+                            tt_id = mv.args.get("terminal_truck_id")
+                            if tt_id:
+                                self._tt_busy_until[tt_id] = now + timedelta(seconds=TT_JOB_SECONDS)
+                            rec = {
+                                "timestamp": now.isoformat(),
+                                "crane_id": crane.id,
+                                "move_type": mv.type,
+                                "args": mv.args,
+                                "distance_m": 0.0,
+                                "time_s": TT_JOB_SECONDS,
+                                "reward": r,
+                            }
+                        else:  # SLOT_TRUCK_PARKING
+                            r = 0.5
+                            if hasattr(agent, 'record_outcome'):
+                                agent.record_outcome(True, r)
+                            reward += r
+                            rec = {
+                                "timestamp": now.isoformat(),
+                                "crane_id": crane.id,
+                                "move_type": mv.type,
+                                "args": mv.args,
+                                "distance_m": 0.0,
+                                "time_s": 0.0,
+                                "reward": r,
+                                "delta_bay": mv.args.get("delta_bay", 0),
+                            }
+                        info["executed"].append(rec)
+                        if log_cb:
+                            try:
+                                log_cb(rec)
+                            except Exception:
+                                pass
+                        continue
+
+                    # Crane moves - check endpoints
+                    mv_dict = {"type": mv.type, "args": mv.args}
+                    endpoints = self.rmgc.endpoints_for_move(mv_dict, self.trains, self.trucks, self.yard)
+                    if endpoints is None:
+                        if hasattr(agent, 'record_outcome'):
+                            agent.record_outcome(False, -0.1)
+                        reward -= 0.1
+                        continue
+
+                    # Execute the move
+                    cost = self.rmgc.estimate_move_cost(mv.type, endpoints[0], endpoints[1])
+                    ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
+                    if not ok:
+                        if hasattr(agent, 'record_outcome'):
+                            agent.record_outcome(False, -0.05)
+                        reward -= 0.05
+                        continue
+
+                    # Success! Calculate and record reward
+                    r = self.reward_engine.immediate_reward(mv.type, cost.distance_m, cost.time_s)
+                    
+                    # Handle first service reward for trucks
+                    if mv.type in ("YARD_TO_TRUCK", "TRAIN_TO_TRUCK"):
+                        tk_id = mv.args.get("truck_id")
+                        if tk_id:
+                            tk = self.trucks.get(tk_id)
+                            if tk and tk.loading_start_time is None:
+                                tk.loading_start_time = now
+                                wait_min = 0.0
+                                if tk.arrival_time:
+                                    wait_min = (now - tk.arrival_time).total_seconds() / 60.0
+                                first_service_reward = self.reward_engine.truck_first_service_reward(wait_min)
+                                r += first_service_reward  # Add to total reward for this action
+                                if self.stats:
+                                    self.stats.on_truck_first_service(truck=tk, wait_minutes=wait_min)
+                    
+                    # Record successful outcome
+                    if hasattr(agent, 'record_outcome'):
+                        agent.record_outcome(True, r)
+                    
                     reward += r
-                    tt_id = mv.args.get("terminal_truck_id")
-                    if tt_id:
-                        self._tt_busy_until[tt_id] = now + timedelta(seconds=TT_JOB_SECONDS)
+                    self.cranes[crane.id].busy_until = now + timedelta(seconds=cost.time_s)
+                    picks.append((crane.id, mv, cost.distance_m, cost.time_s))
+                    used_bays |= self._move_bays(mv)
+                    used_cids |= self._move_container_ids(mv)
+
                     rec = {
                         "timestamp": now.isoformat(),
                         "crane_id": crane.id,
                         "move_type": mv.type,
                         "args": mv.args,
-                        "distance_m": 0.0,
-                        "time_s": TT_JOB_SECONDS,
+                        "distance_m": cost.distance_m,
+                        "time_s": cost.time_s,
                         "reward": r,
                     }
-                else:
-                    r = 0.5
-                    reward += r
-                    rec = {
-                        "timestamp": now.isoformat(),
-                        "crane_id": crane.id,
-                        "move_type": mv.type,
-                        "args": mv.args,
-                        "distance_m": 0.0,
-                        "time_s": 0.0,
-                        "reward": r,
-                        "delta_bay": mv.args.get("delta_bay", 0),
-                    }
-                info["executed"].append(rec)
-                if log_cb:
-                    try:
-                        log_cb(rec)
-                    except Exception:
-                        pass
-                continue
-
-            mv_dict = {"type": mv.type, "args": mv.args}
-            endpoints = self.rmgc.endpoints_for_move(mv_dict, self.trains, self.trucks, self.yard)
-            if endpoints is None:
-                reward -= 0.1
-                continue
-
-            cost = self.rmgc.estimate_move_cost(mv.type, endpoints[0], endpoints[1])
-            ok = self.tlm.execute(mv, self.trains, self.trucks, self.terminal_trucks)
-            if not ok:
-                reward -= 0.05
-                continue
-
-            r = self.reward_engine.immediate_reward(mv.type, cost.distance_m, cost.time_s)
-            reward += r
-            self.cranes[crane.id].busy_until = now + timedelta(seconds=cost.time_s)
-            picks.append((crane.id, mv, cost.distance_m, cost.time_s))
-            used_bays |= self._move_bays(mv)
-            used_cids |= self._move_container_ids(mv)
-
-            rec = {
-                "timestamp": now.isoformat(),
-                "crane_id": crane.id,
-                "move_type": mv.type,
-                "args": mv.args,
-                "distance_m": cost.distance_m,
-                "time_s": cost.time_s,
-                "reward": r,
-            }
-            if mv.type in ("YARD_TO_TRUCK", "TRAIN_TO_TRUCK"):
-                tk_id = mv.args.get("truck_id")
-                if tk_id:
-                    tk = self.trucks.get(tk_id)
-                    if tk and tk.loading_start_time is None:
-                        tk.loading_start_time = now
-                        wait_min = 0.0
-                        if tk.arrival_time:
-                            wait_min = (now - tk.arrival_time).total_seconds() / 60.0
-                        rec["first_service_wait_min"] = wait_min
-                        reward += self.reward_engine.truck_first_service_reward(wait_min)
-                        if self.stats:
-                            self.stats.on_truck_first_service(truck=tk, wait_minutes=wait_min)
-
-            info["executed"].append(rec)
-            if log_cb:
-                try:
-                    log_cb(rec)
-                except Exception:
-                    pass
+                    info["executed"].append(rec)
+                    if log_cb:
+                        try:
+                            log_cb(rec)
+                        except Exception:
+                            pass
 
         if not picks:
             self.current_time += timedelta(minutes=self.step_minutes)

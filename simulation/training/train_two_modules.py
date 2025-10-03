@@ -39,26 +39,53 @@ class Module:
     yard: BooleanStorageYard
     scheduler: TrainScheduler
     tracker: StatsTracker
-    agent: Any  # DQNAgent or PPOAgent
+    agent: Optional[PPOAgent|DQNAgent] # DQNAgent or PPOAgent
 
 class DualActRecorder:
     def __init__(self, agent):
         self.agent = agent
         self.records = []
+        self._last_record_idx = -1
 
     def reset(self):
         self.records.clear()
+        self._last_record_idx = -1
 
     def act(self, state_np, moves):
         if isinstance(self.agent, DQNAgent):
             a_idx = self.agent.act(state_np, moves)
-            self.records.append({"algo": "dqn", "state": state_np, "moves": moves, "a": a_idx})
+            record = {
+                "algo": "dqn", 
+                "state": state_np, 
+                "moves": moves, 
+                "a": a_idx, 
+                "reward": 0.0,  # Will be filled by record_outcome
+                "success": False  # Default to failure
+            }
+            self.records.append(record)
+            self._last_record_idx = len(self.records) - 1
             return a_idx
-        else:
+        else:  # PPO
             a_idx, logp, value = self.agent.act(state_np, moves)
-            self.records.append({"algo": "ppo", "state": state_np, "moves": moves,
-                                 "a": a_idx, "logp": logp, "value": value})
+            record = {
+                "algo": "ppo", 
+                "state": state_np, 
+                "moves": moves,
+                "a": a_idx, 
+                "logp": logp, 
+                "value": value,
+                "reward": 0.0,  # Will be filled by record_outcome
+                "success": False  # Default to failure
+            }
+            self.records.append(record)
+            self._last_record_idx = len(self.records) - 1
             return a_idx
+    
+    def record_outcome(self, success: bool, reward: float):
+        """Record the outcome of the most recent action."""
+        if self._last_record_idx >= 0:
+            self.records[self._last_record_idx]["reward"] = reward
+            self.records[self._last_record_idx]["success"] = success
 
 def jsonable(obj):
     if isinstance(obj, PlacementResult):
@@ -251,44 +278,54 @@ def main():
 
                 if t2 is None or (t1 is not None and t1 <= t2):
                     rec1.reset()
-                    ns, nm, rew, dn, info = m1.env.step_dual_agent(rec1)  # no log_cb needed
+                    ns, nm, rew, dn, info = m1.env.step_dual_agent(rec1)
                     day_reward_m1 += rew
 
                     if rec1.records:
-                        r_exec = [e.get("reward", 0.0) for e in info.get("executed", [])]
                         for k, r in enumerate(rec1.records):
-                            r_k = r_exec[k] if k < len(r_exec) else rew / max(1, len(rec1.records))
+                            r_k = r["reward"]  # Use reward stored in record
                             if isinstance(m1.agent, DQNAgent):
+                                # Determine next state for this action
                                 if k + 1 < len(rec1.records):
-                                    ns_k = rec1.records[k+1]["state"]; nm_k = rec1.records[k+1]["moves"]; dn_k = False
+                                    ns_k = rec1.records[k+1]["state"]
+                                    nm_k = rec1.records[k+1]["moves"]
+                                    dn_k = False
                                 else:
-                                    ns_k = ns; nm_k = nm; dn_k = dn
+                                    ns_k = ns
+                                    nm_k = nm
+                                    dn_k = dn
                                 m1.agent.remember(r["state"], r["moves"], r["a"], r_k, ns_k, nm_k, dn_k)
-                            else:
+                            else:  # PPO
                                 m1.agent.remember(r["state"], r["moves"], r["a"], r.get("logp", 0.0),
                                                   r_k, r.get("value", 0.0), dn)
+                        
                         if isinstance(m1.agent, DQNAgent):
                             m1.agent.optimize()
 
                     done1 = dn
                 else:
+                    # Same logic for m2
                     rec2.reset()
                     ns, nm, rew, dn, info = m2.env.step_dual_agent(rec2)
                     day_reward_m2 += rew
 
                     if rec2.records:
-                        r_exec = [e.get("reward", 0.0) for e in info.get("executed", [])]
                         for k, r in enumerate(rec2.records):
-                            r_k = r_exec[k] if k < len(r_exec) else rew / max(1, len(rec2.records))
+                            r_k = r["reward"]  # Use reward stored in record
                             if isinstance(m2.agent, DQNAgent):
                                 if k + 1 < len(rec2.records):
-                                    ns_k = rec2.records[k+1]["state"]; nm_k = rec2.records[k+1]["moves"]; dn_k = False
+                                    ns_k = rec2.records[k+1]["state"]
+                                    nm_k = rec2.records[k+1]["moves"]
+                                    dn_k = False
                                 else:
-                                    ns_k = ns; nm_k = nm; dn_k = dn
+                                    ns_k = ns
+                                    nm_k = nm
+                                    dn_k = dn
                                 m2.agent.remember(r["state"], r["moves"], r["a"], r_k, ns_k, nm_k, dn_k)
-                            else:
+                            else:  # PPO
                                 m2.agent.remember(r["state"], r["moves"], r["a"], r.get("logp", 0.0),
                                                   r_k, r.get("value", 0.0), dn)
+                        
                         if isinstance(m2.agent, DQNAgent):
                             m2.agent.optimize()
 
