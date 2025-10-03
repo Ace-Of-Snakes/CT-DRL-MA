@@ -1,25 +1,19 @@
 # simulation/core/vehicles/train.py
 from datetime import datetime
-import random
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass
+
 from simulation.core.containers.container import Container
 from simulation.core.vehicles.wagon import Wagon
+from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M
+from simulation.core.enums import TrainStatus
+from simulation.utils.id_generator import IDGenerator
 
-# ==================== TRAIN CONSTANTS ====================
-DEFAULT_NUM_WAGONS = 10
-DEFAULT_WAGON_LENGTH = 24.4
-TRAIN_ID_PREFIX = "TRN"
-TRAIN_ID_MIN_RANDOM = 10000
-TRAIN_ID_MAX_RANDOM = 99999
-WAGON_ID_SEPARATOR = "_W"
-
-# Train statuses
-TRAIN_STATUS_ARRIVING = "arriving"
-TRAIN_STATUS_WAITING = "waiting"
-TRAIN_STATUS_LOADING = "loading"
-TRAIN_STATUS_DEPARTING = "departing"
-TRAIN_STATUS_DEPARTED = "departed"
+# Remove all these constants - now in central files:
+# DEFAULT_NUM_WAGONS = 10  → Keep as default parameter
+# DEFAULT_WAGON_LENGTH = 24.4  → Use STANDARD_VEHICLE_LENGTH_M
+# TRAIN_ID_PREFIX, MIN/MAX_RANDOM → IDGenerator
+# TRAIN_STATUS_* → TrainStatus enum
 
 
 @dataclass
@@ -33,39 +27,41 @@ class Train:
     """
     Optimized train with O(1) container operations.
     Uses hash maps for direct container lookup across all wagons.
-    """ 
-    def __init__(self,
-                 train_id: Optional[str] = None,
-                 num_wagons: int = DEFAULT_NUM_WAGONS,
-                 wagon_length: float = DEFAULT_WAGON_LENGTH,
-                 arrival_time: Optional[datetime] = None,
-                 departure_time: Optional[datetime] = None,
-                 rail_track: Optional[str] = None,
-                 operator: Optional[str] = None,
-                 destination: Optional[str] = None,
-                 scheduled_arrival: Optional[datetime] = None,
-                 scheduled_departure: Optional[datetime] = None):
-        
+    """
+    
+    def __init__(
+        self,
+        train_id: Optional[str] = None,
+        num_wagons: int = 10,
+        wagon_length: float = STANDARD_VEHICLE_LENGTH_M,
+        arrival_time: Optional[datetime] = None,
+        departure_time: Optional[datetime] = None,
+        rail_track: Optional[str] = None,
+        operator: Optional[str] = None,
+        destination: Optional[str] = None,
+        scheduled_arrival: Optional[datetime] = None,
+        scheduled_departure: Optional[datetime] = None
+    ):
         if num_wagons <= 0:
             raise ValueError(f"Number of wagons must be positive, got {num_wagons}")
         if wagon_length <= 0:
             raise ValueError(f"Wagon length must be positive, got {wagon_length}")
         
-        self.train_id = train_id or self._generate_train_id()
+        self.train_id = train_id or IDGenerator.generate_train_id()
         
         # Create wagons
         self.wagons: List[Wagon] = [
-            Wagon(f"{self.train_id}{WAGON_ID_SEPARATOR}{i+1}", wagon_length)
+            Wagon(f"{self.train_id}_W{i+1}", wagon_length)
             for i in range(num_wagons)
         ]
         
         # O(1) lookup structures
-        self.container_locations: Dict[str, ContainerLocation] = {}  # container_id -> location
+        self.container_locations: Dict[str, ContainerLocation] = {}
         self.wagon_by_id: Dict[str, Wagon] = {w.wagon_id: w for w in self.wagons}
         
-        # Track wagons with space for quick placement
-        self.wagons_with_space: Set[int] = set(range(num_wagons))  # wagon indices
-        self.empty_wagons: Set[int] = set(range(num_wagons))  # for exclusive containers
+        # Track wagons with space
+        self.wagons_with_space: Set[int] = set(range(num_wagons))
+        self.empty_wagons: Set[int] = set(range(num_wagons))
         
         # Timing and status
         self.arrival_time = arrival_time
@@ -74,22 +70,17 @@ class Train:
         self.loading_start_time: Optional[datetime] = None
         self.loading_complete_time: Optional[datetime] = None
         self.rail_track = rail_track
-        self.status = TRAIN_STATUS_ARRIVING
+        self.status = TrainStatus.ARRIVING  # Use enum
         
         # Cache for performance
         self._total_containers = 0
         self._total_pickup_ids = 0
-
+        
         # Additional attributes
         self.operator = operator
         self.destination = destination
         self.scheduled_arrival = scheduled_arrival
         self.scheduled_departure = scheduled_departure
-    
-    @staticmethod
-    def _generate_train_id() -> str:
-        """Generate unique train ID."""
-        return f"{TRAIN_ID_PREFIX}{random.randint(TRAIN_ID_MIN_RANDOM, TRAIN_ID_MAX_RANDOM)}"
     
     def find_container(self, container_id: str) -> Tuple[Optional[Wagon], Optional[int]]:
         """Find container - O(1) operation."""
@@ -247,21 +238,21 @@ class Train:
         if not current_time:
             raise ValueError("current_time must be provided")
         self.loading_start_time = current_time
-        self.status = TRAIN_STATUS_LOADING
+        self.status = TrainStatus.LOADING  # Use enum
     
     def complete_loading(self, current_time: datetime) -> None:
         if not current_time:
             raise ValueError("current_time must be provided")
         self.loading_complete_time = current_time
-        self.status = TRAIN_STATUS_DEPARTING
+        self.status = TrainStatus.DEPARTING  # Use enum
     
     def depart(self, current_time: datetime) -> None:
         if not current_time:
             raise ValueError("current_time must be provided")
         self.realised_departure_time = current_time
-        self.status = TRAIN_STATUS_DEPARTED
+        self.status = TrainStatus.DEPARTED  # Use enum
     
-    def get_stats(self) -> Dict[str, any]:
+    def get_stats(self) -> Dict[str, Union[str, int, float, bool, None]]:
         """Get train statistics - mostly O(1) operations."""
         total_capacity = sum(w.length for w in self.wagons)
         used_capacity = sum(w._used_length for w in self.wagons)
@@ -269,12 +260,17 @@ class Train:
         return {
             'train_id': self.train_id,
             'num_wagons': len(self.wagons),
-            'total_containers': self._total_containers,  # O(1)
-            'pickup_containers': self._total_pickup_ids,  # O(1)
+            'total_containers': self._total_containers,
+            'pickup_containers': self._total_pickup_ids,
             'total_capacity': total_capacity,
             'used_capacity': used_capacity,
             'utilization_rate': used_capacity / total_capacity if total_capacity > 0 else 0,
-            'status': self.status,
+            'status': self.status.value,  # Convert enum to string
             'rail_track': self.rail_track,
-            'departed_on_time': True if self.realised_departure_time is not None and self.departure_time is not None and self.realised_departure_time < self.departure_time else False
+            'departed_on_time': (
+                True if self.realised_departure_time is not None 
+                and self.departure_time is not None 
+                and self.realised_departure_time < self.departure_time 
+                else False
+            )
         }
