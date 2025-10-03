@@ -1,38 +1,13 @@
 # simulation/core/vehicles/truck.py
-
 from datetime import datetime
-import random
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Union
 from simulation.core.containers.container import Container
+from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_LENGTH_M
+from simulation.core.enums import TruckStatus
+from simulation.utils.id_generator import IDGenerator
 
-# ==================== TRUCK CONSTANTS ====================
-
-# Physical dimensions (meters)
-TRUCK_MAX_LENGTH_STANDARD = 24.4  # Standard trailer length in meters (80 foot)
-TRUCK_MIN_CONTAINER_LENGTH = 6.1  # Minimum space needed for smallest container
-
-# Truck statuses
-TRUCK_STATUS_ARRIVING = "arriving"     # Scheduled to arrive but not yet at terminal
-TRUCK_STATUS_WAITING = "waiting"       # At terminal waiting to be processed
-TRUCK_STATUS_LOADING = "loading"       # Currently being loaded/unloaded
-TRUCK_STATUS_DEPARTING = "departing"   # Ready to leave
-TRUCK_STATUS_DEPARTED = "departed"     # Has left the terminal
-
-VALID_TRUCK_STATUSES = {
-    TRUCK_STATUS_ARRIVING,
-    TRUCK_STATUS_WAITING,
-    TRUCK_STATUS_LOADING,
-    TRUCK_STATUS_DEPARTING,
-    TRUCK_STATUS_DEPARTED
-}
-
-# Special container types that require exclusive truck usage
+# Special container types (keep here - domain logic)
 EXCLUSIVE_CONTAINER_TYPES = {"Trailer", "Swap Body"}
-
-# ID generation bounds
-TRUCK_ID_MIN_RANDOM = 10000
-TRUCK_ID_MAX_RANDOM = 99999
-TRUCK_ID_PREFIX = "TRK"
 
 
 class Truck:
@@ -50,14 +25,15 @@ class Truck:
         pickup_container_ids: IDs of containers to pick up
     """
     
-    def __init__(self, 
-                 truck_id: Optional[str] = None,
-                 max_length: float = TRUCK_MAX_LENGTH_STANDARD,
-                 containers: Optional[List[Container]] = None,
-                 arrival_time: Optional[datetime] = None,
-                 parking_spot: Optional[str] = None,
-                 prefix: str = TRUCK_ID_PREFIX
-                 ):
+    def __init__(
+        self,
+        truck_id: Optional[str] = None,
+        max_length: float = STANDARD_VEHICLE_LENGTH_M,
+        containers: Optional[List[Container]] = None,
+        arrival_time: Optional[datetime] = None,
+        parking_spot: Optional[str] = None,
+        prefix: str = None
+    ):
         """
         Initialize a new truck.
         
@@ -67,13 +43,13 @@ class Truck:
             containers: Initial containers on the truck
             arrival_time: When the truck arrives at terminal
             parking_spot: Assigned parking spot
+            prefix: Custom ID prefix (for subclasses)
         """
-        # Validate max_length
         if max_length <= 0:
             raise ValueError(f"max_length must be positive, got {max_length}")
         
         # Core attributes
-        self.truck_id = truck_id or self._generate_truck_id(prefix)
+        self.truck_id = truck_id or IDGenerator.generate_truck_id(prefix)
         self.max_length = max_length
         self.parking_spot = parking_spot
         
@@ -85,25 +61,19 @@ class Truck:
             else:
                 self.containers = [containers]
         
-        # Time tracking - no datetime.now() usage
+        # Time tracking
         self.arrival_time = arrival_time
         self.departure_time: Optional[datetime] = None
         self.loading_start_time: Optional[datetime] = None
         self.loading_complete_time: Optional[datetime] = None
         
         # Status
-        self.status = TRUCK_STATUS_ARRIVING
+        self.status = TruckStatus.ARRIVING
         
         # Purpose tracking
         self.pickup_container_ids: Set[str] = set()
         self.is_pickup_truck = len(self.pickup_container_ids) > 0
         self.is_delivery_truck = len(self.containers) > 0
-    
-    @staticmethod
-    def _generate_truck_id(prefix: str) -> str:
-        """Generate a unique truck ID."""
-        random_num = random.randint(TRUCK_ID_MIN_RANDOM, TRUCK_ID_MAX_RANDOM)
-        return f"{prefix}{random_num}"
     
     def add_container(self, container: Container) -> bool:
         """
@@ -115,14 +85,13 @@ class Truck:
         Returns:
             True if container was added successfully, False otherwise
         """
-        # Validate container
         if not container:
             return False
         
         # Special handling for exclusive container types
         if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
             if self.containers:
-                return False  # Truck must be empty for exclusive types
+                return False
             self.containers.append(container)
             return True
         
@@ -163,59 +132,35 @@ class Truck:
         return None
     
     def start_loading(self, current_time: datetime) -> None:
-        """
-        Mark the truck as being loaded.
-        
-        Args:
-            current_time: Current simulation time
-        """
+        """Mark the truck as being loaded."""
         if not current_time:
             raise ValueError("current_time must be provided")
-        
         self.loading_start_time = current_time
-        self.status = TRUCK_STATUS_LOADING
+        self.status = TruckStatus.LOADING
     
     def complete_loading(self, current_time: datetime) -> None:
-        """
-        Mark the truck as finished loading.
-        
-        Args:
-            current_time: Current simulation time
-        """
+        """Mark the truck as finished loading."""
         if not current_time:
             raise ValueError("current_time must be provided")
-        
         self.loading_complete_time = current_time
-        self.status = TRUCK_STATUS_DEPARTING
+        self.status = TruckStatus.DEPARTING
     
     def depart(self, current_time: datetime) -> None:
-        """
-        Mark the truck as departed.
-        
-        Args:
-            current_time: Current simulation time
-        """
+        """Mark the truck as departed."""
         if not current_time:
             raise ValueError("current_time must be provided")
-        
         self.departure_time = current_time
-        self.status = TRUCK_STATUS_DEPARTED
+        self.status = TruckStatus.DEPARTED
     
     def add_pickup_container_id(self, container_id: str) -> None:
         """Add a container ID to be picked up."""
         if not container_id:
             raise ValueError("container_id cannot be empty")
-        
         self.pickup_container_ids.add(container_id)
         self.is_pickup_truck = True
     
     def remove_pickup_container_id(self, container_id: str) -> bool:
-        """
-        Remove a container ID from the pickup list.
-        
-        Returns:
-            True if removed, False if not in list
-        """
+        """Remove a container ID from the pickup list."""
         if container_id in self.pickup_container_ids:
             self.pickup_container_ids.remove(container_id)
             return True
@@ -231,36 +176,18 @@ class Truck:
         return len(self.containers) > 0
     
     def is_full(self) -> bool:
-        """
-        Check if the truck is effectively full.
-        
-        Returns:
-            True if less than minimum container space remains
-        """
-        return self.get_available_length() < TRUCK_MIN_CONTAINER_LENGTH
+        """Check if the truck is effectively full."""
+        return self.get_available_length() < MIN_CONTAINER_LENGTH_M
     
     def is_ready_to_depart(self) -> bool:
-        """
-        Check if the truck is ready to depart.
-        
-        Returns:
-            True if all pickup/delivery operations are complete
-        """
+        """Check if the truck is ready to depart."""
         if self.is_pickup_truck:
             return len(self.pickup_container_ids) == 0
         else:
             return len(self.containers) == 0
     
     def can_accommodate_container(self, container: Container) -> bool:
-        """
-        Check if truck can accommodate a specific container.
-        
-        Args:
-            container: Container to check
-            
-        Returns:
-            True if container can be added
-        """
+        """Check if truck can accommodate a specific container."""
         if not container:
             return False
         
@@ -278,22 +205,15 @@ class Truck:
         current_length = sum(c.length for c in self.containers)
         return current_length + container.length <= self.max_length
     
-    def get_stats(self) -> Dict[str, any]:
-        """
-        Get comprehensive statistics about the truck.
-        
-        Returns:
-            Dictionary containing truck statistics
-        """
-        stats = {
+    def get_stats(self) -> Dict[str, Union[str, datetime, None]]:
+        """Get comprehensive statistics about the truck."""
+        return {
             'parking_spot': self.parking_spot,
             'arrival_time': self.arrival_time,
             'loading_start_time': self.loading_start_time,
             'loading_complete_time': self.loading_complete_time,
             'departure_time': self.departure_time
         }
-
-        return stats
     
     def __str__(self) -> str:
         """String representation of the truck."""
@@ -304,9 +224,11 @@ class Truck:
         else:
             status_str = f"Carrying {len(self.containers)} containers"
         
-        return f"Truck {self.truck_id}: {status_str}, status: {self.status}"
+        return f"Truck {self.truck_id}: {status_str}, status: {self.status.value}"
     
     def __repr__(self) -> str:
         """Developer-friendly representation."""
-        return (f"Truck(id={self.truck_id}, containers={len(self.containers)}, "
-                f"status={self.status}, parking={self.parking_spot})")
+        return (
+            f"Truck(id={self.truck_id}, containers={len(self.containers)}, "
+            f"status={self.status.value}, parking={self.parking_spot})"
+        )

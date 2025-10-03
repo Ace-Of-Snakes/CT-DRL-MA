@@ -1,11 +1,13 @@
 # simulation/core/vehicles/wagon.py
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 from collections import OrderedDict
 from simulation.core.containers.container import Container
+from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_LENGTH_M
 
-# ==================== WAGON CONSTANTS ====================
-WAGON_LENGTH_STANDARD = 24.4
-MIN_CONTAINER_LENGTH = 6
+# Removed constants - now in central files
+# WAGON_LENGTH_STANDARD → STANDARD_VEHICLE_LENGTH_M
+# MIN_CONTAINER_LENGTH → MIN_CONTAINER_LENGTH_M
+
 
 class Wagon:
     """
@@ -13,11 +15,22 @@ class Wagon:
     Uses OrderedDict to maintain insertion order while having O(1) lookups.
     """
     
-    def __init__(self, wagon_id: str, length: float = WAGON_LENGTH_STANDARD):
+    def __init__(
+        self,
+        wagon_id: str,
+        length: float = STANDARD_VEHICLE_LENGTH_M
+    ):
+        """
+        Initialize a wagon.
+        
+        Args:
+            wagon_id: Unique identifier for this wagon
+            length: Length capacity in meters
+        """
         self.wagon_id = wagon_id
         self.length = length
-        self.containers: OrderedDict[str, Container] = OrderedDict()  # O(1) lookup by ID
-        self.pickup_container_ids: Set[str] = set()  # O(1) membership tests
+        self.containers: OrderedDict[str, Container] = OrderedDict()
+        self.pickup_container_ids: Set[str] = set()
         self._used_length: float = 0.0  # Cache for performance
     
     def add_container(self, container: Container) -> bool:
@@ -64,15 +77,17 @@ class Wagon:
     
     def is_full(self) -> bool:
         """Check if full - O(1) operation."""
-        return self.get_available_length() < MIN_CONTAINER_LENGTH
+        return self.get_available_length() < MIN_CONTAINER_LENGTH_M
     
     def get_container_list(self) -> List[Container]:
         """Get containers as list - O(n) but only when needed."""
         return list(self.containers.values())
     
     def __str__(self) -> str:
-        return (f"Wagon {self.wagon_id}: {len(self.containers)} containers, "
-                f"{self.get_available_length():.2f}m available")
+        return (
+            f"Wagon {self.wagon_id}: {len(self.containers)} containers, "
+            f"{self.get_available_length():.2f}m available"
+        )
     
     def __repr__(self) -> str:
         return f"Wagon(id={self.wagon_id}, containers={len(self.containers)})"
