@@ -1,4 +1,4 @@
-# simulation/operations/terminal_manager.py
+# simulation/operations/terminal_manager.py (COMPLETE)
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Iterable
 from datetime import datetime
@@ -7,53 +7,73 @@ import numpy as np
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
-
 from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
 from simulation.core.facilities.railyard import BooleanRailYard
 from simulation.core.facilities.parking import ParkingArea
-from simulation.operations.gate import TerminalGate
+from simulation.core.enums import MoveType
+from simulation.config.operations_config import OperationsDefaults
 
-YARD_TO_YARD = "YARD_TO_YARD"
-TRAIN_TO_YARD = "TRAIN_TO_YARD"
-YARD_TO_TRAIN = "YARD_TO_TRAIN"
-TRUCK_TO_YARD = "TRUCK_TO_YARD"
-YARD_TO_TRUCK = "YARD_TO_TRUCK"
-TRAIN_TO_TRUCK = "TRAIN_TO_TRUCK"
-TRUCK_TO_TRAIN = "TRUCK_TO_TRAIN"
-YARD_TO_TERMINAL_TRUCK = "YARD_TO_TERMINAL_TRUCK"
-SLOT_TRUCK_PARKING = "SLOT_TRUCK_PARKING"
+PROXIMITY = OperationsDefaults.PROXIMITY_SEARCH_BAYS
 
-PROXIMITY = 3
 
 @dataclass(frozen=True)
 class Move:
-    type: str
+    """Represents a container move operation."""
+    type: MoveType
     args: Dict[str, Any]
 
+
 class TerminalLogisticsManager:
-    def __init__(self, yard: BooleanStorageYard, rail: BooleanRailYard, parking: Optional[ParkingArea] = None):
+    """
+    Manages terminal logistics operations.
+    
+    Generates and executes container moves between:
+    - Yard storage
+    - Trains
+    - Trucks
+    - Terminal trucks
+    """
+    
+    def __init__(
+        self,
+        yard: BooleanStorageYard,
+        rail: BooleanRailYard,
+        parking: Optional[ParkingArea] = None
+    ):
+        """
+        Initialize logistics manager.
+        
+        Args:
+            yard: Yard storage facility
+            rail: Rail yard for train positioning
+            parking: Truck parking area (optional)
+        """
         self.yard = yard
         self.rail = rail
         self.parking = parking
         self._zone_anchors = self._compute_zone_anchors()
-
-    # ----- anchors -----
+    
+    # ----- Zone Anchors -----
+    
     def _center_bay_from_mask(self, mask2d: np.ndarray) -> int:
+        """Compute center bay from a 2D boolean mask."""
         cols = np.where(mask2d.any(axis=0))[0]
         if cols.size == 0:
             return self.yard.n_bays // 2
         c = int(round(cols.mean()))
         return min(max(c // self.yard.split_factor, 0), self.yard.n_bays - 1)
-
+    
     def _compute_zone_anchors(self) -> Dict[str, int]:
+        """Compute anchor bays for different container types."""
         return {
             "reefer": self._center_bay_from_mask(self.yard.reefer_mask[0]),
             "dg": self._center_bay_from_mask(self.yard.dangerous_mask[0]),
             "sb": self._center_bay_from_mask(self.yard.swapbody_mask[0]),
             "reg": self.yard.n_bays // 2
         }
-
+    
     def _goods_anchor(self, container) -> int:
+        """Get anchor bay for a container based on its goods type."""
         if container.goods_type == "Reefer":
             return self._zone_anchors["reefer"]
         if container.goods_type == "DangerousGoods":
@@ -61,40 +81,60 @@ class TerminalLogisticsManager:
         if getattr(container, "is_swap_body", False) or getattr(container, "is_trailer", False):
             return self._zone_anchors["sb"]
         return self._zone_anchors["reg"]
-
-    def _search_goods_aware(self, container, anchors: Iterable[int]) -> List[PlacementResult]:
+    
+    def _search_goods_aware(
+        self,
+        container,
+        anchors: Iterable[int]
+    ) -> List[PlacementResult]:
         """
-        Goods-aware search with robust fallback:
-        - Try near the provided anchors (track anchor, goods anchor) within PROXIMITY.
-        - If nothing is found, fall back to a global search centered at the goods anchor
-        with max_proximity = yard.n_bays (i.e., entire yard), for ALL goods types.
+        Goods-aware placement search with robust fallback.
+        
+        Args:
+            container: Container to place
+            anchors: Bay anchors to search near
+            
+        Returns:
+            List of possible placements
         """
         seen = set()
         out: List[PlacementResult] = []
-
-        # 1) near provided anchors
-        for a in anchors:
-            dests = self.yard.search_placement_all_tiers(container, target_bay=a, max_proximity=PROXIMITY)
+        
+        # 1) Search near provided anchors
+        for anchor in anchors:
+            dests = self.yard.search_placement_all_tiers(
+                container,
+                target_bay=anchor,
+                max_proximity=PROXIMITY
+            )
             for d in dests:
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
-                    seen.add(key); out.append(d)
-
-        # 2) global fallback around goods anchor for any goods type
+                    seen.add(key)
+                    out.append(d)
+        
+        # 2) Global fallback if nothing found
         if not out:
-            ga = self._goods_anchor(container)
-            dests = self.yard.search_placement_all_tiers(container, target_bay=ga, max_proximity=self.yard.n_bays)
+            goods_anchor = self._goods_anchor(container)
+            dests = self.yard.search_placement_all_tiers(
+                container,
+                target_bay=goods_anchor,
+                max_proximity=self.yard.n_bays
+            )
             for d in dests:
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
-                    seen.add(key); out.append(d)
-
+                    seen.add(key)
+                    out.append(d)
+        
         out.sort(key=lambda p: (p.tier, p.bay, p.row, p.start_split))
         return out
-
-    # ----- parking: within ±2 bays of the "work bay" -----
+    
+    # ----- Parking -----
+    
     def _preferred_bay_for_truck(self, truck: Truck) -> Optional[int]:
-        # pickup trucks: median of target container bays
+        """Determine preferred parking bay for a truck."""
+        # Pickup trucks: median of target container bays
         if getattr(truck, "pickup_container_ids", None):
             bays = []
             for cid in truck.pickup_container_ids:
@@ -103,338 +143,549 @@ class TerminalLogisticsManager:
                     bays.append(pl.bay)
             if bays:
                 bays.sort()
-                return bays[len(bays)//2]
-        # delivery trucks: use goods anchor of first container
+                return bays[len(bays) // 2]
+        
+        # Delivery trucks: use goods anchor of first container
         if truck.containers:
             return self._goods_anchor(truck.containers[0])
+        
         return None
-
-    def list_parking_moves_active(self, active_trucks: Dict[str, Truck]) -> List[Move]:
+    
+    def list_parking_moves_active(
+        self,
+        active_trucks: Dict[str, Truck]
+    ) -> List[Move]:
         """
-        Parking suggestions for already-admitted trucks (without a parking_spot).
-        Preferences:
-        - exact preferred bay offsets (-1, 0, +1)
-        - fallback within ±2 bays
-        - final fallback: any free spot in the parking area (prevents deadlock)
+        Generate parking moves for trucks without parking spots.
+        
+        Args:
+            active_trucks: Currently active trucks in terminal
+            
+        Returns:
+            List of parking slot moves
         """
         if not self.parking or not active_trucks:
             return []
+        
         moves: List[Move] = []
         PARKING_ALLOWED_OFFSETS = (-1, 0, +1)
-
+        
         candidates = [t for t in active_trucks.values() if t and not t.parking_spot]
-        for t in candidates:
-            pb = self._preferred_bay_for_truck(t)
-            if pb is None:
+        
+        for truck in candidates:
+            preferred_bay = self._preferred_bay_for_truck(truck)
+            
+            if preferred_bay is None:
+                # Fallback: any free spot
                 free = self.parking.iter_free()
                 if free:
                     spot = free[0]
-                    moves.append(Move(SLOT_TRUCK_PARKING, {
-                        "truck_id": t.truck_id,
-                        "spot": spot,
-                        "preferred_bay": None,
-                        "delta_bay": 0
-                    }))
+                    moves.append(Move(
+                        MoveType.SLOT_TRUCK_PARKING,
+                        {
+                            "truck_id": truck.truck_id,
+                            "spot": spot,
+                            "preferred_bay": None,
+                            "delta_bay": 0
+                        }
+                    ))
                 continue
-
+            
             placed = False
-            # exact/offsets first
-            for off in PARKING_ALLOWED_OFFSETS:
-                bay = pb + off
+            
+            # Try exact/offset bays first
+            for offset in PARKING_ALLOWED_OFFSETS:
+                bay = preferred_bay + offset
                 if bay < 0 or bay >= self.yard.n_bays:
                     continue
+                
                 near_exact = self.parking.iter_free_in_bay_range(bay, bay)
                 if near_exact:
                     spot = near_exact[0]
-                    moves.append(Move(SLOT_TRUCK_PARKING, {
-                        "truck_id": t.truck_id,
-                        "spot": spot,
-                        "preferred_bay": pb,
-                        "delta_bay": off
-                    }))
+                    moves.append(Move(
+                        MoveType.SLOT_TRUCK_PARKING,
+                        {
+                            "truck_id": truck.truck_id,
+                            "spot": spot,
+                            "preferred_bay": preferred_bay,
+                            "delta_bay": offset
+                        }
+                    ))
                     placed = True
                     break
-
-            # within ±2 bays
+            
+            # Try within ±2 bays
             if not placed:
-                near = self.parking.iter_free_in_bay_range(max(0, pb - 2), min(self.yard.n_bays - 1, pb + 2))
+                near = self.parking.iter_free_in_bay_range(
+                    max(0, preferred_bay - 2),
+                    min(self.yard.n_bays - 1, preferred_bay + 2)
+                )
                 if near:
                     spot = near[0]
-                    b = self.parking.spot_bay(spot)
-                    delta = (b - pb) if b is not None else 0
-                    moves.append(Move(SLOT_TRUCK_PARKING, {
-                        "truck_id": t.truck_id,
-                        "spot": spot,
-                        "preferred_bay": pb,
-                        "delta_bay": int(delta)
-                    }))
+                    bay_num = self.parking.spot_bay(spot)
+                    delta = (bay_num - preferred_bay) if bay_num is not None else 0
+                    moves.append(Move(
+                        MoveType.SLOT_TRUCK_PARKING,
+                        {
+                            "truck_id": truck.truck_id,
+                            "spot": spot,
+                            "preferred_bay": preferred_bay,
+                            "delta_bay": int(delta)
+                        }
+                    ))
                     placed = True
-
-            # final fallback: any free spot
+            
+            # Final fallback: any free spot
             if not placed:
                 free_any = self.parking.iter_free()
                 if free_any:
                     spot = free_any[0]
-                    moves.append(Move(SLOT_TRUCK_PARKING, {
-                        "truck_id": t.truck_id,
-                        "spot": spot,
-                        "preferred_bay": pb,
-                        "delta_bay": 0
-                    }))
-
+                    moves.append(Move(
+                        MoveType.SLOT_TRUCK_PARKING,
+                        {
+                            "truck_id": truck.truck_id,
+                            "spot": spot,
+                            "preferred_bay": preferred_bay,
+                            "delta_bay": 0
+                        }
+                    ))
+        
         return moves
-
-    # ----- move listing (broad) -----
-    def list_train_to_yard(self, train: Train, top_per_container: Optional[int] = None) -> List[Move]:
+    
+    # ----- Move Listing -----
+    
+    def list_train_to_yard(
+        self,
+        train: Train,
+        top_per_container: Optional[int] = None
+    ) -> List[Move]:
+        """
+        Generate moves to unload import containers from train to yard.
+        
+        Args:
+            train: Train to unload from
+            top_per_container: Limit placements per container (None = all)
+            
+        Returns:
+            List of TRAIN_TO_YARD moves
+        """
         anchor_track = self.rail.get_anchor_bay(train.train_id)
         out: List[Move] = []
-        for c in train.get_all_containers():
-            if getattr(c, "direction", "Import") != "Import":
+        
+        for container in train.get_all_containers():
+            if getattr(container, "direction", "Import") != "Import":
                 continue
-            anchors = ([anchor_track] if anchor_track is not None else []) + [self._goods_anchor(c)]
-            dests = self._search_goods_aware(c, anchors)
-            if top_per_container is None:
-                take = dests
-            else:
-                take = dests[:top_per_container]
-            for d in take:
-                out.append(Move(TRAIN_TO_YARD, {"train_id": train.train_id, "container_id": c.container_id, "placement": d}))
-        return out
-
-    def list_yard_to_train(self, train: Train) -> List[Move]:
-        out: List[Move] = []
-        for cid in train.get_all_pickup_container_ids():
-            if cid not in self.yard.accessible_containers:
-                continue
-            cont = self.yard.get_container(cid)
-            if cont and train.has_space_for_container(cont):
-                out.append(Move(YARD_TO_TRAIN, {"train_id": train.train_id, "container_id": cid}))
-        return out
-
-    def list_yard_to_yard(self) -> List[Move]:
-        mv = self.yard.find_moveable_containers(max_proximity=PROXIMITY)
-        out: List[Move] = []
-        for cid, dests in mv.items():
-            for d in dests:
-                out.append(Move(YARD_TO_YARD, {"container_id": cid, "placement": d}))
-        return out
-
-    def list_truck_to_yard(self, truck: Truck, top_per_container: Optional[int] = None) -> List[Move]:
-        # Require the truck to be parked before any crane work
-        if not truck or not truck.parking_spot:
-            return []
-        if not truck.containers:
-            return []
-        out: List[Move] = []
-        for c in truck.containers:
-            dests = self._search_goods_aware(c, [self._goods_anchor(c)])
+            
+            anchors = ([anchor_track] if anchor_track is not None else []) + [
+                self._goods_anchor(container)
+            ]
+            dests = self._search_goods_aware(container, anchors)
+            
             take = dests if top_per_container is None else dests[:top_per_container]
-            for d in take:
-                out.append(Move(TRUCK_TO_YARD, {"truck_id": truck.truck_id, "container_id": c.container_id, "placement": d}))
+            
+            for dest in take:
+                out.append(Move(
+                    MoveType.TRAIN_TO_YARD,
+                    {
+                        "train_id": train.train_id,
+                        "container_id": container.container_id,
+                        "placement": dest
+                    }
+                ))
+        
         return out
-
-    def list_yard_to_truck(self, truck: Truck) -> List[Move]:
-        # Require the truck to be parked before any crane work
-        if not truck or not truck.parking_spot:
-            return []
-        if not truck.pickup_container_ids:
-            return []
+    
+    def list_yard_to_train(self, train: Train) -> List[Move]:
+        """
+        Generate moves to load export containers from yard to train.
+        
+        Args:
+            train: Train to load onto
+            
+        Returns:
+            List of YARD_TO_TRAIN moves
+        """
         out: List[Move] = []
-        for cid in list(truck.pickup_container_ids):
-            if cid in self.yard.accessible_containers:
-                c = self.yard.get_container(cid)
-                if c and truck.can_accommodate_container(c):
-                    out.append(Move(YARD_TO_TRUCK, {"truck_id": truck.truck_id, "container_id": cid}))
+        
+        for container_id in train.get_all_pickup_container_ids():
+            if container_id not in self.yard.accessible_containers:
+                continue
+            
+            container = self.yard.get_container(container_id)
+            if container and train.has_space_for_container(container):
+                out.append(Move(
+                    MoveType.YARD_TO_TRAIN,
+                    {
+                        "train_id": train.train_id,
+                        "container_id": container_id
+                    }
+                ))
+        
         return out
-
-    def list_train_to_truck(self, train: Train, truck: Truck) -> List[Move]:
-        # Require the truck to be parked before any crane work
-        if not truck or not truck.parking_spot:
-            return []
-        if not truck.pickup_container_ids:
-            return []
+    
+    def list_yard_to_yard(self) -> List[Move]:
+        """
+        Generate moves to relocate containers within yard.
+        
+        Returns:
+            List of YARD_TO_YARD moves
+        """
+        moveable = self.yard.find_moveable_containers(max_proximity=PROXIMITY)
         out: List[Move] = []
-        want = truck.pickup_container_ids
-        for c in train.get_all_containers():
-            if c.container_id in want and truck.can_accommodate_container(c):
-                out.append(Move(TRAIN_TO_TRUCK, {"train_id": train.train_id, "truck_id": truck.truck_id, "container_id": c.container_id}))
+        
+        for container_id, dests in moveable.items():
+            for dest in dests:
+                out.append(Move(
+                    MoveType.YARD_TO_YARD,
+                    {
+                        "container_id": container_id,
+                        "placement": dest
+                    }
+                ))
+        
         return out
-
-    def list_truck_to_train(self, truck: Truck, train: Train) -> List[Move]:
-        # Require the truck to be parked before any crane work
+    
+    def list_truck_to_yard(
+        self,
+        truck: Truck,
+        top_per_container: Optional[int] = None
+    ) -> List[Move]:
+        """
+        Generate moves to unload delivery truck to yard.
+        
+        Args:
+            truck: Truck to unload from
+            top_per_container: Limit placements per container
+            
+        Returns:
+            List of TRUCK_TO_YARD moves
+        """
+        # Require parked truck
         if not truck or not truck.parking_spot:
             return []
         if not truck.containers:
             return []
+        
         out: List[Move] = []
-        want = train.get_all_pickup_container_ids()
-        if not want:
-            return out
-        for c in truck.containers:
-            if c.container_id in want and train.has_space_for_container(c):
-                out.append(Move(TRUCK_TO_TRAIN, {"train_id": train.train_id, "truck_id": truck.truck_id, "container_id": c.container_id}))
+        
+        for container in truck.containers:
+            dests = self._search_goods_aware(container, [self._goods_anchor(container)])
+            take = dests if top_per_container is None else dests[:top_per_container]
+            
+            for dest in take:
+                out.append(Move(
+                    MoveType.TRUCK_TO_YARD,
+                    {
+                        "truck_id": truck.truck_id,
+                        "container_id": container.container_id,
+                        "placement": dest
+                    }
+                ))
+        
         return out
-
-    def list_yard_to_terminal_truck(self, ttr: TerminalTruck) -> List[Move]:
+    
+    def list_yard_to_truck(self, truck: Truck) -> List[Move]:
         """
-        Listet alle möglichen TT‑Pickups (nur SwapBody/Trailer, nur wenn TT frei).
-        Achtung: keine Kranzeit – die Env blockt die Ressource für 5 Minuten.
+        Generate moves to load pickup truck from yard.
+        
+        Args:
+            truck: Pickup truck to load
+            
+        Returns:
+            List of YARD_TO_TRUCK moves
+        """
+        # Require parked truck
+        if not truck or not truck.parking_spot:
+            return []
+        if not truck.pickup_container_ids:
+            return []
+        
+        out: List[Move] = []
+        
+        for container_id in list(truck.pickup_container_ids):
+            if container_id in self.yard.accessible_containers:
+                container = self.yard.get_container(container_id)
+                if container and truck.can_accommodate_container(container):
+                    out.append(Move(
+                        MoveType.YARD_TO_TRUCK,
+                        {
+                            "truck_id": truck.truck_id,
+                            "container_id": container_id
+                        }
+                    ))
+        
+        return out
+    
+    def list_train_to_truck(self, train: Train, truck: Truck) -> List[Move]:
+        """
+        Generate moves for direct train-to-truck transfer.
+        
+        Args:
+            train: Source train
+            truck: Destination truck
+            
+        Returns:
+            List of TRAIN_TO_TRUCK moves
+        """
+        # Require parked truck
+        if not truck or not truck.parking_spot:
+            return []
+        if not truck.pickup_container_ids:
+            return []
+        
+        out: List[Move] = []
+        wanted = truck.pickup_container_ids
+        
+        for container in train.get_all_containers():
+            if container.container_id in wanted and truck.can_accommodate_container(container):
+                out.append(Move(
+                    MoveType.TRAIN_TO_TRUCK,
+                    {
+                        "train_id": train.train_id,
+                        "truck_id": truck.truck_id,
+                        "container_id": container.container_id
+                    }
+                ))
+        
+        return out
+    
+    def list_truck_to_train(self, truck: Truck, train: Train) -> List[Move]:
+        """
+        Generate moves for direct truck-to-train transfer.
+        
+        Args:
+            truck: Source truck
+            train: Destination train
+            
+        Returns:
+            List of TRUCK_TO_TRAIN moves
+        """
+        # Require parked truck
+        if not truck or not truck.parking_spot:
+            return []
+        if not truck.containers:
+            return []
+        
+        out: List[Move] = []
+        wanted = train.get_all_pickup_container_ids()
+        
+        if not wanted:
+            return out
+        
+        for container in truck.containers:
+            if container.container_id in wanted and train.has_space_for_container(container):
+                out.append(Move(
+                    MoveType.TRUCK_TO_TRAIN,
+                    {
+                        "train_id": train.train_id,
+                        "truck_id": truck.truck_id,
+                        "container_id": container.container_id
+                    }
+                ))
+        
+        return out
+    
+    def list_yard_to_terminal_truck(self, terminal_truck: TerminalTruck) -> List[Move]:
+        """
+        Generate moves for terminal truck to pick up swap bodies/trailers.
+        
+        Args:
+            terminal_truck: Available terminal truck
+            
+        Returns:
+            List of YARD_TO_TERMINAL_TRUCK moves
         """
         out: List[Move] = []
-        if not ttr:
+        
+        if not terminal_truck:
             return out
-        # TerminalTruck gilt als verfügbar, wenn leer und nicht busy (Env prüft Busy zusätzlich)
-        if hasattr(ttr, "is_available") and not ttr.is_available():
+        
+        # Check availability
+        if hasattr(terminal_truck, "is_available") and not terminal_truck.is_available():
             return out
-
-        for cid in list(self.yard.accessible_containers):
-            c = self.yard.get_container(cid)
-            if not c:
+        
+        for container_id in list(self.yard.accessible_containers):
+            container = self.yard.get_container(container_id)
+            if not container:
                 continue
-            # nur Swap Body / Trailer
-            if not (getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False)):
+            
+            # Only swap bodies and trailers
+            if not (getattr(container, "is_swap_body", False) or 
+                    getattr(container, "is_trailer", False)):
                 continue
-            out.append(Move(YARD_TO_TERMINAL_TRUCK, {
-                "terminal_truck_id": getattr(ttr, "truck_id", None),
-                "container_id": cid
-            }))
+            
+            out.append(Move(
+                MoveType.YARD_TO_TERMINAL_TRUCK,
+                {
+                    "terminal_truck_id": getattr(terminal_truck, "truck_id", None),
+                    "container_id": container_id
+                }
+            ))
+        
         return out
-
-    def _remove_pickup_id_from_all_trucks(self, trucks: Dict[str, Truck], cid: str) -> None:
-        for tk in trucks.values():
+    
+    # ----- Move Execution -----
+    
+    def _remove_pickup_id_from_all_trucks(
+        self,
+        trucks: Dict[str, Truck],
+        container_id: str
+    ) -> None:
+        """Remove a container ID from all truck pickup lists."""
+        for truck in trucks.values():
             try:
-                tk.remove_pickup_container_id(cid)
+                truck.remove_pickup_container_id(container_id)
             except Exception:
                 pass
-
-    # ----- execution -----
-    def execute(self, move: Move, trains: Dict[str, Train], trucks: Dict[str, Truck], terminal_trucks: Dict[str, TerminalTruck]) -> bool:
-        t = move.type
-        a = move.args
-
-        # Common precondition: any move involving a Truck requires the truck to be parked
+    
+    def execute(
+        self,
+        move: Move,
+        trains: Dict[str, Train],
+        trucks: Dict[str, Truck],
+        terminal_trucks: Dict[str, TerminalTruck]
+    ) -> bool:
+        """
+        Execute a container move.
+        
+        Args:
+            move: Move to execute
+            trains: Active trains
+            trucks: Active trucks
+            terminal_trucks: Active terminal trucks
+            
+        Returns:
+            True if move executed successfully, False otherwise
+        """
+        move_type = move.type
+        args = move.args
+        
+        # Helper to check if truck is parked (required for crane moves)
         def _require_parked(truck_id_key: str) -> bool:
-            tk = trucks.get(a.get(truck_id_key))
-            return bool(tk and tk.parking_spot)
-
-        if t == SLOT_TRUCK_PARKING:
+            truck = trucks.get(args.get(truck_id_key))
+            return bool(truck and truck.parking_spot)
+        
+        # Parking moves
+        if move_type == MoveType.SLOT_TRUCK_PARKING:
             if not self.parking:
                 return False
-            tr = trucks.get(a["truck_id"])
-            spot = a["spot"]
-            return bool(tr and self.parking.allocate(tr, spot))
-
-        if t == TRAIN_TO_YARD:
-            train = trains.get(a["train_id"])
-            cid = a["container_id"]
+            truck = trucks.get(args["truck_id"])
+            spot = args["spot"]
+            return bool(truck and self.parking.allocate(truck, spot))
+        
+        # Train <-> Yard
+        if move_type == MoveType.TRAIN_TO_YARD:
+            train = trains.get(args["train_id"])
+            container_id = args["container_id"]
             if not train:
                 return False
-            cont = train.remove_container(cid)
-            if not cont:
+            container = train.remove_container(container_id)
+            if not container:
                 return False
-            self.yard.add_container(cont, a["placement"])
+            self.yard.add_container(container, args["placement"])
             return True
-
-        if t == YARD_TO_TRAIN:
-            train = trains.get(a["train_id"])
-            cid = a["container_id"]
+        
+        if move_type == MoveType.YARD_TO_TRAIN:
+            train = trains.get(args["train_id"])
+            container_id = args["container_id"]
             if not train:
                 return False
-            cont = self.yard.get_container(cid)
-            if not cont or not train.has_space_for_container(cont):
+            container = self.yard.get_container(container_id)
+            if not container or not train.has_space_for_container(container):
                 return False
-            ok = train.add_container(cont)
+            ok = train.add_container(container)
             if not ok:
                 return False
-            self.yard.remove_container(cont)
-            # remove intent on the train
-            train.remove_pickup_container(cid)
+            self.yard.remove_container(container)
+            train.remove_pickup_container(container_id)
             return True
-
-        if t == YARD_TO_YARD:
-            return self.yard.move_container(a["container_id"], a["placement"])
-
-        if t == TRUCK_TO_YARD:
+        
+        # Yard <-> Yard
+        if move_type == MoveType.YARD_TO_YARD:
+            return self.yard.move_container(args["container_id"], args["placement"])
+        
+        # Truck <-> Yard
+        if move_type == MoveType.TRUCK_TO_YARD:
             if not _require_parked("truck_id"):
                 return False
-            truck = trucks.get(a["truck_id"])
-            cid = a["container_id"]
+            truck = trucks.get(args["truck_id"])
+            container_id = args["container_id"]
             if not truck:
                 return False
-            cont = truck.remove_container(cid)
-            if not cont:
+            container = truck.remove_container(container_id)
+            if not container:
                 return False
-            self.yard.add_container(cont, a["placement"])
+            self.yard.add_container(container, args["placement"])
             return True
-
-        if t == YARD_TO_TRUCK:
+        
+        if move_type == MoveType.YARD_TO_TRUCK:
             if not _require_parked("truck_id"):
                 return False
-            truck = trucks.get(a["truck_id"])
-            cid = a["container_id"]
+            truck = trucks.get(args["truck_id"])
+            container_id = args["container_id"]
             if not truck:
                 return False
-            cont = self.yard.get_container(cid)
-            if not cont or not truck.can_accommodate_container(cont):
+            container = self.yard.get_container(container_id)
+            if not container or not truck.can_accommodate_container(container):
                 return False
-            self.yard.remove_container(cont)
-            if not truck.add_container(cont):
+            self.yard.remove_container(container)
+            if not truck.add_container(container):
                 return False
-            # clear pickup intent for truck
-            truck.remove_pickup_container_id(cid)
+            truck.remove_pickup_container_id(container_id)
             return True
-
-        if t == TRAIN_TO_TRUCK:
+        
+        # Train <-> Truck
+        if move_type == MoveType.TRAIN_TO_TRUCK:
             if not _require_parked("truck_id"):
                 return False
-            train = trains.get(a["train_id"])
-            truck = trucks.get(a["truck_id"])
-            cid = a["container_id"]
+            train = trains.get(args["train_id"])
+            truck = trucks.get(args["truck_id"])
+            container_id = args["container_id"]
             if not train or not truck:
                 return False
-            cont = train.remove_container(cid)
-            if not cont or not truck.can_accommodate_container(cont):
+            container = train.remove_container(container_id)
+            if not container or not truck.can_accommodate_container(container):
                 return False
-            if not truck.add_container(cont):
+            if not truck.add_container(container):
                 return False
-            # IMPORTANT: clear pickup intent for truck so it can depart
-            truck.remove_pickup_container_id(cid)
+            truck.remove_pickup_container_id(container_id)
             return True
-
-        if t == TRUCK_TO_TRAIN:
+        
+        if move_type == MoveType.TRUCK_TO_TRAIN:
             if not _require_parked("truck_id"):
                 return False
-            truck = trucks.get(a["truck_id"])
-            train = trains.get(a["train_id"])
-            cid = a["container_id"]
+            truck = trucks.get(args["truck_id"])
+            train = trains.get(args["train_id"])
+            container_id = args["container_id"]
             if not truck or not train:
                 return False
-            cont = truck.remove_container(cid)
-            if not cont or not train.has_space_for_container(cont):
+            container = truck.remove_container(container_id)
+            if not container or not train.has_space_for_container(container):
                 return False
-            ok = train.add_container(cont)
+            ok = train.add_container(container)
             if not ok:
                 return False
-            # remove intent on the train (mirrors YARD_TO_TRAIN)
-            train.remove_pickup_container(cid)
+            train.remove_pickup_container(container_id)
             return True
-
-        if t == YARD_TO_TERMINAL_TRUCK:
-            tt = terminal_trucks.get(a["terminal_truck_id"])
-            cid = a["container_id"]
-            if not tt:
+        
+        # Terminal Truck
+        if move_type == MoveType.YARD_TO_TERMINAL_TRUCK:
+            terminal_truck = terminal_trucks.get(args["terminal_truck_id"])
+            container_id = args["container_id"]
+            if not terminal_truck:
                 return False
-            if hasattr(tt, "is_available") and not tt.is_available():
+            if hasattr(terminal_truck, "is_available") and not terminal_truck.is_available():
                 return False
-            cont = self.yard.get_container(cid)
-            if not cont:
+            container = self.yard.get_container(container_id)
+            if not container:
                 return False
-            if not (getattr(cont, "is_swap_body", False) or getattr(cont, "is_trailer", False)):
+            if not (getattr(container, "is_swap_body", False) or 
+                    getattr(container, "is_trailer", False)):
                 return False
-            self.yard.remove_container(cont)
-            self._remove_pickup_id_from_all_trucks(trucks, cid)
-            if not tt.add_container(cont):
+            self.yard.remove_container(container)
+            self._remove_pickup_id_from_all_trucks(trucks, container_id)
+            if not terminal_truck.add_container(container):
                 return False
             return True
-
+        
         return False

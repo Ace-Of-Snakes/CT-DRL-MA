@@ -3,14 +3,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+
 from simulation.core.vehicles.train import Train
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.planning.driving_plan_parser import DrivingPlanParser
+from simulation.core.constants import SECONDS_PER_WEEK, SECONDS_PER_HOUR
 
-# Constants
-WEEK_SECONDS = 604800
-HOUR_SECONDS = 3600
-BUFFER_TIME_HOURS = 4  # Buffer between trains on same track
+
+# Scheduler configuration
+DEFAULT_BUFFER_TIME_HOURS = 4  # Buffer between trains on same track
+
 
 @dataclass
 class ScheduledTrain:
@@ -28,8 +30,9 @@ class ScheduledTrain:
     def duration_seconds(self) -> float:
         """Get duration handling weekly wraparound."""
         if self.departure_seconds < self.arrival_seconds:
-            return (WEEK_SECONDS - self.arrival_seconds) + self.departure_seconds
+            return (SECONDS_PER_WEEK - self.arrival_seconds) + self.departure_seconds
         return self.departure_seconds - self.arrival_seconds
+
 
 @dataclass
 class TrainSchedule:
@@ -45,7 +48,7 @@ class TrainSchedule:
             if i not in self.track_occupancy:
                 self.track_occupancy[i] = []
     
-    def add_train(self, scheduled_train: ScheduledTrain):
+    def add_train(self, scheduled_train: ScheduledTrain) -> None:
         """Add a scheduled train to the schedule."""
         self.scheduled_trains.append(scheduled_train)
         track_id = scheduled_train.track_id
@@ -55,31 +58,51 @@ class TrainSchedule:
         self.track_occupancy[track_id].sort(key=lambda st: st.arrival_seconds)
     
     def get_utilization(self) -> float:
-        """Calculate overall track utilization."""
-        total_capacity = self.num_tracks * WEEK_SECONDS
+        """Calculate overall track utilization as percentage."""
+        total_capacity = self.num_tracks * SECONDS_PER_WEEK
         total_used = sum(st.duration_seconds for st in self.scheduled_trains)
         return (total_used / total_capacity) * 100 if total_capacity > 0 else 0
     
     def get_track_utilization(self, track_id: int) -> float:
-        """Calculate utilization for specific track."""
+        """Calculate utilization for specific track as percentage."""
         if track_id not in self.track_occupancy:
             return 0
         used = sum(st.duration_seconds for st in self.track_occupancy[track_id])
-        return (used / WEEK_SECONDS) * 100
+        return (used / SECONDS_PER_WEEK) * 100
 
 
 class TrainScheduler:
-    """Scheduler for optimizing train placement on tracks."""
+    """
+    Scheduler for optimizing train placement on tracks.
     
-    def __init__(self, num_tracks: int = 4):
-        """Initialize scheduler with number of available tracks."""
+    Uses best-fit algorithm with conflict resolution to minimize
+    wasted track capacity while respecting buffer times.
+    """
+    
+    def __init__(
+        self,
+        num_tracks: int = 4,
+        buffer_hours: int = DEFAULT_BUFFER_TIME_HOURS
+    ):
+        """
+        Initialize scheduler.
+        
+        Args:
+            num_tracks: Number of available tracks
+            buffer_hours: Buffer time between trains on same track
+        """
         self.num_tracks = num_tracks
         self.encoder = WeeklyTimeEncoder()
-        self.buffer_seconds = BUFFER_TIME_HOURS * HOUR_SECONDS
+        self.buffer_seconds = buffer_hours * SECONDS_PER_HOUR
     
     def schedule_trains(self, trains: List[Train]) -> TrainSchedule:
         """
         Schedule trains using a best-fit algorithm with conflict resolution.
+        
+        Strategy:
+        - Sort trains by stay duration (longer stays first for better packing)
+        - For each train, find track with minimum wasted space
+        - Skip trains that cannot be scheduled
         
         Args:
             trains: List of Train objects with schedule_encoded metadata
@@ -111,6 +134,10 @@ class TrainScheduler:
         """
         Find the best track for a train using least-waste strategy.
         
+        Args:
+            train: Train to schedule
+            schedule: Current schedule state
+            
         Returns:
             Track ID or None if no track available
         """
@@ -121,36 +148,61 @@ class TrainScheduler:
         min_waste = float('inf')
         
         for track_id in range(self.num_tracks):
-            if self._can_fit_on_track(train_arrival, train_departure, 
-                                     schedule.track_occupancy[track_id]):
+            if self._can_fit_on_track(
+                train_arrival,
+                train_departure,
+                schedule.track_occupancy[track_id]
+            ):
                 # Calculate wasted space if placed on this track
-                waste = self._calculate_waste(train_arrival, train_departure,
-                                             schedule.track_occupancy[track_id])
+                waste = self._calculate_waste(
+                    train_arrival,
+                    train_departure,
+                    schedule.track_occupancy[track_id]
+                )
                 if waste < min_waste:
                     min_waste = waste
                     best_track = track_id
         
         return best_track
     
-    def _can_fit_on_track(self, arrival: float, departure: float, 
-                         track_trains: List[ScheduledTrain]) -> bool:
+    def _can_fit_on_track(
+        self,
+        arrival: float,
+        departure: float,
+        track_trains: List[ScheduledTrain]
+    ) -> bool:
         """Check if train can fit on track without conflicts."""
         for scheduled in track_trains:
-            if self._has_conflict(arrival, departure, 
-                                 scheduled.arrival_seconds, 
-                                 scheduled.departure_seconds):
+            if self._has_conflict(
+                arrival,
+                departure,
+                scheduled.arrival_seconds,
+                scheduled.departure_seconds
+            ):
                 return False
         return True
     
-    def _has_conflict(self, arr1: float, dep1: float, 
-                    arr2: float, dep2: float) -> bool:
+    def _has_conflict(
+        self,
+        arr1: float,
+        dep1: float,
+        arr2: float,
+        dep2: float
+    ) -> bool:
         """
         Check if two trains have time conflict with buffer.
         Handles weekly wraparound.
+        
+        Args:
+            arr1, dep1: First train arrival/departure (seconds)
+            arr2, dep2: Second train arrival/departure (seconds)
+            
+        Returns:
+            True if trains conflict (with buffer)
         """
         # Add buffer
-        arr1_buffered = (arr1 - self.buffer_seconds) % WEEK_SECONDS
-        dep1_buffered = (dep1 + self.buffer_seconds) % WEEK_SECONDS
+        arr1_buffered = (arr1 - self.buffer_seconds) % SECONDS_PER_WEEK
+        dep1_buffered = (dep1 + self.buffer_seconds) % SECONDS_PER_WEEK
         
         # Helper function to check if a point is within an interval (handling wraparound)
         def point_in_interval(point: float, start: float, end: float) -> bool:
@@ -161,61 +213,55 @@ class TrainScheduler:
                 # Wraparound interval
                 return point >= start or point <= end
         
-        # Check if any part of train1's buffered interval overlaps with train2's interval
-        # or any part of train2's interval overlaps with train1's buffered interval
-        
-        # Check if train1's arrival or departure falls within train2's interval
+        # Check various overlap conditions
         if point_in_interval(arr1_buffered, arr2, dep2):
             return True
         if point_in_interval(dep1_buffered, arr2, dep2):
             return True
-        
-        # Check if train2's arrival or departure falls within train1's buffered interval
         if point_in_interval(arr2, arr1_buffered, dep1_buffered):
             return True
         if point_in_interval(dep2, arr1_buffered, dep1_buffered):
             return True
         
-        # Special case: one interval completely contains the other
-        # This handles cases where both trains wrap or one completely encompasses the other
-        
-        # Check if train1 completely contains train2
-        if arr1_buffered <= dep1_buffered:  # Train1 doesn't wrap
-            if arr2 <= dep2:  # Train2 doesn't wrap
-                # Already handled above
-                pass
-            else:  # Train2 wraps
-                # If train1 doesn't wrap and train2 does, they conflict if train1 
-                # spans midnight
-                if arr1_buffered == 0 or dep1_buffered >= WEEK_SECONDS - 1:
-                    return True
-        else:  # Train1 wraps
+        # Special case: check for complete containment with wraparound
+        if arr1_buffered > dep1_buffered:  # Train1 wraps
             if arr2 > dep2:  # Train2 also wraps
-                # Both wrap - they definitely overlap
-                return True
-            else:  # Train2 doesn't wrap
+                return True  # Both wrap - they definitely overlap
+            else:
                 # Train1 wraps, train2 doesn't
-                # They DON'T conflict only if train2 is entirely in the gap
                 gap_start = dep1_buffered
                 gap_end = arr1_buffered
                 if arr2 >= gap_start and dep2 <= gap_end:
-                    return False
+                    return False  # Train2 is entirely in the gap
                 else:
                     return True
         
         return False
     
-    def _calculate_waste(self, arrival: float, departure: float,
-                        track_trains: List[ScheduledTrain]) -> float:
-        """Calculate wasted time if train is placed on track."""
+    def _calculate_waste(
+        self,
+        arrival: float,
+        departure: float,
+        track_trains: List[ScheduledTrain]
+    ) -> float:
+        """
+        Calculate wasted time if train is placed on track.
+        
+        Args:
+            arrival, departure: Train arrival/departure (seconds)
+            track_trains: Trains already on this track
+            
+        Returns:
+            Minimum gap size (lower is better)
+        """
         if not track_trains:
             return 0
         
         # Find gaps before and after
         gaps = []
         for scheduled in track_trains:
-            gap_before = (arrival - scheduled.departure_seconds) % WEEK_SECONDS
-            gap_after = (scheduled.arrival_seconds - departure) % WEEK_SECONDS
+            gap_before = (arrival - scheduled.departure_seconds) % SECONDS_PER_WEEK
+            gap_after = (scheduled.arrival_seconds - departure) % SECONDS_PER_WEEK
             gaps.extend([gap_before, gap_after])
         
         return min(gaps) if gaps else 0
@@ -235,15 +281,26 @@ class TrainScheduler:
             stay_hours=sched['stay_duration']['hours']
         )
     
-    def visualize_schedule(self, schedule: TrainSchedule, figsize: Tuple[int, int] = (14, 10)):
+    def visualize_schedule(
+        self,
+        schedule: TrainSchedule,
+        figsize: Tuple[int, int] = (14, 10)
+    ) -> plt.Figure:
         """
         Create circular Gantt chart visualization.
         
         Args:
             schedule: TrainSchedule object to visualize
             figsize: Figure size tuple
+            
+        Returns:
+            Matplotlib figure
         """
-        fig, axes = plt.subplots(2, 2, figsize=figsize, subplot_kw=dict(projection='polar'))
+        fig, axes = plt.subplots(
+            2, 2,
+            figsize=figsize,
+            subplot_kw=dict(projection='polar')
+        )
         fig.suptitle('Train Schedule - Circular Weekly View', fontsize=16, fontweight='bold')
         
         # Flatten axes for easier iteration
@@ -265,22 +322,39 @@ class TrainScheduler:
         
         # Add legend
         if schedule.scheduled_trains:
-            handles = [plt.Line2D([0], [0], color=color, lw=4, label=op) 
-                      for op, color in color_map.items()]
-            fig.legend(handles, color_map.keys(), loc='center', 
-                      bbox_to_anchor=(0.5, -0.05), ncol=min(len(operators), 4))
+            handles = [
+                plt.Line2D([0], [0], color=color, lw=4, label=op)
+                for op, color in color_map.items()
+            ]
+            fig.legend(
+                handles,
+                color_map.keys(),
+                loc='center',
+                bbox_to_anchor=(0.5, -0.05),
+                ncol=min(len(operators), 4)
+            )
         
         # Add statistics
-        stats_text = (f"Total Trains Scheduled: {len(schedule.scheduled_trains)}\n"
-                     f"Trains Unscheduled: {len(schedule.unscheduled_trains)}\n"
-                     f"Overall Utilization: {schedule.get_utilization():.1f}%")
-        fig.text(0.02, 0.02, stats_text, fontsize=10, 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5))
+        stats_text = (
+            f"Total Trains Scheduled: {len(schedule.scheduled_trains)}\n"
+            f"Trains Unscheduled: {len(schedule.unscheduled_trains)}\n"
+            f"Overall Utilization: {schedule.get_utilization():.1f}%"
+        )
+        fig.text(
+            0.02, 0.02, stats_text, fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5)
+        )
         
         plt.tight_layout()
         return fig
     
-    def _plot_track(self, ax, track_id: int, schedule: TrainSchedule, color_map: Dict):
+    def _plot_track(
+        self,
+        ax,
+        track_id: int,
+        schedule: TrainSchedule,
+        color_map: Dict
+    ) -> None:
         """Plot single track as circular chart."""
         ax.set_theta_zero_location('N')
         ax.set_theta_direction(-1)
@@ -306,9 +380,11 @@ class TrainScheduler:
                 
                 # Add train ID at midpoint
                 mid_angle = st.arrival_angle + (2*np.pi - st.arrival_angle) / 2
-                ax.text(mid_angle, 0.6, st.train.train_id.split('_')[0], 
-                       rotation=np.degrees(mid_angle)-90 if mid_angle > np.pi else np.degrees(mid_angle)+90,
-                       fontsize=8, ha='center', va='center')
+                rotation = np.degrees(mid_angle) - 90 if mid_angle > np.pi else np.degrees(mid_angle) + 90
+                ax.text(
+                    mid_angle, 0.6, st.train.train_id.split('_')[0],
+                    rotation=rotation, fontsize=8, ha='center', va='center'
+                )
             else:
                 # Normal case
                 angles = np.linspace(st.arrival_angle, st.departure_angle, 100)
@@ -316,16 +392,20 @@ class TrainScheduler:
                 
                 # Add train ID
                 mid_angle = (st.arrival_angle + st.departure_angle) / 2
-                ax.text(mid_angle, 0.6, st.train.train_id.split('_')[0],
-                       rotation=np.degrees(mid_angle)-90 if mid_angle > np.pi else np.degrees(mid_angle)+90,
-                       fontsize=8, ha='center', va='center')
+                rotation = np.degrees(mid_angle) - 90 if mid_angle > np.pi else np.degrees(mid_angle) + 90
+                ax.text(
+                    mid_angle, 0.6, st.train.train_id.split('_')[0],
+                    rotation=rotation, fontsize=8, ha='center', va='center'
+                )
         
         # Format
         ax.set_ylim(0, 1)
         ax.set_yticks([])
         ax.grid(True, alpha=0.3)
-        ax.set_title(f'Track {track_id + 1}\nUtilization: {schedule.get_track_utilization(track_id):.1f}%',
-                    pad=20)
+        ax.set_title(
+            f'Track {track_id + 1}\nUtilization: {schedule.get_track_utilization(track_id):.1f}%',
+            pad=20
+        )
 
 
 # Example usage

@@ -2,8 +2,16 @@
 import numpy as np
 from typing import Tuple, Dict
 
+from simulation.core.constants import SECONDS_PER_DAY, SECONDS_PER_WEEK, SECONDS_PER_HOUR, SECONDS_PER_MINUTE
+
+
 class WeeklyTimeEncoder:
-    """Efficient weekly time encoder using sine/cosine circular encoding."""
+    """
+    Efficient weekly time encoder using sine/cosine circular encoding.
+    
+    Encodes day-of-week and time-of-day into continuous angular representation
+    for use in scheduling and time-based features.
+    """
     
     # Day mapping for fast lookup
     DAY_MAP = {
@@ -13,10 +21,12 @@ class WeeklyTimeEncoder:
     DAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
     
     def __init__(self):
-        """Initialize with seconds in a week."""
-        self.week_seconds = 7 * 24 * 60 * 60  # 604,800 seconds
-        self.day_seconds = 24 * 60 * 60  # 86,400 seconds
-        
+        """Initialize with week/day constants."""
+        self.week_seconds = SECONDS_PER_WEEK
+        self.day_seconds = SECONDS_PER_DAY
+        self.hour_seconds = SECONDS_PER_HOUR
+        self.minute_seconds = SECONDS_PER_MINUTE
+    
     def encode(self, day_of_week: str, hour: int, minute: int) -> Dict[str, float]:
         """
         Encode time to sine/cosine values and angle.
@@ -27,7 +37,10 @@ class WeeklyTimeEncoder:
             minute: Minute (0-59)
             
         Returns:
-            Dict with 'angle' (radians), 'sin', 'cos' values
+            Dict with 'angle' (radians), 'sin', 'cos', 'seconds' values
+            
+        Raises:
+            ValueError: If day_of_week is invalid
         """
         # Get day index
         day_idx = self.DAY_MAP.get(day_of_week.lower())
@@ -35,7 +48,11 @@ class WeeklyTimeEncoder:
             raise ValueError(f"Invalid day: {day_of_week}")
         
         # Calculate total seconds from start of week
-        seconds = day_idx * self.day_seconds + hour * 3600 + minute * 60
+        seconds = (
+            day_idx * self.day_seconds +
+            hour * self.hour_seconds +
+            minute * self.minute_seconds
+        )
         
         # Convert to angle (0 to 2π for full week)
         angle = (seconds / self.week_seconds) * 2 * np.pi
@@ -67,8 +84,8 @@ class WeeklyTimeEncoder:
         day_idx = seconds // self.day_seconds
         remaining = seconds % self.day_seconds
         
-        hour = remaining // 3600
-        minute = (remaining % 3600) // 60
+        hour = remaining // self.hour_seconds
+        minute = (remaining % self.hour_seconds) // self.minute_seconds
         
         return (self.DAY_NAMES[day_idx], hour, minute)
     
@@ -91,7 +108,7 @@ class WeeklyTimeEncoder:
     
     def subtract(self, timestamp1: str, timestamp2: str) -> Dict[str, float]:
         """
-        Subtract timestamp1 from timestamp2 (timestamp2 - timestamp1).
+        Calculate time difference (timestamp2 - timestamp1).
         
         Args:
             timestamp1: String in format 'weekday-hour-minute' (e.g., 'monday-09-30')
@@ -99,6 +116,9 @@ class WeeklyTimeEncoder:
             
         Returns:
             Dict with difference in seconds, hours, days, and as angle
+            
+        Raises:
+            ValueError: If timestamp format is invalid
         """
         # Parse timestamp1
         parts1 = timestamp1.lower().split('-')

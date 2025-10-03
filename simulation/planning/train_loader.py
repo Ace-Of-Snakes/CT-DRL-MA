@@ -3,15 +3,14 @@ import numpy as np
 from typing import List, Optional, Dict
 from dataclasses import dataclass
 from datetime import datetime
+
 from simulation.core.containers.container import Container
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.wagon import Wagon
 from simulation.core.factories.container_factory import ContainerFactory
 from simulation.core.facilities.yard import BooleanStorageYard
-
-# ==================== CONSTANTS ====================
-OVERGENERATION_FACTOR = 5.0  # Generate 5x more containers than wagons
-TRAIN_DIRECTION = "Import"  # Trains only handle imports (Train -> Truck)
+from simulation.core.enums import Direction
+from simulation.config.train_config import TrainLoaderConfig
 
 
 @dataclass
@@ -30,26 +29,36 @@ class TrainLoader:
     Optimized for speed with numpy arrays and efficient algorithms.
     """
     
-    def __init__(self, 
-                 container_factory: ContainerFactory,
-                 overgeneration_factor: float = OVERGENERATION_FACTOR):
+    def __init__(
+        self,
+        container_factory: ContainerFactory,
+        overgeneration_factor: float = None
+    ):
         """
         Initialize the train loader.
         
         Args:
             container_factory: Factory for generating containers
-            overgeneration_factor: Factor to overgenerate containers (5.0 = 5x containers)
+            overgeneration_factor: Factor to overgenerate containers (default from config)
+            
+        Raises:
+            ValueError: If container_factory is None
         """
         if not container_factory:
             raise ValueError("Container factory is required")
-            
+        
         self.factory = container_factory
-        self.overgeneration_factor = overgeneration_factor
+        self.overgeneration_factor = (
+            overgeneration_factor if overgeneration_factor is not None
+            else TrainLoaderConfig.OVERGENERATION_FACTOR
+        )
     
-    def load_train(self, 
-                   train: Train,
-                   operator: str,
-                   current_date: Optional[datetime] = None) -> Train:
+    def load_train(
+        self,
+        train: Train,
+        operator: str,
+        current_date: Optional[datetime] = None
+    ) -> Train:
         """
         Load a single train with containers using optimized algorithm.
         
@@ -73,10 +82,10 @@ class TrainLoader:
         num_wagons = len(train.wagons)
         num_to_generate = int(num_wagons * self.overgeneration_factor)
         
-        # Generate containers in batch (factory already uses vectorized ops)
+        # Generate containers in batch
         containers = self.factory.create_containers(
             operator=operator,
-            direction=TRAIN_DIRECTION,  # Always Import for trains
+            direction=Direction.IMPORT,  # Trains only handle imports
             n_containers=num_to_generate,
             base_arrival_date=current_date
         )
@@ -89,10 +98,12 @@ class TrainLoader:
         
         return train
     
-    def load_multiple_trains(self,
-                           trains: List[Train],
-                           operator: str,
-                           current_date: Optional[datetime] = None) -> List[Train]:
+    def load_multiple_trains(
+        self,
+        trains: List[Train],
+        operator: str,
+        current_date: Optional[datetime] = None
+    ) -> List[Train]:
         """
         Load multiple trains efficiently with shared container generation.
         
@@ -120,7 +131,7 @@ class TrainLoader:
         # Generate all containers at once for efficiency
         all_containers = self.factory.create_containers(
             operator=operator,
-            direction=TRAIN_DIRECTION,  # Always Import for trains
+            direction=Direction.IMPORT,
             n_containers=total_to_generate,
             base_arrival_date=current_date
         )
@@ -148,7 +159,12 @@ class TrainLoader:
         
         return trains
     
-    def _optimized_load_wagons(self, train: Train, containers: List[Container], num_wagons: int):
+    def _optimized_load_wagons(
+        self,
+        train: Train,
+        containers: List[Container],
+        num_wagons: int
+    ) -> None:
         """
         Random wagon loading that maximizes utilization without sorting.
         
@@ -156,6 +172,11 @@ class TrainLoader:
         1. Randomly shuffle containers for true randomness
         2. Ensure at least one container per wagon for distribution
         3. Use random placement to avoid algorithmic skewing
+        
+        Args:
+            train: Train to load
+            containers: Containers to load
+            num_wagons: Number of wagons in train
         """
         # Shuffle containers for true randomness (no sorting by length)
         shuffled_containers = containers.copy()
@@ -165,7 +186,6 @@ class TrainLoader:
         loaded_containers = set()
         
         # Phase 1: Ensure each wagon gets at least one container
-        # Pick random containers (not sorted) for initial distribution
         initial_containers = shuffled_containers[:num_wagons]
         
         for wagon_idx, container in enumerate(initial_containers):
@@ -175,22 +195,18 @@ class TrainLoader:
                 loaded_containers.add(container.container_id)
         
         # Phase 2: Load remaining containers randomly
-        # Try each container in random order
         for container in shuffled_containers:
             if container.container_id in loaded_containers:
                 continue
             
-            # Try wagons in sequential order first, then randomize if needed
-            # This helps with cache locality while still being random due to shuffled containers
+            # Try wagons in sequential order first
             for wagon_idx in range(num_wagons):
                 wagon = train.wagons[wagon_idx]
                 
-                # Check if container fits with a small tolerance for floating point errors
-                # Using direct comparison with wagon's available length
+                # Check if container fits with tolerance for floating point
                 available = wagon.get_available_length()
                 
-                # Add tiny tolerance (1mm) for floating point comparison issues
-                # This handles cases where 6.096 might not fit in 6.1 due to float precision
+                # Add tiny tolerance (1mm) for floating point comparison
                 if available >= container.length_m - 0.001:
                     if train.add_container(container, wagon_index=wagon_idx):
                         loaded_containers.add(container.container_id)
@@ -210,7 +226,6 @@ class TrainLoader:
                             break
         
         # Phase 3: Final pass - try to fit any remaining containers
-        # using train's auto-placement logic
         for container in shuffled_containers:
             if container.container_id not in loaded_containers:
                 # Let the train's built-in logic find any remaining space
@@ -221,6 +236,9 @@ class TrainLoader:
         """
         Debug function to analyze wagon loading state.
         
+        Args:
+            train: Train to analyze
+            
         Returns:
             Dictionary with detailed wagon statistics
         """
@@ -331,102 +349,113 @@ class TrainLoader:
     @staticmethod
     def rearrange_wagons_for_goods(train: Train, yard: BooleanStorageYard) -> List[int]:
         """
-        Reorder wagons in-place:
-        - Split reefer wagons into two halves: front and back (ends).
-        - Place DG wagons near the center (between regular halves).
-        - Regular wagons split to fill between ends and center.
-
+        Reorder wagons in-place for goods type optimization:
+        - Split reefer wagons into two halves: front and back (ends)
+        - Place DG wagons near the center (between regular halves)
+        - Regular wagons split to fill between ends and center
+        
+        Args:
+            train: Train to rearrange
+            yard: Yard reference for container lookups
+            
         Returns:
-            new_order_indices: old_index -> new_index mapping list (length = num_wagons)
+            List of new indices (old_index -> new_index mapping)
         """
-        wags = train.wagons
-        n = len(wags)
+        wagons = train.wagons
+        n = len(wagons)
         if n <= 1:
             return list(range(n))
-
+        
         # Classify wagons with minimal yard lookups
-        cls = []  # 'reefer' | 'dg' | 'regular'
-        for w in wags:
+        classifications = []  # 'reefer' | 'dg' | 'regular'
+        
+        for wagon in wagons:
             has_reefer = False
             has_dg = False
-
-            # Existing containers on wagon
-            for c in w.get_container_list():
-                if c.goods_type == "Reefer":
+            
+            # Check existing containers on wagon
+            for container in wagon.get_container_list():
+                if container.goods_type == "Reefer":
                     has_reefer = True
-                elif c.goods_type == "DangerousGoods":
+                elif container.goods_type == "DangerousGoods":
                     has_dg = True
                 if has_reefer and has_dg:
                     break
-
-            # If still unknown, check pickup ids that are already in yard
-            if not (has_reefer or has_dg) and w.pickup_container_ids:
-                for cid in w.pickup_container_ids:
-                    c = yard.get_container(cid)
-                    if c:
-                        if c.goods_type == "Reefer":
+            
+            # Check pickup IDs that are in yard
+            if not (has_reefer or has_dg) and wagon.pickup_container_ids:
+                for cid in wagon.pickup_container_ids:
+                    container = yard.get_container(cid)
+                    if container:
+                        if container.goods_type == "Reefer":
                             has_reefer = True
-                        elif c.goods_type == "DangerousGoods":
+                        elif container.goods_type == "DangerousGoods":
                             has_dg = True
                         if has_reefer and has_dg:
                             break
-
+            
             # Priority: DG over Reefer (safety)
             if has_dg:
-                cls.append("dg")
+                classifications.append("dg")
             elif has_reefer:
-                cls.append("reefer")
+                classifications.append("reefer")
             else:
-                cls.append("regular")
-
-        reefer_idxs = [i for i, k in enumerate(cls) if k == "reefer"]
-        dg_idxs = [i for i, k in enumerate(cls) if k == "dg"]
-        reg_idxs = [i for i, k in enumerate(cls) if k == "regular"]
-
+                classifications.append("regular")
+        
+        # Get wagon indices by type
+        reefer_idxs = [i for i, c in enumerate(classifications) if c == "reefer"]
+        dg_idxs = [i for i, c in enumerate(classifications) if c == "dg"]
+        reg_idxs = [i for i, c in enumerate(classifications) if c == "regular"]
+        
         # Split reefer and regular into two halves
-        half_reef = (len(reefer_idxs) + 1) // 2
-        front_reefers = reefer_idxs[:half_reef]
-        back_reefers = reefer_idxs[half_reef:]
-
-        half_reg = len(reg_idxs) // 2
-        left_regular = reg_idxs[:half_reg]
-        right_regular = reg_idxs[half_reg:]
-
-        # Build new order (by old indices), preserving within-class order
+        half_reefer = (len(reefer_idxs) + 1) // 2
+        front_reefers = reefer_idxs[:half_reefer]
+        back_reefers = reefer_idxs[half_reefer:]
+        
+        half_regular = len(reg_idxs) // 2
+        left_regular = reg_idxs[:half_regular]
+        right_regular = reg_idxs[half_regular:]
+        
+        # Build new order (by old indices)
         new_order_old_indices = front_reefers + left_regular + dg_idxs + right_regular + back_reefers
+        
         if len(new_order_old_indices) != n:
-            # In case of logic error, fallback to identity
+            # Fallback to identity if logic error
             new_order_old_indices = list(range(n))
-
+        
         # Apply reordering
-        new_wagons: List[Wagon] = [wags[i] for i in new_order_old_indices]
+        new_wagons: List[Wagon] = [wagons[i] for i in new_order_old_indices]
         train.wagons = new_wagons
-
+        
         # Build old->new index map
         old_to_new = {old: new for new, old in enumerate(new_order_old_indices)}
-
+        
         # Update container_locations (wagon_index) in O(total_containers)
         for cid, loc in list(train.container_locations.items()):
             loc.wagon_index = old_to_new.get(loc.wagon_index, loc.wagon_index)
-
+        
         # Rebuild fast index sets
         train.wagons_with_space = set(i for i, w in enumerate(train.wagons) if not w.is_full())
         train.empty_wagons = set(i for i, w in enumerate(train.wagons) if w.is_empty())
-
-        # wagon_by_id remains valid (same objects)
+        
         return [old_to_new.get(i, i) for i in range(n)]
 
+
+# Example usage
 if __name__ == "__main__":
     import time
     
+    from simulation.core.factories.container_factory import ContainerFactory
+    from simulation.core.enums import Direction
+    
     factory = ContainerFactory()
     loader = TrainLoader(factory, overgeneration_factor=3.0)
-
+    
     # First, analyze what containers are being generated
     print("=== Container Generation Analysis ===")
     test_containers = factory.create_containers(
         operator="BOX",
-        direction=TRAIN_DIRECTION,
+        direction=Direction.IMPORT,
         n_containers=100,
         base_arrival_date=datetime.now()
     )
@@ -444,16 +473,16 @@ if __name__ == "__main__":
     
     start_time = time.perf_counter()
     loaded_train = loader.load_train(
-        train, 
+        train,
         operator="BOX",
         current_date=datetime.now()
     )
     elapsed_ms = (time.perf_counter() - start_time) * 1000
-
+    
     # Get loading statistics
     stats = loader.get_loading_stats(loaded_train)
     stats.time_elapsed_ms = elapsed_ms
-    stats.total_containers_generated = int(29 * 3.0)  # Factor of 3
+    stats.total_containers_generated = int(29 * 3.0)
     
     print(f"Generated: {stats.total_containers_generated} containers")
     print(f"Loaded: {stats.containers_loaded} containers")
@@ -468,15 +497,3 @@ if __name__ == "__main__":
     print(f"Full wagons: {debug_info['wagons_full']}")
     print(f"Total capacity: {debug_info['total_capacity']:.1f}m")
     print(f"Total used: {debug_info['total_used']:.1f}m")
-    
-    # Show per-wagon stats for ALL wagons to see the pattern
-    print(f"\nAll wagon details:")
-    for wagon_stat in debug_info['wagon_details']:
-        print(f"  Wagon {wagon_stat['wagon_id']:2d}: "
-              f"{wagon_stat['num_containers']} containers, "
-              f"{wagon_stat['utilization']:5.1f}% full, "
-              f"{wagon_stat['available']:6.3f}m available")
-        if wagon_stat['container_lengths']:
-            print(f"    Lengths: {[f'{l:.3f}m' for l in wagon_stat['container_lengths']]}")
-            print(f"    Types: {wagon_stat['container_types']}")
-            print(f"    Sum: {sum(wagon_stat['container_lengths']):.3f}m used of {wagon_stat['capacity']:.3f}m capacity")

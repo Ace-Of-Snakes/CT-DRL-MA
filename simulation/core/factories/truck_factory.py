@@ -2,17 +2,15 @@
 import os
 import pickle
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from scipy.stats import gaussian_kde
+
 from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container
-
-# Constants for truck generation
-TRUCK_LENGTH = 24.4  # 80 feet in meters (fixed)
-MIN_TRUCK_LOAD_FACTOR = 0.5  # Minimum 50% capacity usage
-TRUCK_ARRIVAL_HOURS_START = 6  # Trucks arrive 6am-10pm
-TRUCK_ARRIVAL_HOURS_END = 22
+from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_LENGTH_M
+from simulation.config.paths import DataPaths
+from simulation.config.operations_config import GateConfig
 
 
 class TruckFactory:
@@ -21,18 +19,23 @@ class TruckFactory:
     All trucks are 80 feet (24.4 meters) long.
     """
     
-    def __init__(self, kde_folder: str = "simulation/data/truck_arrivals"):
+    def __init__(self, kde_folder: str = None):
         """
         Initialize factory with KDE models for arrival time distributions.
         
         Args:
             kde_folder: Base folder containing 'delivery' and 'pickup' subfolders with KDE models
         """
+        kde_folder = kde_folder or str(DataPaths.TRUCK_ARRIVALS_DIR)
         self.kde_folder = kde_folder
         
         # Load KDE models for both delivery and pickup
-        self.delivery_kde_models = self._load_kde_models(os.path.join(kde_folder, "delivery"))
-        self.pickup_kde_models = self._load_kde_models(os.path.join(kde_folder, "pickup"))
+        self.delivery_kde_models = self._load_kde_models(
+            os.path.join(kde_folder, "delivery")
+        )
+        self.pickup_kde_models = self._load_kde_models(
+            os.path.join(kde_folder, "pickup")
+        )
         
         # ID counter for unique truck IDs
         self._id_counter = 0
@@ -73,20 +76,22 @@ class TruckFactory:
         
         return kde_models
     
-    def generate_trucks(self,
-                       day_of_week: str,
-                       delivery_containers: Optional[List[Container]] = None,
-                       pickup_containers: Optional[List[Container]] = None,
-                       base_date: Optional[datetime] = None,
-                       parking_spot_prefix: str = "P") -> List[Truck]:
+    def generate_trucks(
+        self,
+        day_of_week: str,
+        delivery_containers: Optional[List[Container]] = None,
+        pickup_containers: Optional[List[Container]] = None,
+        base_date: Optional[datetime] = None,
+        parking_spot_prefix: str = "P"
+    ) -> List[Truck]:
         """
         Generate trucks for a specific day with containers to deliver and/or pick up.
         
         Args:
-            day_of_week: Day name (e.g., "Monday", "Tuesday", etc.)
-            delivery_containers: Containers to be delivered to the terminal
-            pickup_containers: Containers to be picked up from the terminal
-            base_date: Base date for the specified day (defaults to today)
+            day_of_week: Day name (e.g., "Monday", "Tuesday")
+            delivery_containers: Containers to be delivered to terminal
+            pickup_containers: Containers to be picked up from terminal
+            base_date: Base date for the specified day
             parking_spot_prefix: Prefix for parking spot assignments
             
         Returns:
@@ -117,11 +122,13 @@ class TruckFactory:
         
         return trucks
     
-    def _generate_delivery_trucks(self,
-                                 containers: List[Container],
-                                 day_key: str,
-                                 base_date: Optional[datetime],
-                                 parking_spot_prefix: str) -> List[Truck]:
+    def _generate_delivery_trucks(
+        self,
+        containers: List[Container],
+        day_key: str,
+        base_date: Optional[datetime],
+        parking_spot_prefix: str
+    ) -> List[Truck]:
         """Generate trucks for delivering containers to the terminal."""
         if not containers:
             return []
@@ -136,7 +143,7 @@ class TruckFactory:
         current_used_length = 0.0
         
         for container in sorted_containers:
-            if current_used_length + container.length_m <= TRUCK_LENGTH:
+            if current_used_length + container.length_m <= STANDARD_VEHICLE_LENGTH_M:
                 current_truck_containers.append(container)
                 current_used_length += container.length_m
             else:
@@ -173,119 +180,82 @@ class TruckFactory:
         base_date: Optional[datetime]
     ) -> List[Truck]:
         """
-        Erzeuge exakt einen Pickup‑LKW pro Container.
-        Keine Bündelung. Ankunftszeit aus Pickup‑KDE (6..22 Uhr) am selben Tag.
+        Generate exactly one pickup truck per container.
+        No bundling. Arrival time from pickup KDE (6-22h) on same day.
         """
         if not containers:
             return []
+        
         trucks: List[Truck] = []
-        for c in containers:
+        
+        for container in containers:
             arrival_time = self._sample_arrival_time(
                 day_key=day_key,
                 is_delivery=False,
                 base_date=base_date
             )
-            t = Truck(
-                max_length=TRUCK_LENGTH,
+            
+            truck = Truck(
+                max_length=STANDARD_VEHICLE_LENGTH_M,
                 arrival_time=arrival_time,
                 parking_spot=None
             )
-            t.add_pickup_container_id(c.container_id)
-            t.is_pickup_truck = True
-            t.is_delivery_truck = False
-            trucks.append(t)
+            truck.add_pickup_container_id(container.container_id)
+            truck.is_pickup_truck = True
+            truck.is_delivery_truck = False
+            trucks.append(truck)
+        
         return trucks
     
-    def _group_containers_for_pickup(self, containers: List[Container]) -> List[List[Container]]:
-        groups = []
-        current_group = []
-        current_used_length = 0.0
-
-        sorted_containers = sorted(
-            containers,
-            key=lambda c: (c.departure_date or datetime.max, c.container_id)
-        )
-
-        for container in sorted_containers:
-            if current_used_length + container.length_m <= TRUCK_LENGTH:
-                current_group.append(container)
-                current_used_length += container.length_m
-            else:
-                if current_group:
-                    groups.append(current_group)
-                current_group = [container]
-                current_used_length = container.length_m
-
-        if current_group:
-            groups.append(current_group)
-
-        return groups
-    
-    def _create_delivery_truck(self,
-                            containers: List[Container],
-                            day_key: str,
-                            base_date: Optional[datetime],
-                            parking_spot_prefix: str) -> Truck:
+    def _create_delivery_truck(
+        self,
+        containers: List[Container],
+        day_key: str,
+        base_date: Optional[datetime]
+    ) -> Truck:
+        """Create a delivery truck with containers."""
         self._id_counter += 1
         truck_id = f"TRK{self._id_counter:05d}"
-
+        
         arrival_time = self._sample_arrival_time(
             day_key=day_key,
             is_delivery=True,
             base_date=base_date
         )
-
-        # Do NOT pre-assign parking; agent will SLOT_TRUCK_PARKING
+        
+        # Do NOT pre-assign parking; agent will handle SLOT_TRUCK_PARKING
         truck = Truck(
             truck_id=truck_id,
-            max_length=TRUCK_LENGTH,
+            max_length=STANDARD_VEHICLE_LENGTH_M,
             arrival_time=arrival_time,
             parking_spot=None
         )
-
+        
         for container in containers:
             truck.add_container(container)
-
+        
         truck.is_delivery_truck = True
         truck.is_pickup_truck = False
-
-        return truck
-
-    def _create_pickup_truck(self,
-                            containers: List[Container],
-                            day_key: str,
-                            base_date: Optional[datetime],
-                            parking_spot_prefix: str) -> Truck:
-        self._id_counter += 1
-        truck_id = f"TRK{self._id_counter:05d}"
-
-        arrival_time = self._sample_arrival_time(
-            day_key=day_key,
-            is_delivery=False,
-            base_date=base_date
-        )
-
-        # Do NOT pre-assign parking; agent will SLOT_TRUCK_PARKING
-        truck = Truck(
-            truck_id=truck_id,
-            max_length=TRUCK_LENGTH,
-            arrival_time=arrival_time,
-            parking_spot=None
-        )
-
-        for container in containers:
-            truck.add_pickup_container_id(container.container_id)
-
-        truck.is_pickup_truck = True
-        truck.is_delivery_truck = False
-
+        
         return truck
     
-    def _sample_arrival_time(self,
-                            day_key: str,
-                            is_delivery: bool,
-                            base_date: Optional[datetime]) -> datetime:
-        """Sample arrival time from KDE model for the specified day."""
+    def _sample_arrival_time(
+        self,
+        day_key: str,
+        is_delivery: bool,
+        base_date: Optional[datetime]
+    ) -> datetime:
+        """
+        Sample arrival time from KDE model for the specified day.
+        
+        Args:
+            day_key: Day of week (lowercase)
+            is_delivery: True for delivery, False for pickup
+            base_date: Base date for arrival
+            
+        Returns:
+            Datetime for truck arrival
+        """
         if base_date is None:
             base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
@@ -300,17 +270,24 @@ class TruckFactory:
             else:
                 sampled_hours = sampled_hours[0]
             
-            sampled_hours = np.clip(sampled_hours, TRUCK_ARRIVAL_HOURS_START, TRUCK_ARRIVAL_HOURS_END)
+            sampled_hours = np.clip(
+                sampled_hours,
+                GateConfig.TRUCK_ARRIVAL_HOUR_START,
+                GateConfig.TRUCK_ARRIVAL_HOUR_END
+            )
         else:
             # No KDE model - use uniform distribution
-            sampled_hours = np.random.uniform(TRUCK_ARRIVAL_HOURS_START, TRUCK_ARRIVAL_HOURS_END)
+            sampled_hours = np.random.uniform(
+                GateConfig.TRUCK_ARRIVAL_HOUR_START,
+                GateConfig.TRUCK_ARRIVAL_HOUR_END
+            )
         
         hours = int(sampled_hours)
         minutes = int((sampled_hours - hours) * 60)
         
         return base_date.replace(hour=hours, minute=minutes)
     
-    def get_kde_summary(self) -> Dict:
+    def get_kde_summary(self) -> Dict[str, Dict[str, any]]:
         """Get summary of loaded KDE models."""
         return {
             'delivery_models': {

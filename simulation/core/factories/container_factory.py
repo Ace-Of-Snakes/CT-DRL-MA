@@ -5,24 +5,29 @@ import pickle
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from scipy.stats import gaussian_kde
-from simulation.core.containers.container import Container, Direction
+
+from simulation.core.containers.container import Container
+from simulation.core.enums import Direction, GoodsType
+from simulation.config.paths import DataPaths
+from simulation.utils.id_generator import IDGenerator
 
 
 class ContainerFactory:
     """
     Factory class for efficient container generation using preloaded models and data.
     Loads all necessary data once at initialization and uses vectorized operations.
-    Now supports separate distributions and models for import and export operations.
+    Supports separate distributions and models for import and export operations.
     """
     
-    def __init__(self, 
-                 import_dist_file: str = "simulation/data/train_operator_container_type_distribution_import.json",
-                 export_dist_file: str = "simulation/data/train_operator_container_type_distribution_export.json",
-                 container_data_file: str = "simulation/data/container_data.csv",
-                 models_folder: str = "simulation/data/models"
-                 ):
+    def __init__(
+        self,
+        import_dist_file: str = None,
+        export_dist_file: str = None,
+        container_data_file: str = None,
+        models_folder: str = None
+    ):
         """
         Initialize factory with all necessary data loaded into memory.
         
@@ -31,9 +36,14 @@ class ContainerFactory:
             export_dist_file: Path to exporter distribution JSON
             container_data_file: Path to container specifications CSV
             models_folder: Base folder containing 'import' and 'export' subfolders with KDE models
-            use_estimator: Whether to apply departure estimation to containers
         """
-        # Load operator distributions for both import and export
+        # Use paths from config if not provided
+        import_dist_file = import_dist_file or str(DataPaths.IMPORT_DISTRIBUTION)
+        export_dist_file = export_dist_file or str(DataPaths.EXPORT_DISTRIBUTION)
+        container_data_file = container_data_file or str(DataPaths.CONTAINER_CSV)
+        models_folder = models_folder or str(DataPaths.MODELS_DIR)
+        
+        # Load operator distributions
         with open(import_dist_file, 'r') as f:
             self.import_operator_dict = json.load(f)
         
@@ -43,7 +53,7 @@ class ContainerFactory:
         # Load container specifications
         self._load_container_specs(container_data_file)
         
-        # Load KDE models for both import and export containers
+        # Load KDE models
         import_models_folder = os.path.join(models_folder, "import")
         export_models_folder = os.path.join(models_folder, "export")
         
@@ -53,7 +63,7 @@ class ContainerFactory:
         # ID counter for unique container IDs
         self._id_counter = 0
     
-    def _load_container_specs(self, csv_file: str):
+    def _load_container_specs(self, csv_file: str) -> None:
         """Load container specifications from CSV."""
         df = pd.read_csv(csv_file)
         
@@ -74,8 +84,16 @@ class ContainerFactory:
         # Store available container types for validation
         self.available_container_types = set(self.container_specs.keys())
     
-    def _load_kde_models(self, models_folder: str) -> Dict:
-        """Load all KDE models from a folder."""
+    def _load_kde_models(self, models_folder: str) -> Dict[str, gaussian_kde]:
+        """
+        Load all KDE models from a folder.
+        
+        Args:
+            models_folder: Path to folder containing KDE pickle files
+            
+        Returns:
+            Dictionary mapping container type to KDE model
+        """
         kde_models = {}
         
         if not os.path.exists(models_folder):
@@ -85,16 +103,12 @@ class ContainerFactory:
         for file in os.listdir(models_folder):
             if file.endswith("_dwelltime_kde.pkl"):
                 # Extract container type from filename
-                # Handle both old format (e.g., "FEU_dwelltime_kde.pkl")
-                # and potential new format (e.g., "kde_dwelltime_FEU.pkl")
                 if file.startswith("kde_dwelltime_"):
-                    # Old export format - skip as we'll use new structure
-                    continue
-                else:
-                    # Standard format: CONTAINER_TYPE_dwelltime_kde.pkl
-                    container_type = file.replace("_dwelltime_kde.pkl", "")
+                    continue  # Skip old format
                 
+                container_type = file.replace("_dwelltime_kde.pkl", "")
                 file_path = os.path.join(models_folder, file)
+                
                 try:
                     with open(file_path, 'rb') as f:
                         kde_data = pickle.load(f)
@@ -111,55 +125,71 @@ class ContainerFactory:
                         print(f"Warning: Skipping {file} - unrecognized format")
                 except Exception as e:
                     print(f"Warning: Could not load {file}: {e}")
-                    
+        
         return kde_models
     
-    def create_containers(self, 
-                         operator: str, 
-                         direction: Direction,
-                         n_containers: int = 1,
-                         base_arrival_date: Optional[datetime] = None) -> List[Container]:
+    def create_containers(
+        self,
+        operator: str,
+        direction: Direction,
+        n_containers: int = 1,
+        base_arrival_date: Optional[datetime] = None
+    ) -> List[Container]:
         """
         Create containers for a given operator and direction.
-        Estimation removed: only scheduled (true) departure is set.
+        
+        Args:
+            operator: Operator name
+            direction: "Import" or "Export"
+            n_containers: Number of containers to create
+            base_arrival_date: Base arrival date for containers
+            
+        Returns:
+            List of Container objects
         """
-        if direction == "Import":
+        if direction == Direction.IMPORT:
             operator_dict = self.import_operator_dict
         else:
             operator_dict = self.export_operator_dict
-
+        
         if operator not in operator_dict:
-            raise ValueError(f"Unknown operator: {operator} for direction: {direction}")
-
+            raise ValueError(f"Unknown operator: {operator} for direction: {direction.value}")
+        
         if base_arrival_date is None:
             base_arrival_date = datetime.now()
-
+        
         # Sample container properties
         samples = self._sample_containers(operator, direction, n_containers)
-
+        
         # Create Container objects
         containers = []
         for sample in samples:
             container = self._create_single_container(sample, direction, base_arrival_date)
             containers.append(container)
-
-        # No estimator; return as-is
+        
         return containers
     
-    def _sample_containers(self, 
-                          operator: str, 
-                          direction: Direction,
-                          n_samples: int) -> np.ndarray:
+    def _sample_containers(
+        self,
+        operator: str,
+        direction: Direction,
+        n_samples: int
+    ) -> np.ndarray:
         """
         Vectorized sampling of container properties.
         
+        Args:
+            operator: Operator name
+            direction: Direction (Import/Export)
+            n_samples: Number of samples to generate
+            
         Returns:
             Structured array with sampled properties
         """
-        # Select the appropriate operator dictionary based on direction
-        if direction == "Import":
+        # Select appropriate operator dictionary
+        if direction == Direction.IMPORT:
             operator_dict = self.import_operator_dict
-        else:  # Export
+        else:
             operator_dict = self.export_operator_dict
         
         operator_data = operator_dict[operator]
@@ -169,7 +199,7 @@ class ContainerFactory:
         valid_types = [t for t in all_types if t in self.available_container_types]
         
         if not valid_types:
-            raise ValueError(f"No valid container types found for operator {operator} in {direction}")
+            raise ValueError(f"No valid container types found for operator {operator} in {direction.value}")
         
         container_types = np.array(valid_types)
         probs = np.array([operator_data[c]["P_for_operator"] for c in container_types])
@@ -184,10 +214,13 @@ class ContainerFactory:
         
         reefer_flags = np.random.rand(n_samples) < reefer_probs
         dg_flags = (np.random.rand(n_samples) < dg_probs) & (~reefer_flags)
-        goods_types = np.where(reefer_flags, "Reefer", 
-                               np.where(dg_flags, "DangerousGoods", "Regular"))
+        goods_types = np.where(
+            reefer_flags,
+            GoodsType.REEFER.value,
+            np.where(dg_flags, GoodsType.DANGEROUS_GOODS.value, GoodsType.REGULAR.value)
+        )
         
-        # 3. Sample dwell times based on direction
+        # 3. Sample dwell times
         dwell_times = self._sample_dwell_times(sampled_types, direction, n_samples)
         
         # 4. Get container specifications (vectorized lookup)
@@ -222,98 +255,105 @@ class ContainerFactory:
             result['is_trailer'][i] = spec['is_trailer']
         
         return result
+    
+    def _sample_dwell_times(
+        self,
+        sampled_types: np.ndarray,
+        direction: Direction,
+        n_samples: int
+    ) -> np.ndarray:
+        """
+        Sample dwell times based on direction and container type.
         
-    def _sample_dwell_times(self, 
-                        sampled_types: np.ndarray,
-                        direction: Direction,
-                        n_samples: int) -> np.ndarray:
-        """Sample dwell times based on direction and container type with precision handling."""
+        Args:
+            sampled_types: Array of sampled container types
+            direction: Direction (Import/Export)
+            n_samples: Number of samples
+            
+        Returns:
+            Array of dwell times in days
+        """
         dwell_times = np.empty(n_samples)
         
-        # Select the appropriate KDE models based on direction
-        if direction == "Import":
+        # Select appropriate KDE models
+        if direction == Direction.IMPORT:
             kde_models = self.import_kde_models
-        else:  # Export
+        else:
             kde_models = self.export_kde_models
         
-        # Set default value for containers without KDE
-        dwell_times[:] = 2.0  # Default if no KDE available
+        # Default value for containers without KDE
+        dwell_times[:] = 2.0
         
         # Process each unique container type
-        for ct in np.unique(sampled_types):
-            if ct in kde_models:
-                idx = np.where(sampled_types == ct)[0]
-                sampled = kde_models[ct].resample(len(idx))
+        for container_type in np.unique(sampled_types):
+            if container_type in kde_models:
+                idx = np.where(sampled_types == container_type)[0]
+                sampled = kde_models[container_type].resample(len(idx))
+                
                 # Handle both 1D and 2D array returns from resample
                 if sampled.ndim > 1:
                     dwell_times[idx] = sampled[0]
                 else:
                     dwell_times[idx] = sampled
             else:
-                # If no specific KDE model exists for this container type,
-                # keep the default value (2.0 days)
-                print(f"Warning: No KDE model found for {direction} container type {ct}, using default dwell time")
+                print(f"Warning: No KDE model found for {direction.value} container type {container_type}, using default dwell time")
         
         # Ensure non-negative values
         dwell_times = np.maximum(dwell_times, 0)
         
-        # Round short dwell times to integers to ensure perfect accuracy works correctly
-        # This is critical for containers that should have perfect estimation
+        # Round short dwell times to integers for accuracy
         short_stay_mask = dwell_times <= 2.0
         dwell_times[short_stay_mask] = np.round(dwell_times[short_stay_mask])
         
         return dwell_times
     
-    def create_batch(self,
-                    operators_directions: List[Tuple[str, Direction, int]],
-                    base_arrival_date: Optional[datetime] = None,
-                    current_date: Optional[datetime] = None) -> List[Container]:
+    def _create_single_container(
+        self,
+        sample: np.void,
+        direction: Direction,
+        base_arrival_date: datetime
+    ) -> Container:
         """
-        Create multiple batches of containers efficiently.
+        Create a single Container object from sampled data.
         
         Args:
-            operators_directions: List of (operator, direction, count) tuples
-            base_arrival_date: Base arrival date for all containers
-            current_date: Current simulation date for estimation
+            sample: Numpy structured array element with container properties
+            direction: Direction (Import/Export)
+            base_arrival_date: Base arrival date
             
         Returns:
-            Combined list of all containers with estimated departures
+            Container object
         """
-        all_containers = []
-        for operator, direction, count in operators_directions:
-            containers = self.create_containers(
-                operator, direction, count, base_arrival_date, current_date
-            )
-            all_containers.extend(containers)
-        return all_containers
-    
-    def _create_single_container(self, 
-                                sample: np.void,
-                                direction: Direction,
-                                base_arrival_date: datetime) -> Container:
-        """Create a single Container object from sampled data."""
         self._id_counter += 1
         
-        # Calculate dates with proper rounding for fractional days
+        # Calculate dates with proper rounding
         arrival_date = base_arrival_date
         dwell_days = float(sample['dwell_time'])
         
-        # Round dwell time to avoid floating point precision issues
-        # For perfect accuracy cases (<=2 days), ensure exact integer days
+        # Round dwell time for short stays
         if dwell_days <= 2.0:
-            dwell_days = round(dwell_days)  # Round to nearest integer day
+            dwell_days = round(dwell_days)
         
-        # Use total_seconds for more precise timedelta
+        # Use total_seconds for precise timedelta
         dwell_seconds = dwell_days * 86400  # Convert to seconds
         departure_date = arrival_date + timedelta(seconds=round(dwell_seconds))
         
+        # Map string goods_type to enum
+        goods_type_str = str(sample['goods_type'])
+        if goods_type_str == GoodsType.REEFER.value:
+            goods_type = GoodsType.REEFER
+        elif goods_type_str == GoodsType.DANGEROUS_GOODS.value:
+            goods_type = GoodsType.DANGEROUS_GOODS
+        else:
+            goods_type = GoodsType.REGULAR
+        
         return Container(
-            container_id=f"C{self._id_counter:06d}",
+            container_id=IDGenerator.generate_container_id(self._id_counter),
             direction=direction,
             container_type=str(sample['container_type']),
             arrival_date=arrival_date,
             departure_date=departure_date,
-            goods_type=str(sample['goods_type']),
+            goods_type=goods_type,
             length_ft=int(sample['length_ft']),
             length_m=float(sample['length_m']),
             width_m=float(sample['width_m']),
@@ -322,6 +362,29 @@ class ContainerFactory:
             is_swap_body=bool(sample['is_swap_body']),
             is_trailer=bool(sample['is_trailer'])
         )
+    
+    def create_batch(
+        self,
+        operators_directions: List[tuple[str, Direction, int]],
+        base_arrival_date: Optional[datetime] = None
+    ) -> List[Container]:
+        """
+        Create multiple batches of containers efficiently.
+        
+        Args:
+            operators_directions: List of (operator, direction, count) tuples
+            base_arrival_date: Base arrival date for all containers
+            
+        Returns:
+            Combined list of all containers
+        """
+        all_containers = []
+        for operator, direction, count in operators_directions:
+            containers = self.create_containers(
+                operator, direction, count, base_arrival_date
+            )
+            all_containers.extend(containers)
+        return all_containers
     
     def get_available_operators(self, direction: Direction) -> List[str]:
         """
@@ -333,12 +396,12 @@ class ContainerFactory:
         Returns:
             List of operator names
         """
-        if direction == "Import":
+        if direction == Direction.IMPORT:
             return list(self.import_operator_dict.keys())
-        else:  # Export
+        else:
             return list(self.export_operator_dict.keys())
     
-    def get_kde_model_summary(self) -> Dict:
+    def get_kde_model_summary(self) -> Dict[str, Dict[str, any]]:
         """
         Get summary of loaded KDE models.
         
@@ -359,7 +422,7 @@ class ContainerFactory:
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize factory with new structure
+    # Initialize factory
     factory = ContainerFactory()
     
     # Check loaded models
@@ -369,33 +432,33 @@ if __name__ == "__main__":
     print(f"  Export: {model_summary['export_models']['count']} models")
     
     # Check available operators
-    import_operators = factory.get_available_operators("Import")
-    export_operators = factory.get_available_operators("Export")
+    import_operators = factory.get_available_operators(Direction.IMPORT)
+    export_operators = factory.get_available_operators(Direction.EXPORT)
     print(f"\nAvailable operators:")
-    print(f"  Import: {import_operators}")  # Show first 5
-    print(f"  Export: {export_operators}")  # Show first 5
+    print(f"  Import: {import_operators[:5]}...")  # Show first 5
+    print(f"  Export: {export_operators[:5]}...")
     
     # Test container generation for both directions
     print("\n=== Testing Import Containers ===")
     if import_operators:
         import_containers = factory.create_containers(
             operator=import_operators[0],
-            direction="Import",
-            n_containers=10000
+            direction=Direction.IMPORT,
+            n_containers=10
         )
         print(f"Created {len(import_containers)} import containers")
         for c in import_containers[:3]:
-            print(f"  {c.container_id}: {c.container_type}, {c.direction}, "
+            print(f"  {c.container_id}: {c.container_type}, {c.direction.value}, "
                   f"dwell: {(c.departure_date - c.arrival_date).days} days")
     
     print("\n=== Testing Export Containers ===")
     if export_operators:
         export_containers = factory.create_containers(
             operator=export_operators[0],
-            direction="Export",
-            n_containers=10000
+            direction=Direction.EXPORT,
+            n_containers=10
         )
         print(f"Created {len(export_containers)} export containers")
         for c in export_containers[:3]:
-            print(f"  {c.container_id}: {c.container_type}, {c.direction}, "
+            print(f"  {c.container_id}: {c.container_type}, {c.direction.value}, "
                   f"dwell: {(c.departure_date - c.arrival_date).days} days")
