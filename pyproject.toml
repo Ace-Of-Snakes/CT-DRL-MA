@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "ct-drl-ma"
+version = "0.1.0"
+description = "Masters thesis on RMGC controlled by Reinforcement Learning"
+authors = ["Franko Jolic"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "3.12.3"
+numpy = "^2.4.1"
+torch = "^2.10.0"
+torchvision = "^0.25.0"
+matplotlib = "^3.10.8"
+tqdm = "^4.67.2"
+pandas = "^3.0.0"
+scipy = "^1.17.0"
+scikit-learn = "^1.8.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
