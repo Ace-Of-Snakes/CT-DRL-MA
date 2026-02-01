@@ -2,21 +2,19 @@
 """
 Hierarchical environment step function for two-stage agent.
 
-Wraps ContainerTerminalEnv and provides step_hierarchical method
-that handles the two-stage decision process.
+OPTIMIZED VERSION: Reduces encode_with_forecast calls.
+- Original: 2N + 2 encodes per step_all_cranes (N = num cranes)
+- Optimized: N + 1 encodes per step_all_cranes
+- State passed between crane steps to avoid redundant initial encodes
+- Time advances after every crane action (required for simulation correctness)
 """
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Dict, List, Optional, Tuple, Any, Set
 import numpy as np
 from numpy.typing import NDArray
 
-from simulation.core.facilities.yard import BooleanStorageYard, PlacementResult
-from simulation.core.facilities.railyard import BooleanRailYard
-from simulation.core.facilities.parking import ParkingArea
-from simulation.core.vehicles.train import Train
-from simulation.core.vehicles.truck import Truck
-from simulation.core.vehicles.terminal_truck import TerminalTruck
+from simulation.core.facilities.yard import PlacementResult
 from simulation.core.enums import MoveType
 
 from simulation.operations.hierarchical_moves import HierarchicalMoveGenerator
@@ -36,8 +34,6 @@ class HierarchicalStepResult:
     reward: float
     done: bool
     info: Dict[str, Any]
-    
-    # For training
     transition: Optional[HierarchicalTransition] = None
     was_valid_move: bool = False
 
@@ -46,32 +42,19 @@ class HierarchicalEnvWrapper:
     """
     Wrapper that adds hierarchical stepping to ContainerTerminalEnv.
     
-    This handles:
-    - Multi-crane sequential decisions
-    - Two-stage selection (container → destination)
-    - Retry logic for invalid selections
-    - Parking actions as direct actions
+    Optimized to minimize redundant state encoding calls.
     """
     
     def __init__(
         self,
-        env,  # ContainerTerminalEnv
+        env,
         max_retries: int = 1,
         no_destination_penalty: float = -1.0
     ):
-        """
-        Initialize wrapper.
-        
-        Args:
-            env: The underlying ContainerTerminalEnv
-            max_retries: Max retries per timestep when selection has no destinations
-            no_destination_penalty: Penalty when container has no valid destinations
-        """
         self.env = env
         self.max_retries = max_retries
         self.no_destination_penalty = no_destination_penalty
         
-        # Create hierarchical move generator
         self.move_gen = HierarchicalMoveGenerator(
             yard=env.yard,
             rail=env.rail,
@@ -79,7 +62,6 @@ class HierarchicalEnvWrapper:
             proximity=5
         )
         
-        # Track train heat bays for destination scoring
         self._train_heat_bays: Set[int] = set()
     
     def reset(self, *args, **kwargs):
@@ -96,27 +78,29 @@ class HierarchicalEnvWrapper:
             if anchor is not None:
                 self._train_heat_bays.add(anchor)
     
+    def _encode_state(self) -> NDArray[np.float32]:
+        """Single point for state encoding."""
+        return self.env.encoder.encode_with_forecast(
+            self.env.trains,
+            self.env.trucks,
+            self.env.terminal_trucks,
+            self.env.day_plan,
+            self.env.current_time
+        )
+    
     def step_hierarchical(
         self,
         agent: HierarchicalDQNAgent,
-        crane_id: int = 0
+        crane_id: int = 0,
+        state_np: Optional[NDArray[np.float32]] = None
     ) -> HierarchicalStepResult:
         """
         Execute one hierarchical step for a single crane.
         
-        Flow:
-        1. Build action pool (containers + parking)
-        2. Stage 1: Agent selects container or parking
-        3. If parking: execute and return
-        4. If container: compute destinations
-        5. If no destinations: penalty, retry (same timestep)
-        6. Stage 2: Agent selects destination
-        7. Execute move, compute reward
-        8. Return result with transition for training
-        
         Args:
             agent: The hierarchical DQN agent
-            crane_id: Which crane is deciding (for multi-crane)
+            crane_id: Which crane is deciding
+            state_np: Pre-computed state (avoids redundant encoding)
             
         Returns:
             HierarchicalStepResult
@@ -131,14 +115,9 @@ class HierarchicalEnvWrapper:
         # Clear agent's state cache for new decision
         agent.clear_state_cache()
         
-        # Get current state
-        state_np = self.env.encoder.encode_with_forecast(
-            self.env.trains,
-            self.env.trucks,
-            self.env.terminal_trucks,
-            self.env.day_plan,
-            now
-        )
+        # Use provided state or encode (only if not provided)
+        if state_np is None:
+            state_np = self._encode_state()
         
         # Build action pool
         containers = self.move_gen.list_moveable_containers(
@@ -147,19 +126,12 @@ class HierarchicalEnvWrapper:
             now
         )
         parkings = self.move_gen.list_parking_actions(self.env.trucks)
-        
         pool = ActionPool(containers=containers, parkings=parkings)
         
-        # Handle empty pool
+        # Handle empty pool - advance time since we can't do anything
         if pool.is_empty():
             self._advance_time()
-            next_state = self.env.encoder.encode_with_forecast(
-                self.env.trains,
-                self.env.trucks,
-                self.env.terminal_trucks,
-                self.env.day_plan,
-                self.env.current_time
-            )
+            next_state = self._encode_state()  # Re-encode for updated time features
             done = self._check_day_end()
             return HierarchicalStepResult(
                 next_state=next_state,
@@ -179,7 +151,7 @@ class HierarchicalEnvWrapper:
             
             # Filter out excluded containers
             filtered_containers = [
-                c for c in containers 
+                c for c in containers
                 if c.container_id not in excluded_container_ids
             ]
             filtered_pool = ActionPool(
@@ -188,26 +160,26 @@ class HierarchicalEnvWrapper:
             )
             
             if filtered_pool.is_empty():
-                # All options exhausted
                 break
             
             # Stage 1: Select action
             selection = agent.select_stage1(state_np, filtered_pool)
             
             if selection.index < 0:
-                # No valid selection
                 break
             
             # Handle parking action
             if selection.is_parking:
-                return self._execute_parking(
+                result = self._execute_parking(
                     state_np, selection, filtered_pool, agent, info
                 )
+                result.reward += total_penalty
+                return result
             
             # Handle container selection
             cont = selection.container
             
-            # Stage 2: Get destinations
+            # Stage 2: Get destinations for selected container
             destinations = self.move_gen.list_destinations_for_container(
                 cont,
                 self.env.trains,
@@ -219,6 +191,9 @@ class HierarchicalEnvWrapper:
                 # No valid destinations - penalty and retry
                 total_penalty += self.no_destination_penalty
                 excluded_container_ids.add(cont.container_id)
+                info.setdefault("retry_reasons", []).append(
+                    f"no_dest:{cont.source_type.value}"
+                )
                 continue
             
             # Stage 2: Select destination
@@ -231,7 +206,6 @@ class HierarchicalEnvWrapper:
             )
             
             if dest_idx < 0 or dest_idx >= len(destinations):
-                # Invalid destination selection
                 total_penalty += self.no_destination_penalty
                 excluded_container_ids.add(cont.container_id)
                 continue
@@ -248,13 +222,7 @@ class HierarchicalEnvWrapper:
         
         # All retries exhausted - advance time
         self._advance_time()
-        next_state = self.env.encoder.encode_with_forecast(
-            self.env.trains,
-            self.env.trucks,
-            self.env.terminal_trucks,
-            self.env.day_plan,
-            self.env.current_time
-        )
+        next_state = self._encode_state()  # Re-encode to get updated time features
         done = self._check_day_end()
         
         return HierarchicalStepResult(
@@ -268,7 +236,7 @@ class HierarchicalEnvWrapper:
     
     def _execute_parking(
         self,
-        state_np: np.ndarray,
+        state_np: NDArray[np.float32],
         selection: Stage1Selection,
         pool: ActionPool,
         agent: HierarchicalDQNAgent,
@@ -283,8 +251,11 @@ class HierarchicalEnvWrapper:
         else:
             success = False
         
+        # Advance time (parking takes time too)
+        self._advance_time()
+        
         if success:
-            reward = 0.5  # Parking reward from existing system
+            reward = 0.5
             info["executed"].append({
                 "type": "PARKING",
                 "truck_id": parking.truck_id,
@@ -293,17 +264,11 @@ class HierarchicalEnvWrapper:
         else:
             reward = -0.5
         
-        # Get next state
-        next_state = self.env.encoder.encode_with_forecast(
-            self.env.trains,
-            self.env.trucks,
-            self.env.terminal_trucks,
-            self.env.day_plan,
-            self.env.current_time
-        )
+        # Always re-encode after time advances
+        next_state = self._encode_state()
         done = self._check_day_end()
         
-        # Build transition for training
+        # Build transition
         parking_feats = agent.park_featurizer.featurize_batch(pool.parkings).numpy()
         
         transition = HierarchicalTransition(
@@ -332,7 +297,7 @@ class HierarchicalEnvWrapper:
     
     def _execute_move(
         self,
-        state_np: np.ndarray,
+        state_np: NDArray[np.float32],
         cont: MoveableContainer,
         selection: Stage1Selection,
         dest: Destination,
@@ -343,27 +308,25 @@ class HierarchicalEnvWrapper:
         info: Dict
     ) -> HierarchicalStepResult:
         """Execute container move."""
-        # Determine move type based on source and destination
         move_type = self._determine_move_type(cont.source_type, dest.dest_type)
-        
-        # Build move args
         args = self._build_move_args(cont, dest)
         
         # Execute through TLM
         success = self.env.tlm.execute(
-            type(self.env.tlm).Move(move_type, args) if hasattr(self.env.tlm, 'Move') 
-            else self._create_move(move_type, args),
+            self._create_move(move_type, args),
             self.env.trains,
             self.env.trucks,
             self.env.terminal_trucks
         )
         
+        # CRITICAL: Advance time after crane operation (crane takes time to move)
+        self._advance_time()
+        
         if success:
-            # Compute reward
             reward = self.env.reward_engine.immediate_reward(
                 move_type.value,
-                distance_m=abs(dest.bay - cont.bay) * 2.0,  # Approximate distance
-                time_s=30.0  # Approximate time
+                distance_m=abs(dest.bay - cont.bay) * 2.0,
+                time_s=30.0
             )
             info["executed"].append({
                 "type": move_type.value,
@@ -371,20 +334,12 @@ class HierarchicalEnvWrapper:
                 "source": cont.source_type.value,
                 "dest": dest.dest_type.value
             })
-            
-            # Update train heat
             self._update_train_heat()
         else:
             reward = -0.5
         
-        # Get next state
-        next_state = self.env.encoder.encode_with_forecast(
-            self.env.trains,
-            self.env.trucks,
-            self.env.terminal_trucks,
-            self.env.day_plan,
-            self.env.current_time
-        )
+        # Always re-encode after time advances (time features change)
+        next_state = self._encode_state()
         done = self._check_day_end()
         
         # Build transition
@@ -415,12 +370,8 @@ class HierarchicalEnvWrapper:
             was_valid_move=success
         )
     
-    def _determine_move_type(
-        self,
-        source: SourceType,
-        dest: DestinationType
-    ) -> MoveType:
-        """Map source/destination combination to MoveType."""
+    def _determine_move_type(self, source: SourceType, dest: DestinationType) -> MoveType:
+        """Map source/destination to MoveType."""
         mapping = {
             (SourceType.YARD, DestinationType.YARD): MoveType.YARD_TO_YARD,
             (SourceType.YARD, DestinationType.TRAIN): MoveType.YARD_TO_TRAIN,
@@ -432,21 +383,15 @@ class HierarchicalEnvWrapper:
         }
         return mapping.get((source, dest), MoveType.YARD_TO_YARD)
     
-    def _build_move_args(
-        self,
-        cont: MoveableContainer,
-        dest: Destination
-    ) -> Dict[str, Any]:
+    def _build_move_args(self, cont: MoveableContainer, dest: Destination) -> Dict[str, Any]:
         """Build move args dictionary."""
         args = {"container_id": cont.container_id}
         
-        # Add source reference
         if cont.source_type == SourceType.TRAIN:
             args["train_id"] = cont.source_id
         elif cont.source_type == SourceType.TRUCK:
             args["truck_id"] = cont.source_id
         
-        # Add destination reference
         if dest.dest_type == DestinationType.YARD:
             args["placement"] = PlacementResult(
                 row=dest.row,
@@ -482,10 +427,10 @@ class HierarchicalEnvWrapper:
         agent: HierarchicalDQNAgent
     ) -> Tuple[NDArray[np.float32], float, bool, Dict[str, Any]]:
         """
-        Execute hierarchical steps for all available cranes sequentially.
+        Execute hierarchical steps for all available cranes.
         
-        Returns:
-            Tuple of (next_state, total_reward, done, info)
+        OPTIMIZED: Encodes state once, passes between crane steps,
+        only re-encodes when moves actually change state.
         """
         total_reward = 0.0
         all_info: Dict[str, Any] = {
@@ -498,31 +443,33 @@ class HierarchicalEnvWrapper:
         # Handle arrivals/departures first
         self._handle_arrivals_departures()
         
-        # Get idle cranes
         now = self.env.current_time
         idle_cranes = [
             c for c in self.env.cranes
             if c.busy_until is None or c.busy_until <= now
         ]
         
+        # Encode state ONCE at start
+        state = self._encode_state()
+        
         if not idle_cranes:
             # All cranes busy - advance to next available
             next_time = min(
-                c.busy_until for c in self.env.cranes 
+                c.busy_until for c in self.env.cranes
                 if c.busy_until is not None
             )
             self.env.current_time = next_time
-            
-            state = self.env.encoder.encode_with_forecast(
-                self.env.trains, self.env.trucks, self.env.terminal_trucks,
-                self.env.day_plan, self.env.current_time
-            )
+            # Time changed but yard didn't - still need fresh encode for time features
+            state = self._encode_state()
             done = self._check_day_end()
             return state, 0.0, done, all_info
         
-        # Process each idle crane
+        # Process each idle crane, passing state between them
         for crane in idle_cranes:
-            result = self.step_hierarchical(agent, crane_id=crane.id)
+            result = self.step_hierarchical(agent, crane_id=crane.id, state_np=state)
+            
+            # Update state for next crane (result contains updated state if move succeeded)
+            state = result.next_state
             
             total_reward += result.reward
             all_info["crane_results"].append({
@@ -540,19 +487,14 @@ class HierarchicalEnvWrapper:
                 done = True
                 break
         
-        # Get final state
-        final_state = self.env.encoder.encode_with_forecast(
-            self.env.trains, self.env.trucks, self.env.terminal_trucks,
-            self.env.day_plan, self.env.current_time
-        )
-        
-        return final_state, total_reward, done, all_info
+        # Final state is already computed - no need to re-encode!
+        return state, total_reward, done, all_info
     
     def _handle_arrivals_departures(self):
         """Handle train/truck arrivals and departures."""
-        # This delegates to the underlying env's logic
+        # Delegate to env's internal handling if available
         if hasattr(self.env, '_admit_arrivals_and_departures'):
             self.env._admit_arrivals_and_departures()
         
-        # Update train heat
+        # Update train heat after potential arrivals
         self._update_train_heat()

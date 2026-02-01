@@ -1,17 +1,17 @@
-# simulation/training/curriculum_trainer.py
+# simulation/training/curriculum_trainer_fixed.py
 """
 Curriculum-based training for hierarchical DQN agent.
 
-Features:
-- Gradual scaling of container throughput (20 → 220 imports)
-- 365 days per curriculum stage
-- Checkpoint saving after each stage
-- Logging of metrics for visualization
+FIXED VERSION - addresses:
+1. Better debug output to see what's happening
+2. Safety timeouts for infinite loops
+3. Proper progress tracking
 """
 import os
 import csv
 import json
 import random
+import sys
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple, Any
@@ -24,6 +24,11 @@ import torch
 from simulation.config.curriculum_config import CurriculumConfig, HierarchicalDQNConfig
 from simulation.rl.agents.hierarchical_dqn_agent import HierarchicalDQNAgent
 from simulation.env.hierarchical_env import HierarchicalEnvWrapper
+
+
+# Safety limits
+MAX_STEPS_PER_DAY = 5000  # Prevent infinite loops
+DEBUG_INTERVAL_STEPS = 100  # Print debug info every N steps
 
 
 @dataclass
@@ -40,6 +45,7 @@ class DayMetrics:
     trucks_served: int = 0
     avg_loss: float = 0.0
     epsilon: float = 0.0
+    steps: int = 0  # Track step count
 
 
 @dataclass
@@ -62,15 +68,12 @@ class MetricsLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # CSV for daily metrics
         self.daily_csv_path = self.log_dir / "daily_metrics.csv"
         self._init_daily_csv()
         
-        # CSV for stage summaries
         self.stage_csv_path = self.log_dir / "stage_metrics.csv"
         self._init_stage_csv()
         
-        # JSON for detailed episode data
         self.episodes_dir = self.log_dir / "episodes"
         self.episodes_dir.mkdir(exist_ok=True)
     
@@ -82,7 +85,7 @@ class MetricsLogger:
                 writer.writerow([
                     "day_index", "stage", "date", "total_reward", "moves_executed",
                     "containers_imported", "containers_exported", "trains_departed",
-                    "trucks_served", "avg_loss", "epsilon"
+                    "trucks_served", "avg_loss", "epsilon", "steps"
                 ])
     
     def _init_stage_csv(self):
@@ -111,7 +114,8 @@ class MetricsLogger:
                 metrics.trains_departed,
                 metrics.trucks_served,
                 f"{metrics.avg_loss:.6f}",
-                f"{metrics.epsilon:.4f}"
+                f"{metrics.epsilon:.4f}",
+                metrics.steps
             ])
     
     def log_stage(self, metrics: StageMetrics):
@@ -130,40 +134,30 @@ class MetricsLogger:
             ])
     
     def log_episode_detail(self, stage: int, day: int, data: Dict[str, Any]):
-        """Log detailed episode data (sparse - only every N days)."""
+        """Log detailed episode data."""
         filepath = self.episodes_dir / f"stage{stage}_day{day}.json"
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2, default=str)
 
 
 class CurriculumTrainer:
-    """
-    Trains hierarchical DQN agent through curriculum stages.
-    """
+    """Trains hierarchical DQN agent through curriculum stages."""
     
     def __init__(
         self,
-        env_factory,  # Callable that returns (env, hierarchical_wrapper)
+        env_factory,
         curriculum_config: CurriculumConfig,
         network_config: HierarchicalDQNConfig,
         output_dir: str,
-        seed: int = 42
+        seed: int = 42,
+        verbose: bool = True
     ):
-        """
-        Initialize trainer.
-        
-        Args:
-            env_factory: Factory function to create environment
-            curriculum_config: Curriculum configuration
-            network_config: Network architecture configuration
-            output_dir: Directory for outputs (checkpoints, logs)
-            seed: Random seed
-        """
         self.env_factory = env_factory
         self.curriculum = curriculum_config
         self.net_config = network_config
         self.output_dir = Path(output_dir)
         self.seed = seed
+        self.verbose = verbose
         
         # Set seeds
         random.seed(seed)
@@ -184,22 +178,27 @@ class CurriculumTrainer:
         self.wrapper = None
         self.agent = None
     
+    def _print(self, msg: str):
+        """Print if verbose mode."""
+        if self.verbose:
+            print(msg)
+            sys.stdout.flush()
+    
     def train(self, start_stage: int = 0, load_checkpoint: Optional[str] = None):
-        """
-        Run full curriculum training.
-        
-        Args:
-            start_stage: Which stage to start from (for resuming)
-            load_checkpoint: Path to checkpoint to load (for resuming)
-        """
-        print(f"=== Curriculum Training ===")
-        print(f"Stages: {self.curriculum.num_stages}")
-        print(f"Days per stage: {self.curriculum.days_per_stage}")
-        print(f"Output: {self.output_dir}")
-        print()
+        """Run full curriculum training."""
+        self._print(f"=== Curriculum Training ===")
+        self._print(f"Stages: {self.curriculum.num_stages}")
+        self._print(f"Days per stage: {self.curriculum.days_per_stage}")
+        self._print(f"Output: {self.output_dir}")
+        self._print(f"Device: {self.net_config.device}")
+        self._print("")
         
         # Create environment
+        self._print("Creating environment...")
         self.env, self.wrapper = self.env_factory()
+        self._print(f"  Yard: {self.env.yard.n_rows}x{self.env.yard.n_bays}x{self.env.yard.n_tiers}")
+        # Note: cranes list is populated in reset(), so use num_cranes
+        self._print(f"  Cranes: {self.env.num_cranes}")
         
         # Get yard dimensions
         yard_dims = (
@@ -210,11 +209,13 @@ class CurriculumTrainer:
         )
         
         # Create agent
+        self._print("Creating agent...")
         self.agent = HierarchicalDQNAgent(yard_dims, self.net_config)
+        self._print(f"  Parameters: {sum(p.numel() for p in self.agent.q_net.parameters()):,}")
         
         # Load checkpoint if provided
         if load_checkpoint:
-            print(f"Loading checkpoint: {load_checkpoint}")
+            self._print(f"Loading checkpoint: {load_checkpoint}")
             self.agent.load(load_checkpoint)
         
         # Training loop
@@ -222,9 +223,9 @@ class CurriculumTrainer:
         for stage in range(start_stage, self.curriculum.num_stages):
             import_cap = self.curriculum.imports_for_stage(stage)
             
-            print(f"\n{'='*60}")
-            print(f"STAGE {stage}: {import_cap} imports/day")
-            print(f"{'='*60}")
+            self._print(f"\n{'='*60}")
+            self._print(f"STAGE {stage}: {import_cap} imports/day")
+            self._print(f"{'='*60}")
             
             # Update environment import cap
             self.env.lm.daily_train_import_cap = import_cap
@@ -242,12 +243,12 @@ class CurriculumTrainer:
             # Save checkpoint
             ckpt_path = self.ckpt_dir / f"stage{stage}_complete.pt"
             self.agent.save(str(ckpt_path))
-            print(f"Saved checkpoint: {ckpt_path}")
+            self._print(f"Saved checkpoint: {ckpt_path}")
             
             global_day += self.curriculum.days_per_stage
         
-        print(f"\n=== Training Complete ===")
-        print(f"Final checkpoint: {self.ckpt_dir / 'final.pt'}")
+        self._print(f"\n=== Training Complete ===")
+        self._print(f"Final checkpoint: {self.ckpt_dir / 'final.pt'}")
         self.agent.save(str(self.ckpt_dir / "final.pt"))
     
     def _train_stage(self, stage: int, global_day_offset: int) -> StageMetrics:
@@ -267,15 +268,34 @@ class CurriculumTrainer:
         
         for day in pbar:
             day_date = start_date + timedelta(days=day)
-            global_day = global_day_offset + day
+            
+            # Debug: starting new day
+            if self.verbose and day < 5:
+                print(f"\n  Starting Day {day}...")
             
             # Reset environment for new day
-            self.env.reset(
-                day_start=day_date,
-                day_index=day,
-                carryover_trains=carry_trains,
-                carryover_trucks=carry_trucks
-            )
+            try:
+                self.env.reset(
+                    day_start=day_date,
+                    day_index=day,
+                    carryover_trains=carry_trains,
+                    carryover_trucks=carry_trucks
+                )
+            except Exception as e:
+                print(f"ERROR in reset for Day {day}: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+            
+            # Debug: check initial state
+            if day == 0:
+                self._print(f"\n  Initial state (after reset):")
+                self._print(f"    Cranes: {len(self.env.cranes)}")
+                self._print(f"    Trains: {len(self.env.trains)}")
+                self._print(f"    Trucks: {len(self.env.trucks)}")
+                self._print(f"    Scheduled trains: {len(self.env._scheduled_trains)}")
+                self._print(f"    Trucks in day plan: {len(self.env.day_plan.trucks_today) if self.env.day_plan else 0}")
+                self._print(f"    Current time: {self.env.current_time}")
             
             # Run day
             day_metrics = self._run_day(stage, day, day_date)
@@ -292,6 +312,7 @@ class CurriculumTrainer:
             pbar.set_postfix({
                 "R": f"{day_metrics.total_reward:.1f}",
                 "moves": day_metrics.moves_executed,
+                "steps": day_metrics.steps,
                 "ε": f"{day_metrics.epsilon:.3f}"
             })
             
@@ -325,15 +346,47 @@ class CurriculumTrainer:
         day_moves = 0
         day_losses: List[float] = []
         
+        # Track failure reasons for debugging
+        parking_success = 0
+        parking_fail = 0
+        move_success = 0
+        move_fail = 0
+        no_action_steps = 0
+        retry_reasons: Dict[str, int] = {}
+        
         done = False
         step = 0
         
-        while not done:
+        while not done and step < MAX_STEPS_PER_DAY:
             # Step all cranes
             state, reward, done, info = self.wrapper.step_all_cranes(self.agent)
             
             day_reward += reward
-            day_moves += len(info.get("executed", []))
+            executed = info.get("executed", [])
+            day_moves += len(executed)
+            
+            # Track success/failure
+            for ex in executed:
+                if ex.get("type") == "PARKING":
+                    parking_success += 1
+                else:
+                    move_success += 1
+            
+            # Track when no moves were made
+            if len(executed) == 0:
+                no_action_steps += 1
+            
+            # Track retry reasons from crane results
+            for cr in info.get("crane_results", []):
+                pass  # Could extract more info here
+            
+            # Track retry reasons (if available in transitions)
+            for trans_info in info.get("transitions", []):
+                pass  # Info is in the HierarchicalStepResult, not transition
+            
+            # Track retry reasons from the info dict
+            for reason in info.get("retry_reasons", []):
+                retry_reasons[reason] = retry_reasons.get(reason, 0) + 1
             
             # Optimize agent
             if len(self.agent.replay) >= self.net_config.batch_size:
@@ -343,10 +396,31 @@ class CurriculumTrainer:
             
             step += 1
             
-            # Safety: prevent infinite loops
-            if step > 10000:
-                print(f"Warning: Day {day} exceeded 10000 steps")
-                break
+            # Debug output periodically
+            if step % DEBUG_INTERVAL_STEPS == 0 and self.verbose and day == 0:
+                # Count action pool sizes
+                containers = self.wrapper.move_gen.list_moveable_containers(
+                    self.env.trains, self.env.trucks, self.env.current_time
+                )
+                parkings = self.wrapper.move_gen.list_parking_actions(self.env.trucks)
+                
+                print(f"    Step {step}: time={self.env.current_time.strftime('%H:%M')}, "
+                      f"trains={len(self.env.trains)}, trucks={len(self.env.trucks)}, "
+                      f"yard={len(self.env.yard.containers)}, "
+                      f"pool=[{len(containers)}c,{len(parkings)}p], "
+                      f"moves={day_moves}, reward={day_reward:.2f}")
+        
+        if step >= MAX_STEPS_PER_DAY:
+            print(f"WARNING: Day {day} hit step limit ({MAX_STEPS_PER_DAY})")
+        
+        # Print day summary for first few days
+        if self.verbose and day < 3:
+            retry_str = ", ".join(f"{k}:{v}" for k, v in sorted(retry_reasons.items()))
+            print(f"    Day {day} summary: {day_moves} moves ({parking_success} park, {move_success} container), "
+                  f"{no_action_steps} idle steps, reward={day_reward:.2f}")
+            if retry_reasons:
+                print(f"      Retry reasons: {retry_str}")
+            print(f"    Day {day} complete, getting carryover...")
         
         return DayMetrics(
             day_index=day,
@@ -355,7 +429,8 @@ class CurriculumTrainer:
             total_reward=day_reward,
             moves_executed=day_moves,
             avg_loss=np.mean(day_losses) if day_losses else 0.0,
-            epsilon=self.agent._get_epsilon()
+            epsilon=self.agent._get_epsilon(),
+            steps=step
         )
 
 
@@ -366,13 +441,8 @@ def create_env_factory(
     tracks: int = 7,
     export_ratio: float = 0.75
 ):
-    """
-    Create a factory function for environment creation.
-    
-    This allows lazy environment creation with specified parameters.
-    """
+    """Create a factory function for environment creation."""
     def factory():
-        # These imports are done inside to avoid circular imports
         from simulation.core.facilities.yard import BooleanStorageYard
         from simulation.core.facilities.railyard import BooleanRailYard
         from simulation.core.facilities.parking import ParkingArea
@@ -420,7 +490,7 @@ def create_env_factory(
         lm = LogisticsManager(
             yard, gate, loader, scheduler, parser,
             export_per_import=export_ratio,
-            daily_train_import_cap=20  # Will be overridden by curriculum
+            daily_train_import_cap=20
         )
         tlm = TerminalLogisticsManager(yard, rail, parking)
         
@@ -433,7 +503,7 @@ def create_env_factory(
             lm=lm,
             num_tracks=tracks,
             step_minutes=5,
-            auto_park=False  # Agent controls parking
+            auto_park=False
         )
         
         # Create hierarchical wrapper
@@ -456,14 +526,14 @@ def main():
     parser.add_argument("--output-dir", type=str, default="runs/curriculum",
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--start-stage", type=int, default=0, 
-                        help="Stage to start from (for resuming)")
+    parser.add_argument("--start-stage", type=int, default=0,
+                        help="Stage to start from")
     parser.add_argument("--load-checkpoint", type=str, default=None,
-                        help="Checkpoint to load (for resuming)")
+                        help="Checkpoint to load")
     parser.add_argument("--rows", type=int, default=5, help="Yard rows")
     parser.add_argument("--bays", type=int, default=58, help="Yard bays")
     parser.add_argument("--tiers", type=int, default=5, help="Yard tiers")
-    parser.add_argument("--tracks", type=int, default=7, help="Number of rail tracks")
+    parser.add_argument("--tracks", type=int, default=7, help="Rail tracks")
     parser.add_argument("--days-per-stage", type=int, default=365,
                         help="Days per curriculum stage")
     parser.add_argument("--start-imports", type=int, default=20,
@@ -472,6 +542,8 @@ def main():
                         help="Maximum import count")
     parser.add_argument("--increment", type=int, default=20,
                         help="Import increment per stage")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Reduce output verbosity")
     
     args = parser.parse_args()
     
@@ -499,7 +571,8 @@ def main():
         curriculum_config=curriculum_config,
         network_config=network_config,
         output_dir=args.output_dir,
-        seed=args.seed
+        seed=args.seed,
+        verbose=not args.quiet
     )
     
     # Run training

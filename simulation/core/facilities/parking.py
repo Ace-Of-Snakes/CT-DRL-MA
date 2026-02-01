@@ -1,60 +1,162 @@
-# simulation/core/facilities/parking.py
-from typing import Optional, Set, List
+# simulation/core/facilities/parking_optimized.py
+"""
+Optimized parking area with array-based storage.
+Key changes:
+- Bool array instead of string sets
+- O(1) spot operations
+- O(range) for bay range queries
+- No string parsing in hot paths
+"""
+import numpy as np
+from typing import Optional, List, Tuple, Iterator
+from dataclasses import dataclass
 from simulation.core.vehicles.truck import Truck
 
-class ParkingArea:
-    """
-    Parking spots are named as: P_{MODULE}_{BAY}_{SPLIT}
-    MODULE can contain underscores; BAY and SPLIT are the last two underscore-separated tokens.
-    BAY is 0-based (0..n_bays-1), SPLIT is 0-based (0..split_factor-1).
-    """
-    def __init__(self, spots: Set[str]):
-        self.free: Set[str] = set(spots)
-        self.used: Set[str] = set()
 
+@dataclass(slots=True)
+class ParkingSpot:
+    """Spot identifier as integers."""
+    bay: int
+    split: int
+    
+    def to_string(self, prefix: str = "P") -> str:
+        """Convert to string format for compatibility."""
+        return f"{prefix}_{self.bay}_{self.split}"
+    
     @staticmethod
-    def make_grid(n_bays: int, split_factor: int, prefix: str = "P") -> Set[str]:
-        # prefix may include module, e.g., "P_M1" -> "P_M1_{bay}_{split}"
-        return {f"{prefix}_{bay}_{split}" for bay in range(n_bays) for split in range(split_factor)}
-
-    @staticmethod
-    def spot_bay(spot: str) -> Optional[int]:
-        # robust: take last two underscore tokens as bay/split
+    def from_string(spot_str: str) -> Optional['ParkingSpot']:
+        """Parse string spot name."""
         try:
-            parts = spot.split("_")
+            parts = spot_str.split("_")
             if len(parts) < 3:
                 return None
-            return int(parts[-2])
-        except Exception:
+            return ParkingSpot(bay=int(parts[-2]), split=int(parts[-1]))
+        except (ValueError, IndexError):
             return None
 
-    def iter_free(self) -> List[str]:
-        return list(self.free)
 
-    def iter_free_in_bay_range(self, bay_lo: int, bay_hi: int) -> List[str]:
-        # linear scan over free set; parser must be robust to module prefixes
-        out: List[str] = []
-        if bay_lo > bay_hi:
-            bay_lo, bay_hi = bay_hi, bay_lo
-        for s in self.free:
-            b = self.spot_bay(s)
-            if b is not None and bay_lo <= b <= bay_hi:
-                out.append(s)
-        return out
-
-    def allocate(self, truck: Truck, spot: str) -> bool:
-        if spot not in self.free:
+class OptimizedParkingArea:
+    """
+    High-performance parking area using numpy arrays.
+    
+    Optimizations:
+    - Bool array for occupancy: O(1) check/set
+    - Slicing for bay range queries: O(range_size)
+    - No string parsing in hot paths
+    - Truck tracking via separate array
+    """
+    
+    __slots__ = (
+        'n_bays', 'split_factor', 'prefix',
+        'occupied', 'truck_ids', '_truck_spots'
+    )
+    
+    def __init__(
+        self,
+        n_bays: int,
+        split_factor: int,
+        prefix: str = "P"
+    ):
+        """
+        Initialize parking area.
+        
+        Args:
+            n_bays: Number of bays
+            split_factor: Splits per bay
+            prefix: String prefix for spot names
+        """
+        self.n_bays = n_bays
+        self.split_factor = split_factor
+        self.prefix = prefix
+        
+        # Primary storage: (bays, splits) bool array
+        self.occupied = np.zeros((n_bays, split_factor), dtype=bool)
+        
+        # Track which truck is in which spot: -1 for empty
+        # Using object array for truck_id strings (or could use int indices)
+        self.truck_ids: np.ndarray = np.empty((n_bays, split_factor), dtype=object)
+        self.truck_ids.fill(None)
+        
+        # Reverse lookup: truck_id -> (bay, split)
+        self._truck_spots: dict[str, Tuple[int, int]] = {}
+    
+    # ========== Core Operations ==========
+    
+    def is_free(self, bay: int, split: int) -> bool:
+        """Check if spot is free - O(1)."""
+        if not (0 <= bay < self.n_bays and 0 <= split < self.split_factor):
             return False
-        self.free.remove(spot)
-        self.used.add(spot)
-        truck.parking_spot = spot
+        return not self.occupied[bay, split]
+    
+    def allocate(self, truck: Truck, bay: int, split: int) -> bool:
+        """
+        Allocate spot to truck - O(1).
+        Returns True if successful.
+        """
+        if not self.is_free(bay, split):
+            return False
+        
+        self.occupied[bay, split] = True
+        self.truck_ids[bay, split] = truck.truck_id
+        self._truck_spots[truck.truck_id] = (bay, split)
+        
+        # Update truck's parking spot (string for compatibility)
+        truck.parking_spot = f"{self.prefix}_{bay}_{split}"
+        
         return True
 
     def release(self, truck: Truck) -> bool:
-        spot = truck.parking_spot
-        if not spot or spot not in self.used:
+        """
+        Release truck's spot - O(1).
+        """
+        pos = self._truck_spots.get(truck.truck_id)
+        if pos is None:
             return False
-        self.used.remove(spot)
-        self.free.add(spot)
+        
+        bay, split = pos
+        self.occupied[bay, split] = False
+        self.truck_ids[bay, split] = None
+        del self._truck_spots[truck.truck_id]
         truck.parking_spot = None
+        
         return True
+
+    # ========== Queries ==========
+    
+    def get_truck_spot(self, truck_id: str) -> Optional[Tuple[int, int]]:
+        """Get (bay, split) for a truck."""
+        return self._truck_spots.get(truck_id)
+    
+    def iter_free(self) -> Iterator[ParkingSpot]:
+        """Iterate over free spots."""
+        rows, cols = np.where(~self.occupied)
+        for bay, split in zip(rows, cols):
+            yield ParkingSpot(bay=int(bay), split=int(split))
+    
+    def iter_free_in_bay_range(
+        self,
+        bay_lo: int,
+        bay_hi: int
+    ) -> Iterator[ParkingSpot]:
+        """
+        Iterate free spots in bay range - O(range_size).
+        Much faster than legacy string-based iteration.
+        """
+        bay_lo = max(0, bay_lo)
+        bay_hi = min(self.n_bays - 1, bay_hi)
+        
+        if bay_lo > bay_hi:
+            bay_lo, bay_hi = bay_hi, bay_lo
+        
+        # Slice and find free positions
+        slice_occ = self.occupied[bay_lo:bay_hi + 1, :]
+        rows, cols = np.where(~slice_occ)
+        
+        for rel_bay, split in zip(rows, cols):
+            yield ParkingSpot(bay=int(bay_lo + rel_bay), split=int(split))
+    
+    # ========== State Export (for RL) ==========
+    
+    def get_occupancy_array(self) -> np.ndarray:
+        """Get occupancy as (n_bays, split_factor) bool array."""
+        return self.occupied.copy()

@@ -1,17 +1,8 @@
 # simulation/operations/_rmgc_math.py
 """
 Numba-optimized crane timing helpers.
-If numba is unavailable, falls back to pure-Python implementations.
 """
-
-try:
-    from numba import njit
-except Exception:
-    # Fallback: no-op decorator
-    def njit(*args, **kwargs):
-        def deco(f):
-            return f
-        return deco
+from numba import njit
 
 
 @njit(cache=True, fastmath=True)
