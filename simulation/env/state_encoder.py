@@ -1,153 +1,299 @@
-# python
+# simulation/env/state_encoder.py
+"""8-channel split-level state encoder for Multi-Head DQN.
+
+Output shape: (C, R, S, T) where
+  C = 8 channels
+  R = n_rows
+  S = total_splits (n_bays * split_factor)
+  T = n_tiers
+"""
 import numpy as np
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 from datetime import datetime
+
+from simulation.core.facilities.yard import OptimizedStorageYard
+from simulation.core.facilities.railyard import OptimizedRailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
-from simulation.core.vehicles.terminal_truck import TerminalTruck
-from simulation.core.facilities.yard import BooleanStorageYard
-from simulation.core.facilities.railyard import BooleanRailYard
-from simulation.planning.time_encoder import WeeklyTimeEncoder
 
-class TerminalStateEncoder:
-    def __init__(self, yard: BooleanStorageYard, rail: BooleanRailYard):
+
+# ── Channel specification ──────────────────────────────────────
+@dataclass(frozen=True)
+class ChannelSpec:
+    """Named channel indices for the state tensor."""
+    OCCUPANCY: int = 0
+    CONTAINER_START: int = 1
+    CONTAINER_TYPE: int = 2
+    ACCESSIBLE: int = 3
+    DEPARTURE_URGENCY: int = 4
+    BLOCKS_URGENT: int = 5
+    TRAIN_HEAT: int = 6
+    TRUCK_HEAT: int = 7
+
+    @staticmethod
+    def num_channels() -> int:
+        return 8
+
+
+CH = ChannelSpec()
+NUM_CHANNELS = CH.num_channels()
+
+# ── Container type categorical values ──────────────────────────
+TYPE_REGULAR: float = 0.25
+TYPE_REEFER: float = 0.50
+TYPE_DANGEROUS: float = 0.75
+TYPE_SWAP: float = 1.00
+
+# ── Normalisation / heat constants ─────────────────────────────
+MAX_DEPARTURE_DAYS: float = 30.0
+SECONDS_PER_DAY: float = 86_400.0
+TRAIN_HEAT_SIGMA_BAYS: float = 3.0
+TRUCK_HEAT_SIGMA_BAYS: float = 2.0
+DEFAULT_URGENCY: float = 1.0  # far away = not urgent
+
+
+class SplitLevelStateEncoder:
+    """Encodes terminal state as (C, R, S, T) tensor at split resolution."""
+
+    __slots__ = ("yard", "rail", "_splits_f", "_split_factor")
+
+    def __init__(self, yard: OptimizedStorageYard, rail: OptimizedRailYard):
         self.yard = yard
         self.rail = rail
-        self.time_enc = WeeklyTimeEncoder()
+        self._split_factor = yard.split_factor
+        # Pre-allocated coordinate vector for vectorised heat
+        self._splits_f = np.arange(yard.total_splits, dtype=np.float32)
 
-    def encode(self,
-               trains: Dict[str, Train],
-               trucks: Dict[str, Truck],
-               terminal_trucks: Dict[str, TerminalTruck],
-               now: datetime) -> np.ndarray:
-        R, B, T = self.yard.n_rows, self.yard.n_bays, self.yard.n_tiers
-        C = 11
-        tensor = np.zeros((R, B, T, C), dtype=np.float32)
+    # ── Public API ─────────────────────────────────────────────
 
-        # per-slot features
-        for cid, rec in self.yard.containers.items():
-            r, b, t = rec.placement.row, rec.placement.bay, rec.placement.tier
+    def encode(
+        self,
+        trains: Dict[str, Train],
+        trucks: Dict[str, Truck],
+        now: datetime,
+    ) -> np.ndarray:
+        """Build full state tensor (C, R, S, T)."""
+        R = self.yard.n_rows
+        S = self.yard.total_splits
+        T = self.yard.n_tiers
+
+        tensor = np.zeros((NUM_CHANNELS, R, S, T), dtype=np.float32)
+
+        # ── Ch 0  OCCUPANCY  (from yard mask, transpose T,R,S → R,S,T) ──
+        tensor[CH.OCCUPANCY] = self.yard.occupancy_mask.transpose(1, 2, 0).astype(
+            np.float32
+        )
+
+        # ── Per-container channels (single pass) ─────────────────
+        # Urgency grid for blocking analysis (default = far away)
+        urgency_grid = np.full((R, S, T), -1.0, dtype=np.float32)
+
+        for rec in self.yard.iter_records():
             c = rec.container
-            tensor[r, b, t, 0] = 1.0
-            if c.is_swap_body or c.is_trailer:
-                tensor[r, b, t, 4] = 1.0
-            elif c.goods_type == "Reefer":
-                tensor[r, b, t, 2] = 1.0
-            elif c.goods_type == "DangerousGoods":
-                tensor[r, b, t, 3] = 1.0
-            else:
-                tensor[r, b, t, 1] = 1.0
-            tensor[r, b, t, 5] = 1.0 if rec.is_accessible else 0.0
-            try:
-                days = c.days_until_departure(now)
-                tensor[r, b, t, 8] = float(min(30.0, max(0.0, days))) / 30.0
-            except:
-                pass
+            pl = rec.placement
+            r, t = pl.row, pl.tier
+            s0 = pl.abs_start
+            s1 = min(s0 + rec.n_splits, S)
 
-        # wanted by train/truck
-        train_want = set()
-        for tr in trains.values():
-            train_want |= set(tr.get_all_pickup_container_ids())
-        truck_want = set()
-        for tk in trucks.values():
-            truck_want |= set(tk.pickup_container_ids)
+            # Ch 1  CONTAINER_START
+            tensor[CH.CONTAINER_START, r, s0, t] = 1.0
 
-        for cid, rec in self.yard.containers.items():
-            r, b, t = rec.placement.row, rec.placement.bay, rec.placement.tier
-            if cid in train_want:
-                tensor[r, b, t, 6] = 1.0
-            if cid in truck_want:
-                tensor[r, b, t, 7] = 1.0
+            # Ch 2  CONTAINER_TYPE
+            tensor[CH.CONTAINER_TYPE, r, s0:s1, t] = _container_type_value(c)
 
-        # bay-wise broadcasts
-        demand_per_bay = np.zeros(B, dtype=np.float32)
-        anchor_heat = np.zeros(B, dtype=np.float32)
-        for tr in trains.values():
-            anchor = self.rail.get_anchor_bay(tr.train_id) or (B // 2)
-            total_len = 0.0
-            for cid in tr.get_all_pickup_container_ids():
-                c = self.yard.get_container(cid)
-                if c:
-                    total_len += c.length_m
-            if total_len > 0:
-                demand_per_bay[anchor] += total_len
-                anchor_heat[anchor] += 1.0
+            # Ch 3  ACCESSIBLE
+            if rec.is_accessible:
+                tensor[CH.ACCESSIBLE, r, s0:s1, t] = 1.0
 
-        if B > 2:
-            demand_per_bay = np.convolve(demand_per_bay, [0.25, 0.5, 0.25], mode='same')
-            anchor_heat = np.convolve(anchor_heat, [0.2, 0.6, 0.2], mode='same')
-        if demand_per_bay.max() > 0:
-            demand_per_bay /= demand_per_bay.max()
-        if anchor_heat.max() > 0:
-            anchor_heat /= anchor_heat.max()
+            # Ch 4  DEPARTURE_URGENCY
+            urg = _compute_urgency(c, now)
+            tensor[CH.DEPARTURE_URGENCY, r, s0:s1, t] = urg
+            urgency_grid[r, s0, t] = urg  # store at start for blocking
 
-        tensor[:, :, :, 9] = demand_per_bay[None, :, None]
-        tensor[:, :, :, 10] = anchor_heat[None, :, None]
+        # ── Ch 5  BLOCKS_URGENT  (vectorised over tiers) ─────────
+        _fill_blocking(tensor, urgency_grid, R, S, T)
+
+        # ── Ch 6  TRAIN_HEAT ─────────────────────────────────────
+        train_anchors = self._collect_train_anchors(trains)
+        if train_anchors:
+            heat = _gaussian_heat(
+                train_anchors, self._splits_f, self._split_factor,
+                TRAIN_HEAT_SIGMA_BAYS, S,
+            )
+            tensor[CH.TRAIN_HEAT, :, :, :] = heat[np.newaxis, :, np.newaxis]
+
+        # ── Ch 7  TRUCK_HEAT ─────────────────────────────────────
+        truck_bays = self._collect_truck_bays(trucks)
+        if truck_bays:
+            heat = _gaussian_heat(
+                truck_bays, self._splits_f, self._split_factor,
+                TRUCK_HEAT_SIGMA_BAYS, S,
+            )
+            tensor[CH.TRUCK_HEAT, :, :, :] = heat[np.newaxis, :, np.newaxis]
+
         return tensor
 
-    def encode_with_forecast(self,
-                             trains: Dict[str, Train],
-                             trucks: Dict[str, Truck],
-                             terminal_trucks: Dict[str, TerminalTruck],
-                             day_plan,
-                             now: datetime) -> np.ndarray:
-        base = self.encode(trains, trucks, terminal_trucks, now)
-        R, B, T, _ = base.shape
-        TRAIN_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
-        TRUCK_HEAT_WINDOWS_H = [3, 6, 12, 24, 48]
-        num_extra = len(TRAIN_HEAT_WINDOWS_H) + len(TRUCK_HEAT_WINDOWS_H)
-        extra = np.zeros((R, B, T, num_extra), dtype=np.float32)
+    # ── Mask helpers (used by agent for action masking) ─────────
 
-        trains_heats = [np.zeros(B, dtype=np.float32) for _ in TRAIN_HEAT_WINDOWS_H]
-        if day_plan and getattr(day_plan, "todays_trains", None):
-            for st in day_plan.todays_trains:
-                if st.train.train_id not in trains:
-                    _day, h, m = self.time_enc.decode(st.arrival_angle)
-                    arr_dt = day_plan.date.replace(hour=h, minute=m, second=0, microsecond=0)
-                    dt_min = (arr_dt - now).total_seconds() / 60.0
-                    if dt_min >= 0.0:
-                        anchor = self.rail.get_anchor_bay(st.train.train_id) or (B // 2)
-                        for i, hrs in enumerate(TRAIN_HEAT_WINDOWS_H):
-                            window_min = hrs * 60.0
-                            if dt_min <= window_min:
-                                w = max(0.0, 1.0 - dt_min / window_min)
-                                trains_heats[i][anchor] += w
+    def get_occupancy_mask(self) -> np.ndarray:
+        """Occupancy as (R, S, T) bool for container selection masking."""
+        return self.yard.occupancy_mask.transpose(1, 2, 0)
 
-        trucks_heats = [np.zeros(B, dtype=np.float32) for _ in TRUCK_HEAT_WINDOWS_H]
-        if day_plan and getattr(day_plan, "trucks_today", None):
-            for tk in day_plan.trucks_today:
-                if tk and tk.arrival_time and tk.arrival_time > now:
-                    dt_min = (tk.arrival_time - now).total_seconds() / 60.0
-                    bay = self.yard.n_bays // 2
-                    if getattr(tk, "pickup_container_ids", None):
-                        bays = []
-                        for cid in tk.pickup_container_ids:
-                            pl = self.yard.get_container_placement(cid)
-                            if pl:
-                                bays.append(pl.bay)
-                        if bays:
-                            bays.sort()
-                            bay = bays[len(bays)//2]
-                    if dt_min >= 0.0:
-                        for i, hrs in enumerate(TRUCK_HEAT_WINDOWS_H):
-                            window_min = hrs * 60.0
-                            if dt_min <= window_min:
-                                w = max(0.0, 1.0 - dt_min / window_min)
-                                trucks_heats[i][min(max(0, bay), B-1)] += w
+    def get_validity_mask(
+        self,
+        n_splits_needed: int,
+        goods_mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Valid placement positions as (R, S, T) bool.
 
-        for i in range(len(trains_heats)):
-            mx = trains_heats[i].max()
-            if mx > 0:
-                trains_heats[i] /= mx
-        for i in range(len(trucks_heats)):
-            mx = trucks_heats[i].max()
-            if mx > 0:
-                trucks_heats[i] /= mx
+        Uses vectorised cumsum to check contiguous free splits.
+        """
+        R = self.yard.n_rows
+        S = self.yard.total_splits
+        T = self.yard.n_tiers
+        occ = self.yard.occupancy_mask  # (T, R, S) bool
 
-        for i, heat in enumerate(trains_heats):
-            extra[:, :, :, i] = heat[None, :, None]
-        offset = len(trains_heats)
-        for j, heat in enumerate(trucks_heats):
-            extra[:, :, :, offset + j] = heat[None, :, None]
+        valid = np.zeros((R, S, T), dtype=bool)
 
-        return np.concatenate([base, extra], axis=-1)
+        for t in range(T):
+            # Support check: tier > 0 needs full support below
+            if t > 0:
+                support = self.yard._get_support_mask(t, n_splits_needed)
+            else:
+                support = None
+
+            for r in range(R):
+                free = (~occ[t, r, :]).astype(np.int32)
+                cs = np.empty(S + 1, dtype=np.int32)
+                cs[0] = 0
+                np.cumsum(free, out=cs[1:])
+
+                end_idx = np.arange(n_splits_needed, S + 1)
+                start_idx = end_idx - n_splits_needed
+                contiguous = (cs[end_idx] - cs[start_idx]) == n_splits_needed
+                valid[r, : S - n_splits_needed + 1, t] = contiguous
+
+                # Apply support mask
+                if support is not None:
+                    sup_row = support[r, :]
+                    for s in range(S - n_splits_needed + 1):
+                        if valid[r, s, t] and not np.all(
+                            sup_row[s : s + n_splits_needed]
+                        ):
+                            valid[r, s, t] = False
+
+        # Apply goods-type zoning mask
+        if goods_mask is not None:
+            valid &= goods_mask
+
+        return valid
+
+    # ── Internal helpers ───────────────────────────────────────
+
+    def _collect_train_anchors(self, trains: Dict[str, Train]) -> List[int]:
+        """Gather anchor bays for all active trains."""
+        anchors: List[int] = []
+        for tid in trains:
+            bay = self.rail.get_anchor_bay(tid)
+            if bay is not None:
+                anchors.append(bay)
+        return anchors
+
+    def _collect_truck_bays(self, trucks: Dict[str, Truck]) -> List[int]:
+        """Estimate target bays from truck pickup containers."""
+        bays: List[int] = []
+        default_bay = self.yard.n_bays // 2
+        for tk in trucks.values():
+            pickup_ids = getattr(tk, "pickup_container_ids", None)
+            if not pickup_ids:
+                bays.append(default_bay)
+                continue
+            found: List[int] = []
+            for cid in pickup_ids:
+                pl = self.yard.get_placement(cid)
+                if pl:
+                    found.append(pl.bay)
+            if found:
+                found.sort()
+                bays.append(found[len(found) // 2])
+            else:
+                bays.append(default_bay)
+        return bays
+
+
+# ── Module-level helpers (pure functions) ──────────────────────
+
+
+def _container_type_value(c) -> float:
+    """Categorical scalar for container type."""
+    if getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False):
+        return TYPE_SWAP
+    gt = getattr(c, "goods_type", "Regular")
+    if gt == "Reefer":
+        return TYPE_REEFER
+    if gt == "DangerousGoods":
+        return TYPE_DANGEROUS
+    return TYPE_REGULAR
+
+
+def _compute_urgency(c, now: datetime) -> float:
+    """Normalised departure urgency: 0.0 = imminent, 1.0 = far away."""
+    dep = getattr(c, "departure_date", None)
+    if dep is None:
+        return DEFAULT_URGENCY
+    days = max(0.0, (dep - now).total_seconds() / SECONDS_PER_DAY)
+    return min(1.0, days / MAX_DEPARTURE_DAYS)
+
+
+def _fill_blocking(
+    tensor: np.ndarray,
+    urgency_grid: np.ndarray,
+    R: int,
+    S: int,
+    T: int,
+) -> None:
+    """Compute BLOCKS_URGENT channel from urgency grid.
+
+    A container at tier t blocks if its urgency > the urgency of the
+    container at the same (row, start_split) at tier t-1.
+    Blocking severity = difference in normalised urgency.
+    """
+    if T < 2:
+        return
+
+    occ = tensor[CH.OCCUPANCY]  # (R, S, T)
+
+    for t in range(1, T):
+        # Positions where both current tier and below are occupied
+        both = (occ[:, :, t] > 0.5) & (occ[:, :, t - 1] > 0.5)
+        # Urgency values at start positions (only valid where grid >= 0)
+        above_urg = urgency_grid[:, :, t]
+        below_urg = urgency_grid[:, :, t - 1]
+        valid = both & (above_urg >= 0) & (below_urg >= 0)
+        severity = np.where(valid & (above_urg > below_urg), above_urg - below_urg, 0.0)
+        tensor[CH.BLOCKS_URGENT, :, :, t] = severity
+
+
+def _gaussian_heat(
+    anchor_bays: List[int],
+    splits_f: np.ndarray,
+    split_factor: int,
+    sigma_bays: float,
+    total_splits: int,
+) -> np.ndarray:
+    """Vectorised Gaussian heat over splits from a list of anchor bays."""
+    heat = np.zeros(total_splits, dtype=np.float32)
+    sigma_splits = sigma_bays * split_factor
+    half_center = split_factor / 2.0
+
+    for bay in anchor_bays:
+        center = bay * split_factor + half_center
+        center = min(max(0.0, center), total_splits - 1.0)
+        dist = np.abs(splits_f - center)
+        heat += np.exp(-0.5 * (dist / sigma_splits) ** 2)
+
+    mx = heat.max()
+    if mx > 0:
+        heat /= mx
+    return heat

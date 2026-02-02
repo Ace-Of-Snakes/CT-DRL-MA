@@ -240,17 +240,19 @@ class MultiHeadDQNAgent:
         container_feat = self.q_net.extract_container_features(feat_map, pos_tensor)  # (1, F)
         
         # Stage 3: Select destination type
+        has_vehicles = vehicle_mask is not None and len(vehicle_mask) > 0 and vehicle_mask.any()
         if random.random() < eps:
-            dest_type = random.choice(list(DestinationType))
+            choices = [DestinationType.YARD]
+            if has_vehicles:
+                choices.extend([DestinationType.TRAIN, DestinationType.TRUCK])
+            dest_type = random.choice(choices)
         else:
             q_dest = self.q_net.q_dest_type(global_feat, container_feat)[0]  # (3,)
-            
-            # Mask unavailable destinations
-            has_vehicles = vehicle_mask is not None and vehicle_mask.any()
+
             if not has_vehicles:
                 q_dest[DestinationType.TRAIN] = float('-inf')
                 q_dest[DestinationType.TRUCK] = float('-inf')
-            
+
             dest_type = DestinationType(q_dest.argmax().item())
         
         # Stage 4: Select specific destination
@@ -310,6 +312,13 @@ class MultiHeadDQNAgent:
         eps: float
     ) -> ActionResult:
         """Select train or truck."""
+        # Guard: no vehicles available -> fall back to YARD with no placement
+        if vehicle_feats.shape[0] == 0:
+            return ActionResult(
+                action_type=ActionType.MOVE_CONTAINER,
+                container_pos=container_pos,
+                dest_type=DestinationType.YARD,
+            )
         veh_t = self._to_tensor(vehicle_feats).unsqueeze(0)  # (1, V, Fv)
         mask_t = self._to_bool_tensor(vehicle_mask).unsqueeze(0)  # (1, V)
         

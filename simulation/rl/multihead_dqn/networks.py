@@ -112,8 +112,8 @@ class ContainerSelectionHead(nn.Module):
         q_spatial = self.conv(feat_map).squeeze(1)  # (B, R, S, T)
         
         # Mask unoccupied positions
-        q_flat = q_spatial.view(q_spatial.size(0), -1)  # (B, R*S*T)
-        mask_flat = occupancy_mask.view(occupancy_mask.size(0), -1)
+        q_flat = q_spatial.reshape(q_spatial.size(0), -1)
+        mask_flat = occupancy_mask.reshape(occupancy_mask.size(0), -1)
         
         # Apply mask: -inf for invalid positions
         q_flat = q_flat.masked_fill(~mask_flat, float('-inf'))
@@ -198,10 +198,10 @@ class SpatialPlacementHead(nn.Module):
         combined = torch.cat([feat_map + g, rel_pos], dim=1)  # (B, 2F, R, S, T)
         
         q_spatial = self.conv(combined).squeeze(1)  # (B, R, S, T)
-        q_flat = q_spatial.view(B, -1)  # (B, R*S*T)
+        q_flat = q_spatial.reshape(B, -1)  # (B, R*S*T)
         
         # Mask invalid placements
-        mask_flat = validity_mask.view(B, -1)
+        mask_flat = validity_mask.reshape(B, -1)
         q_flat = q_flat.masked_fill(~mask_flat, float('-inf'))
         
         return q_flat

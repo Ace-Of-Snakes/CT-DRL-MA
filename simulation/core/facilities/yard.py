@@ -284,6 +284,13 @@ class OptimizedStorageYard:
         record = self._records[idx]
         return record.placement if record else None
     
+    def is_accessible(self, container_id: str) -> bool:
+        """Check if container is accessible (top of stack) - O(1)."""
+        idx = self._id_to_idx.get(container_id)
+        if idx is None:
+            return False
+        return bool(self._accessible_mask[idx])
+
     # ========== Iteration ==========
     
     def iter_records(self) -> Iterator[ContainerRecord]:

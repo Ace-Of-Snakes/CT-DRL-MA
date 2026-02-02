@@ -5,7 +5,7 @@ from collections import defaultdict
 import csv
 import os
 
-from simulation.core.facilities.yard import BooleanStorageYard
+from simulation.core.facilities.yard import OptimizedStorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.enums import MoveType
@@ -44,7 +44,7 @@ class StatsTracker:
         self,
         moves_path: str,
         daily_csv_path: str,
-        yard: BooleanStorageYard
+        yard: OptimizedStorageYard
     ):
         """
         Initialize stats tracker.

@@ -1,35 +1,59 @@
-# simulation/training/curriculum_trainer_fixed.py
+# simulation/training/curriculum_trainer.py
 """
-Curriculum-based training for hierarchical DQN agent.
+Curriculum-based training for Multi-Head DQN agent.
 
-FIXED VERSION - addresses:
-1. Better debug output to see what's happening
-2. Safety timeouts for infinite loops
-3. Proper progress tracking
+Adapted for:
+- Unified ContainerTerminalEnv (no HierarchicalEnvWrapper)
+- OptimizedStorageYard / OptimizedRailYard / OptimizedParkingArea
+- 8-channel split-level state encoder (C, R, S, T)
+- MultiHeadDQNAgent with spatial masks
 """
-import os
 import csv
 import json
 import random
 import sys
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
 import torch
 
-from simulation.config.curriculum_config import CurriculumConfig, HierarchicalDQNConfig
-from simulation.rl.agents.hierarchical_dqn_agent import HierarchicalDQNAgent
-from simulation.env.hierarchical_env import HierarchicalEnvWrapper
+from simulation.rl.multihead_dqn.config import (
+    MultiHeadDQNConfig, YardDims, BackboneConfig, HeadConfig, DQNConfig,
+)
+from simulation.rl.multihead_dqn.agent import MultiHeadDQNAgent
 
 
-# Safety limits
-MAX_STEPS_PER_DAY = 5000  # Prevent infinite loops
-DEBUG_INTERVAL_STEPS = 100  # Print debug info every N steps
+# ── Safety limits ──────────────────────────────────────────────
+MAX_STEPS_PER_DAY: int = 5_000
+DEBUG_INTERVAL_STEPS: int = 100
 
+
+# ── Curriculum schedule (separate from network config) ─────────
+@dataclass
+class CurriculumSchedule:
+    """Curriculum scaling parameters."""
+    start_imports: int = 20
+    increment: int = 20
+    max_imports: int = 220
+    days_per_stage: int = 365
+    epsilon_reset_per_stage: bool = True
+    log_interval_days: int = 10
+
+    @property
+    def num_stages(self) -> int:
+        return (self.max_imports - self.start_imports) // self.increment + 1
+
+    def imports_for_stage(self, stage: int) -> int:
+        return min(self.start_imports + stage * self.increment, self.max_imports)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Metrics
+# ═══════════════════════════════════════════════════════════════
 
 @dataclass
 class DayMetrics:
@@ -39,13 +63,12 @@ class DayMetrics:
     date: str
     total_reward: float
     moves_executed: int
-    containers_imported: int = 0
-    containers_exported: int = 0
-    trains_departed: int = 0
-    trucks_served: int = 0
+    containers_in_yard: int = 0
+    trains_active: int = 0
+    trucks_active: int = 0
     avg_loss: float = 0.0
     epsilon: float = 0.0
-    steps: int = 0  # Track step count
+    steps: int = 0
 
 
 @dataclass
@@ -61,391 +84,297 @@ class StageMetrics:
     final_epsilon: float
 
 
+# ═══════════════════════════════════════════════════════════════
+# Logger
+# ═══════════════════════════════════════════════════════════════
+
 class MetricsLogger:
-    """Handles logging of training metrics."""
-    
+    """CSV + JSON logging for training runs."""
+
+    _DAILY_COLS = [
+        "day_index", "stage", "date", "total_reward", "moves_executed",
+        "containers_in_yard", "trains_active", "trucks_active",
+        "avg_loss", "epsilon", "steps",
+    ]
+    _STAGE_COLS = [
+        "stage", "import_cap", "total_days", "total_reward",
+        "avg_reward_per_day", "total_moves", "avg_moves_per_day",
+        "final_epsilon",
+    ]
+
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.daily_csv_path = self.log_dir / "daily_metrics.csv"
-        self._init_daily_csv()
-        
-        self.stage_csv_path = self.log_dir / "stage_metrics.csv"
-        self._init_stage_csv()
-        
+        self.daily_csv = self.log_dir / "daily_metrics.csv"
+        self.stage_csv = self.log_dir / "stage_metrics.csv"
         self.episodes_dir = self.log_dir / "episodes"
         self.episodes_dir.mkdir(exist_ok=True)
-    
-    def _init_daily_csv(self):
-        """Initialize daily metrics CSV."""
-        if not self.daily_csv_path.exists():
-            with open(self.daily_csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "day_index", "stage", "date", "total_reward", "moves_executed",
-                    "containers_imported", "containers_exported", "trains_departed",
-                    "trucks_served", "avg_loss", "epsilon", "steps"
-                ])
-    
-    def _init_stage_csv(self):
-        """Initialize stage metrics CSV."""
-        if not self.stage_csv_path.exists():
-            with open(self.stage_csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "stage", "import_cap", "total_days", "total_reward",
-                    "avg_reward_per_day", "total_moves", "avg_moves_per_day",
-                    "final_epsilon"
-                ])
-    
-    def log_day(self, metrics: DayMetrics):
-        """Log daily metrics."""
-        with open(self.daily_csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                metrics.day_index,
-                metrics.stage,
-                metrics.date,
-                f"{metrics.total_reward:.4f}",
-                metrics.moves_executed,
-                metrics.containers_imported,
-                metrics.containers_exported,
-                metrics.trains_departed,
-                metrics.trucks_served,
-                f"{metrics.avg_loss:.6f}",
-                f"{metrics.epsilon:.4f}",
-                metrics.steps
+        self._init_csv(self.daily_csv, self._DAILY_COLS)
+        self._init_csv(self.stage_csv, self._STAGE_COLS)
+
+    @staticmethod
+    def _init_csv(path: Path, cols: List[str]):
+        if not path.exists():
+            with open(path, "w", newline="") as f:
+                csv.writer(f).writerow(cols)
+
+    def log_day(self, m: DayMetrics):
+        with open(self.daily_csv, "a", newline="") as f:
+            csv.writer(f).writerow([
+                m.day_index, m.stage, m.date,
+                f"{m.total_reward:.4f}", m.moves_executed,
+                m.containers_in_yard, m.trains_active, m.trucks_active,
+                f"{m.avg_loss:.6f}", f"{m.epsilon:.4f}", m.steps,
             ])
-    
-    def log_stage(self, metrics: StageMetrics):
-        """Log stage summary metrics."""
-        with open(self.stage_csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                metrics.stage,
-                metrics.import_cap,
-                metrics.total_days,
-                f"{metrics.total_reward:.4f}",
-                f"{metrics.avg_reward_per_day:.4f}",
-                metrics.total_moves,
-                f"{metrics.avg_moves_per_day:.2f}",
-                f"{metrics.final_epsilon:.4f}"
+
+    def log_stage(self, m: StageMetrics):
+        with open(self.stage_csv, "a", newline="") as f:
+            csv.writer(f).writerow([
+                m.stage, m.import_cap, m.total_days,
+                f"{m.total_reward:.4f}", f"{m.avg_reward_per_day:.4f}",
+                m.total_moves, f"{m.avg_moves_per_day:.2f}",
+                f"{m.final_epsilon:.4f}",
             ])
-    
+
     def log_episode_detail(self, stage: int, day: int, data: Dict[str, Any]):
-        """Log detailed episode data."""
-        filepath = self.episodes_dir / f"stage{stage}_day{day}.json"
-        with open(filepath, "w") as f:
+        path = self.episodes_dir / f"stage{stage}_day{day}.json"
+        with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
 
 
+# ═══════════════════════════════════════════════════════════════
+# Trainer
+# ═══════════════════════════════════════════════════════════════
+
 class CurriculumTrainer:
-    """Trains hierarchical DQN agent through curriculum stages."""
-    
+    """Trains MultiHead DQN agent through curriculum stages."""
+
     def __init__(
         self,
         env_factory,
-        curriculum_config: CurriculumConfig,
-        network_config: HierarchicalDQNConfig,
+        schedule: CurriculumSchedule,
+        agent_config: MultiHeadDQNConfig,
         output_dir: str,
         seed: int = 42,
-        verbose: bool = True
+        verbose: bool = True,
     ):
         self.env_factory = env_factory
-        self.curriculum = curriculum_config
-        self.net_config = network_config
+        self.schedule = schedule
+        self.agent_cfg = agent_config
         self.output_dir = Path(output_dir)
         self.seed = seed
         self.verbose = verbose
-        
-        # Set seeds
+
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
-        
-        # Create output directories
+
         self.ckpt_dir = self.output_dir / "checkpoints"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.log_dir = self.output_dir / "logs"
-        self.logger = MetricsLogger(str(self.log_dir))
-        
-        # Will be initialized in train()
+        self.logger = MetricsLogger(str(self.output_dir / "logs"))
+
         self.env = None
-        self.wrapper = None
-        self.agent = None
-    
+        self.agent: Optional[MultiHeadDQNAgent] = None
+
     def _print(self, msg: str):
-        """Print if verbose mode."""
         if self.verbose:
-            print(msg)
-            sys.stdout.flush()
-    
+            if hasattr(self, '_pbar') and self._pbar is not None:
+                self._pbar.write(msg)
+            else:
+                print(msg, flush=True)
+
+    # ── Main entry point ──────────────────────────────────────
+
     def train(self, start_stage: int = 0, load_checkpoint: Optional[str] = None):
         """Run full curriculum training."""
-        self._print(f"=== Curriculum Training ===")
-        self._print(f"Stages: {self.curriculum.num_stages}")
-        self._print(f"Days per stage: {self.curriculum.days_per_stage}")
-        self._print(f"Output: {self.output_dir}")
-        self._print(f"Device: {self.net_config.device}")
-        self._print("")
-        
-        # Create environment
-        self._print("Creating environment...")
-        self.env, self.wrapper = self.env_factory()
-        self._print(f"  Yard: {self.env.yard.n_rows}x{self.env.yard.n_bays}x{self.env.yard.n_tiers}")
-        # Note: cranes list is populated in reset(), so use num_cranes
+        sched = self.schedule
+        self._print("=== Curriculum Training (MultiHead DQN) ===")
+        self._print(f"Stages: {sched.num_stages}  |  Days/stage: {sched.days_per_stage}")
+        self._print(f"Output: {self.output_dir}  |  Device: {self.agent_cfg.device}\n")
+
+        # ── Create environment ────────────────────────────────
+        self._print("Creating environment …")
+        self.env = self.env_factory()
+        yard = self.env.yard
+        self._print(f"  Yard : {yard.n_rows}R × {yard.n_bays}B × {yard.n_tiers}T "
+                     f"(sf={yard.split_factor}, splits={yard.total_splits})")
         self._print(f"  Cranes: {self.env.num_cranes}")
-        
-        # Get yard dimensions
-        yard_dims = (
-            self.env.yard.n_rows,
-            self.env.yard.n_bays,
-            self.env.yard.n_tiers,
-            self.env.yard.split_factor
-        )
-        
-        # Create agent
-        self._print("Creating agent...")
-        self.agent = HierarchicalDQNAgent(yard_dims, self.net_config)
-        self._print(f"  Parameters: {sum(p.numel() for p in self.agent.q_net.parameters()):,}")
-        
-        # Load checkpoint if provided
+
+        # ── Create agent ──────────────────────────────────────
+        self._print("Creating agent …")
+        self.agent = MultiHeadDQNAgent(self.agent_cfg)
+        params = sum(p.numel() for p in self.agent.q_net.parameters())
+        self._print(f"  Parameters: {params:,}\n")
+
         if load_checkpoint:
             self._print(f"Loading checkpoint: {load_checkpoint}")
             self.agent.load(load_checkpoint)
-        
-        # Training loop
+
+        # ── Stage loop ────────────────────────────────────────
         global_day = 0
-        for stage in range(start_stage, self.curriculum.num_stages):
-            import_cap = self.curriculum.imports_for_stage(stage)
-            
-            self._print(f"\n{'='*60}")
-            self._print(f"STAGE {stage}: {import_cap} imports/day")
-            self._print(f"{'='*60}")
-            
-            # Update environment import cap
-            self.env.lm.daily_train_import_cap = import_cap
-            
-            # Reset epsilon if configured
-            if self.curriculum.epsilon_reset_per_stage:
-                self.agent.reset_epsilon()
-            
-            # Train this stage
-            stage_metrics = self._train_stage(stage, global_day)
-            
-            # Log stage completion
-            self.logger.log_stage(stage_metrics)
-            
-            # Save checkpoint
-            ckpt_path = self.ckpt_dir / f"stage{stage}_complete.pt"
-            self.agent.save(str(ckpt_path))
-            self._print(f"Saved checkpoint: {ckpt_path}")
-            
-            global_day += self.curriculum.days_per_stage
-        
-        self._print(f"\n=== Training Complete ===")
-        self._print(f"Final checkpoint: {self.ckpt_dir / 'final.pt'}")
-        self.agent.save(str(self.ckpt_dir / "final.pt"))
-    
-    def _train_stage(self, stage: int, global_day_offset: int) -> StageMetrics:
-        """Train a single curriculum stage."""
+        for stage in range(start_stage, sched.num_stages):
+            cap = sched.imports_for_stage(stage)
+            self._print(f"\n{'=' * 60}")
+            self._print(f"STAGE {stage}: {cap} imports/day")
+            self._print(f"{'=' * 60}")
+
+            self.env.lm.daily_train_import_cap = cap
+
+            if sched.epsilon_reset_per_stage:
+                self.agent.step_count = 0  # reset epsilon schedule
+
+            stage_m = self._train_stage(stage)
+            self.logger.log_stage(stage_m)
+
+            ckpt = self.ckpt_dir / f"stage{stage}_complete.pt"
+            self.agent.save(str(ckpt))
+            self._print(f"Saved checkpoint: {ckpt}")
+            global_day += sched.days_per_stage
+
+        final = self.ckpt_dir / "final.pt"
+        self.agent.save(str(final))
+        self._print(f"\n=== Training Complete ===\nFinal: {final}")
+
+    # ── Stage ─────────────────────────────────────────────────
+
+    def _train_stage(self, stage: int) -> StageMetrics:
         total_reward = 0.0
         total_moves = 0
-        losses: List[float] = []
-        
-        start_date = datetime.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        
-        # Carryover tracking
+        days = self.schedule.days_per_stage
+        start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         carry_trains, carry_trucks = {}, {}
-        
-        pbar = tqdm(range(self.curriculum.days_per_stage), desc=f"Stage {stage}")
-        
+
+        pbar = tqdm(range(days), desc=f"Stage {stage}", unit="day")
+        self._pbar = pbar
         for day in pbar:
             day_date = start_date + timedelta(days=day)
-            
-            # Debug: starting new day
-            if self.verbose and day < 5:
-                print(f"\n  Starting Day {day}...")
-            
-            # Reset environment for new day
             try:
                 self.env.reset(
-                    day_start=day_date,
-                    day_index=day,
+                    day_start=day_date, day_index=day,
                     carryover_trains=carry_trains,
-                    carryover_trucks=carry_trucks
+                    carryover_trucks=carry_trucks,
                 )
             except Exception as e:
-                print(f"ERROR in reset for Day {day}: {e}")
-                import traceback
-                traceback.print_exc()
+                self._print(f"ERROR reset Day {day}: {e}")
+                import traceback; traceback.print_exc()
                 raise
-            
-            # Debug: check initial state
-            if day == 0:
-                self._print(f"\n  Initial state (after reset):")
-                self._print(f"    Cranes: {len(self.env.cranes)}")
-                self._print(f"    Trains: {len(self.env.trains)}")
-                self._print(f"    Trucks: {len(self.env.trucks)}")
-                self._print(f"    Scheduled trains: {len(self.env._scheduled_trains)}")
-                self._print(f"    Trucks in day plan: {len(self.env.day_plan.trucks_today) if self.env.day_plan else 0}")
-                self._print(f"    Current time: {self.env.current_time}")
-            
-            # Run day
-            day_metrics = self._run_day(stage, day, day_date)
-            
-            total_reward += day_metrics.total_reward
-            total_moves += day_metrics.moves_executed
-            if day_metrics.avg_loss > 0:
-                losses.append(day_metrics.avg_loss)
-            
-            # Log
-            self.logger.log_day(day_metrics)
-            
-            # Update progress bar
-            pbar.set_postfix({
-                "R": f"{day_metrics.total_reward:.1f}",
-                "moves": day_metrics.moves_executed,
-                "steps": day_metrics.steps,
-                "ε": f"{day_metrics.epsilon:.3f}"
-            })
-            
-            # Get carryover
+
+            if day == 0 and self.verbose:
+                self._print_day_zero()
+
+            day_m = self._run_day(stage, day, day_date)
+            total_reward += day_m.total_reward
+            total_moves += day_m.moves_executed
+            self.logger.log_day(day_m)
+            pbar.set_postfix(
+                R=f"{day_m.total_reward:.1f}", mv=day_m.moves_executed,
+                st=day_m.steps, eps=f"{day_m.epsilon:.3f}",
+            )
             carry_trains, carry_trucks = self.env.get_carryover()
-            
-            # Detailed logging every N days
-            if day % self.curriculum.log_interval_days == 0:
+
+            if day % self.schedule.log_interval_days == 0:
                 self.logger.log_episode_detail(stage, day, {
-                    "metrics": asdict(day_metrics),
+                    "metrics": asdict(day_m),
                     "replay_size": len(self.agent.replay),
-                    "step_count": self.agent.step_count
+                    "step_count": self.agent.step_count,
                 })
-        
-        # Compute stage metrics
-        days = self.curriculum.days_per_stage
+
+        self._pbar = None
         return StageMetrics(
             stage=stage,
-            import_cap=self.curriculum.imports_for_stage(stage),
+            import_cap=self.schedule.imports_for_stage(stage),
             total_days=days,
             total_reward=total_reward,
-            avg_reward_per_day=total_reward / days,
+            avg_reward_per_day=total_reward / max(days, 1),
             total_moves=total_moves,
-            avg_moves_per_day=total_moves / days,
-            final_epsilon=self.agent._get_epsilon()
+            avg_moves_per_day=total_moves / max(days, 1),
+            final_epsilon=self.agent._get_epsilon(),
         )
-    
+
+    # ── Day ───────────────────────────────────────────────────
+
     def _run_day(self, stage: int, day: int, date: datetime) -> DayMetrics:
-        """Run a single simulation day."""
         day_reward = 0.0
         day_moves = 0
         day_losses: List[float] = []
-        
-        # Track failure reasons for debugging
-        parking_success = 0
-        parking_fail = 0
-        move_success = 0
-        move_fail = 0
-        no_action_steps = 0
-        retry_reasons: Dict[str, int] = {}
-        
-        done = False
         step = 0
-        
+        done = False
+
         while not done and step < MAX_STEPS_PER_DAY:
-            # Step all cranes
-            state, reward, done, info = self.wrapper.step_all_cranes(self.agent)
-            
+            state, reward, done, info = self.env.step_all_cranes(self.agent)
             day_reward += reward
-            executed = info.get("executed", [])
-            day_moves += len(executed)
-            
-            # Track success/failure
-            for ex in executed:
-                if ex.get("type") == "PARKING":
-                    parking_success += 1
-                else:
-                    move_success += 1
-            
-            # Track when no moves were made
-            if len(executed) == 0:
-                no_action_steps += 1
-            
-            # Track retry reasons from crane results
-            for cr in info.get("crane_results", []):
-                pass  # Could extract more info here
-            
-            # Track retry reasons (if available in transitions)
-            for trans_info in info.get("transitions", []):
-                pass  # Info is in the HierarchicalStepResult, not transition
-            
-            # Track retry reasons from the info dict
-            for reason in info.get("retry_reasons", []):
-                retry_reasons[reason] = retry_reasons.get(reason, 0) + 1
-            
-            # Optimize agent
-            if len(self.agent.replay) >= self.net_config.batch_size:
+            day_moves += len(info.get("executed", []))
+
+            if self.agent.replay.is_ready(self.agent_cfg.training.batch_size):
                 loss = self.agent.optimize()
                 if loss > 0:
                     day_losses.append(loss)
-            
+
             step += 1
-            
-            # Debug output periodically
+
             if step % DEBUG_INTERVAL_STEPS == 0 and self.verbose and day == 0:
-                # Count action pool sizes
-                containers = self.wrapper.move_gen.list_moveable_containers(
-                    self.env.trains, self.env.trucks, self.env.current_time
-                )
-                parkings = self.wrapper.move_gen.list_parking_actions(self.env.trucks)
-                
-                print(f"    Step {step}: time={self.env.current_time.strftime('%H:%M')}, "
-                      f"trains={len(self.env.trains)}, trucks={len(self.env.trucks)}, "
-                      f"yard={len(self.env.yard.containers)}, "
-                      f"pool=[{len(containers)}c,{len(parkings)}p], "
-                      f"moves={day_moves}, reward={day_reward:.2f}")
-        
+                self._print_step_debug(step, day_moves, day_reward)
+
         if step >= MAX_STEPS_PER_DAY:
-            print(f"WARNING: Day {day} hit step limit ({MAX_STEPS_PER_DAY})")
-        
-        # Print day summary for first few days
+            self._print(f"WARNING: Day {day} hit step limit ({MAX_STEPS_PER_DAY})")
+
         if self.verbose and day < 3:
-            retry_str = ", ".join(f"{k}:{v}" for k, v in sorted(retry_reasons.items()))
-            print(f"    Day {day} summary: {day_moves} moves ({parking_success} park, {move_success} container), "
-                  f"{no_action_steps} idle steps, reward={day_reward:.2f}")
-            if retry_reasons:
-                print(f"      Retry reasons: {retry_str}")
-            print(f"    Day {day} complete, getting carryover...")
-        
+            self._print(f"    Day {day}: {day_moves} moves, {step} steps, "
+                        f"reward={day_reward:.2f}, yard={self.env.yard.container_count}")
+
         return DayMetrics(
-            day_index=day,
-            stage=stage,
+            day_index=day, stage=stage,
             date=date.strftime("%Y-%m-%d"),
-            total_reward=day_reward,
-            moves_executed=day_moves,
-            avg_loss=np.mean(day_losses) if day_losses else 0.0,
+            total_reward=day_reward, moves_executed=day_moves,
+            containers_in_yard=self.env.yard.container_count,
+            trains_active=len(self.env.trains),
+            trucks_active=len(self.env.trucks),
+            avg_loss=float(np.mean(day_losses)) if day_losses else 0.0,
             epsilon=self.agent._get_epsilon(),
-            steps=step
+            steps=step,
         )
 
+    # ── Debug ─────────────────────────────────────────────────
+
+    def _print_day_zero(self):
+        env = self.env
+        self._print(f"\n  After reset:")
+        self._print(f"    Cranes={len(env.cranes)}, Trains={len(env.trains)}, "
+                     f"Trucks={len(env.trucks)}, Yard={env.yard.container_count}")
+        self._print(f"    Scheduled trains: {len(getattr(env, '_scheduled_trains', []))}")
+        dp = env.day_plan
+        self._print(f"    Trucks in plan: {len(dp.trucks_today) if dp else 0}")
+
+    def _print_step_debug(self, step: int, moves: int, reward: float):
+        env = self.env
+        containers = env.move_gen.list_moveable_containers(
+            env.trains, env.trucks, env.current_time,
+        )
+        parkings = env.move_gen.list_parking_actions(env.trucks)
+        self._print(f"    Step {step}: time={env.current_time.strftime('%H:%M')}, "
+                    f"t={len(env.trains)}, tk={len(env.trucks)}, "
+                    f"yard={env.yard.container_count}, "
+                    f"pool=[{len(containers)}c,{len(parkings)}p], "
+                    f"mv={moves}, R={reward:.2f}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Environment factory
+# ═══════════════════════════════════════════════════════════════
 
 def create_env_factory(
-    rows: int = 5,
-    bays: int = 58,
-    tiers: int = 5,
-    tracks: int = 7,
-    export_ratio: float = 0.75
+    rows: int = 5, bays: int = 58, tiers: int = 5,
+    tracks: int = 7, export_ratio: float = 0.75,
+    max_retries: int = 10, no_destination_penalty: float = -1.0,
 ):
-    """Create a factory function for environment creation."""
+    """Return a callable that creates a unified ContainerTerminalEnv."""
     def factory():
-        from simulation.core.facilities.yard import BooleanStorageYard
-        from simulation.core.facilities.railyard import BooleanRailYard
-        from simulation.core.facilities.parking import ParkingArea
+        from simulation.core.facilities.yard import OptimizedStorageYard
+        from simulation.core.facilities.railyard import OptimizedRailYard
+        from simulation.core.facilities.parking import OptimizedParkingArea
+        from simulation.core.facilities.constants import BAY_SPLIT_FACTOR
         from simulation.core.factories.container_factory import ContainerFactory
         from simulation.core.factories.truck_factory import TruckFactory
         from simulation.operations.terminal_manager import TerminalLogisticsManager
@@ -456,130 +385,91 @@ def create_env_factory(
         from simulation.planning.train_loader import TrainLoader
         from simulation.env.env import ContainerTerminalEnv
         from simulation.config.yard_config import YardZoneConfig
-        
-        # Create coordinates for special zones
-        coordinates = YardZoneConfig.generate_special_coordinates(
-            n_rows=rows, n_bays=bays
-        )
-        
-        # Create facilities
-        yard = BooleanStorageYard(
-            n_rows=rows,
-            n_bays=bays,
-            n_tiers=tiers,
-            coordinates=coordinates,
-            validate=False
-        )
-        rail = BooleanRailYard()
-        parking = ParkingArea(ParkingArea.make_grid(
-            n_bays=bays,
-            split_factor=20,
-            prefix="P"
-        ))
-        
-        # Create factories
+
+        coordinates = YardZoneConfig.generate_special_coordinates(n_rows=rows, n_bays=bays)
+        yard = OptimizedStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers,
+                                    coordinates=coordinates, validate=False)
+        rail = OptimizedRailYard(n_tracks=tracks)
+        parking = OptimizedParkingArea(n_bays=bays, split_factor=BAY_SPLIT_FACTOR)
+
         container_factory = ContainerFactory()
         truck_factory = TruckFactory()
-        
-        # Create logistics components
         gate = TerminalGate(container_factory, truck_factory)
         scheduler = TrainScheduler(num_tracks=tracks)
         loader = TrainLoader(container_factory, overgeneration_factor=3.0)
         parser = DrivingPlanParser()
-        
-        lm = LogisticsManager(
-            yard, gate, loader, scheduler, parser,
-            export_per_import=export_ratio,
-            daily_train_import_cap=20
-        )
+
+        lm = LogisticsManager(yard, gate, loader, scheduler, parser,
+                               export_per_import=export_ratio, daily_train_import_cap=20)
         tlm = TerminalLogisticsManager(yard, rail, parking)
-        
-        # Create environment
-        env = ContainerTerminalEnv(
-            yard=yard,
-            rail=rail,
-            parking=parking,
-            tlm=tlm,
-            lm=lm,
-            num_tracks=tracks,
-            step_minutes=5,
-            auto_park=False
+
+        return ContainerTerminalEnv(
+            yard=yard, rail=rail, parking=parking, tlm=tlm, lm=lm,
+            num_tracks=tracks, step_minutes=5, auto_park=False,
+            max_retries=max_retries, no_destination_penalty=no_destination_penalty,
         )
-        
-        # Create hierarchical wrapper
-        wrapper = HierarchicalEnvWrapper(
-            env,
-            max_retries=10,
-            no_destination_penalty=-1.0
-        )
-        
-        return env, wrapper
-    
     return factory
 
 
+def build_agent_config(
+    rows: int = 5, bays: int = 58, tiers: int = 5, split_factor: int = 20,
+) -> MultiHeadDQNConfig:
+    """Build a MultiHeadDQNConfig for the given yard geometry."""
+    yard = YardDims(
+        n_rows=rows,
+        n_splits=bays * split_factor,
+        n_tiers=tiers,
+        n_bays=bays,
+        split_factor=split_factor,
+    )
+    return MultiHeadDQNConfig(
+        yard=yard,
+        backbone=BackboneConfig(in_channels=8),
+        heads=HeadConfig(),
+        training=DQNConfig(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════
+
 def main():
-    """Main entry point for curriculum training."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Curriculum training for hierarchical DQN")
-    parser.add_argument("--output-dir", type=str, default="runs/curriculum",
-                        help="Output directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--start-stage", type=int, default=0,
-                        help="Stage to start from")
-    parser.add_argument("--load-checkpoint", type=str, default=None,
-                        help="Checkpoint to load")
-    parser.add_argument("--rows", type=int, default=5, help="Yard rows")
-    parser.add_argument("--bays", type=int, default=58, help="Yard bays")
-    parser.add_argument("--tiers", type=int, default=5, help="Yard tiers")
-    parser.add_argument("--tracks", type=int, default=7, help="Rail tracks")
-    parser.add_argument("--days-per-stage", type=int, default=365,
-                        help="Days per curriculum stage")
-    parser.add_argument("--start-imports", type=int, default=20,
-                        help="Starting import count")
-    parser.add_argument("--max-imports", type=int, default=220,
-                        help="Maximum import count")
-    parser.add_argument("--increment", type=int, default=20,
-                        help="Import increment per stage")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Reduce output verbosity")
-    
-    args = parser.parse_args()
-    
-    # Create configs
-    curriculum_config = CurriculumConfig(
-        start_imports=args.start_imports,
-        increment=args.increment,
-        max_imports=args.max_imports,
-        days_per_stage=args.days_per_stage
+    p = argparse.ArgumentParser(description="Curriculum training — MultiHead DQN")
+    p.add_argument("--output-dir", type=str, default="runs/curriculum")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--start-stage", type=int, default=0)
+    p.add_argument("--load-checkpoint", type=str, default=None)
+    p.add_argument("--rows", type=int, default=5)
+    p.add_argument("--bays", type=int, default=58)
+    p.add_argument("--tiers", type=int, default=5)
+    p.add_argument("--tracks", type=int, default=7)
+    p.add_argument("--split-factor", type=int, default=20)
+    p.add_argument("--days-per-stage", type=int, default=365)
+    p.add_argument("--start-imports", type=int, default=20)
+    p.add_argument("--max-imports", type=int, default=220)
+    p.add_argument("--increment", type=int, default=20)
+    p.add_argument("--quiet", action="store_true")
+    args = p.parse_args()
+
+    schedule = CurriculumSchedule(
+        start_imports=args.start_imports, increment=args.increment,
+        max_imports=args.max_imports, days_per_stage=args.days_per_stage,
     )
-    
-    network_config = HierarchicalDQNConfig()
-    
-    # Create environment factory
+    agent_cfg = build_agent_config(
+        rows=args.rows, bays=args.bays, tiers=args.tiers,
+        split_factor=args.split_factor,
+    )
     env_factory = create_env_factory(
-        rows=args.rows,
-        bays=args.bays,
-        tiers=args.tiers,
-        tracks=args.tracks
+        rows=args.rows, bays=args.bays, tiers=args.tiers, tracks=args.tracks,
     )
-    
-    # Create trainer
+
     trainer = CurriculumTrainer(
-        env_factory=env_factory,
-        curriculum_config=curriculum_config,
-        network_config=network_config,
-        output_dir=args.output_dir,
-        seed=args.seed,
-        verbose=not args.quiet
+        env_factory=env_factory, schedule=schedule, agent_config=agent_cfg,
+        output_dir=args.output_dir, seed=args.seed, verbose=not args.quiet,
     )
-    
-    # Run training
-    trainer.train(
-        start_stage=args.start_stage,
-        load_checkpoint=args.load_checkpoint
-    )
+    trainer.train(start_stage=args.start_stage, load_checkpoint=args.load_checkpoint)
 
 
 if __name__ == "__main__":
