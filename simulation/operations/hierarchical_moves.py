@@ -19,14 +19,11 @@ from simulation.core.facilities.parking import OptimizedParkingArea, ParkingSpot
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container
+from simulation.core.enums import GoodsType
+from simulation.core.constants import SECONDS_PER_DAY
 
-try:
-    from simulation.core.enums import GoodsType
-    REEFER_VALUES = {GoodsType.REEFER, GoodsType.REEFER.value, "Reefer"}
-    DG_VALUES = {GoodsType.DANGEROUS_GOODS, GoodsType.DANGEROUS_GOODS.value, "DangerousGoods"}
-except ImportError:
-    REEFER_VALUES = {"Reefer"}
-    DG_VALUES = {"DangerousGoods"}
+REEFER_VALUES = {GoodsType.REEFER, GoodsType.REEFER.value, "Reefer"}
+DG_VALUES = {GoodsType.DANGEROUS_GOODS, GoodsType.DANGEROUS_GOODS.value, "DangerousGoods"}
 
 from simulation.rl.features.featurizers import (
     MoveableContainer, Destination, ParkingAction,
@@ -35,7 +32,6 @@ from simulation.rl.features.featurizers import (
 
 DEBUG_DESTINATIONS: bool = os.environ.get("DEBUG_DESTINATIONS", "0") == "1"
 
-SECONDS_PER_DAY: float = 86400.0
 DEFAULT_DAYS_UNTIL_DEPARTURE: float = 30.0
 DEFAULT_HEAT_PROXIMITY: float = 0.5
 
@@ -126,7 +122,7 @@ class HierarchicalMoveGenerator:
         """Get all containers that can be moved."""
         result: List[MoveableContainer] = []
 
-        # 1. Yard accessible containers — direct iteration, no dict lookup
+        # 1. Yard accessible containers -- direct iteration, no dict lookup
         for rec in self.yard.iter_accessible():
             container = rec.container
             pl = rec.placement
@@ -238,7 +234,7 @@ class HierarchicalMoveGenerator:
         trains: Dict[str, Train],
         trucks: Dict[str, Truck],
     ) -> Optional[Container]:
-        """Resolve MoveableContainer → actual Container object."""
+        """Resolve MoveableContainer -> actual Container object."""
         if moveable.source_type == SourceType.YARD:
             return self.yard.get_container(moveable.container_id)
 

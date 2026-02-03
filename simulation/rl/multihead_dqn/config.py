@@ -10,6 +10,7 @@ class ActionType(IntEnum):
     """Top-level action types."""
     MOVE_CONTAINER = 0
     SLOT_PARKING = 1
+    IMPORT_VEHICLE = 2
 
 
 class DestinationType(IntEnum):
@@ -41,7 +42,7 @@ class YardDims:
 @dataclass
 class BackboneConfig:
     """CNN backbone configuration."""
-    in_channels: int = 8
+    in_channels: int = 12  # 8 original + 4 demand/identity channels
     hidden_channels: List[int] = field(default_factory=lambda: [32, 64, 64])
     kernel_sizes: List[int] = field(default_factory=lambda: [3, 3, 3])
     use_batchnorm: bool = True

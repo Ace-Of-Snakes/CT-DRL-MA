@@ -11,6 +11,7 @@ from simulation.core.containers.container import Container
 from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_LENGTH_M
 from simulation.config.paths import DataPaths
 from simulation.config.operations_config import GateConfig
+from simulation.utils.id_generator import IDGenerator
 
 
 class TruckFactory:
@@ -215,7 +216,7 @@ class TruckFactory:
     ) -> Truck:
         """Create a delivery truck with containers."""
         self._id_counter += 1
-        truck_id = f"TRK{self._id_counter:05d}"
+        truck_id = IDGenerator.generate_truck_id()
         
         arrival_time = self._sample_arrival_time(
             day_key=day_key,

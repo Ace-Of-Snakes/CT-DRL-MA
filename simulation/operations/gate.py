@@ -13,15 +13,12 @@ from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.core.enums import Direction
 from simulation.config.operations_config import GateConfig
 
-JITTER_MIN_MINUTES: int = 5
-JITTER_MAX_MINUTES: int = 45
-
 
 @dataclass
 class Order:
     """Terminal gate order."""
     import_containers: List[Container]
-    export_operators: Dict[str, Dict]  # operator → {num_containers, arrival_time}
+    export_operators: Dict[str, Dict]  # operator -> {num_containers, arrival_time}
 
 
 class TerminalGate:
@@ -216,7 +213,7 @@ class TerminalGate:
         )
         for truck in trucks or []:
             if truck.arrival_time is None or truck.arrival_time <= earliest_time:
-                jitter = np.random.randint(JITTER_MIN_MINUTES, JITTER_MAX_MINUTES)
+                jitter = np.random.randint(GateConfig.JITTER_MIN_MINUTES, GateConfig.JITTER_MAX_MINUTES)
                 truck.arrival_time = earliest_time + timedelta(minutes=int(jitter))
         return trucks
 

@@ -1,14 +1,17 @@
 # simulation/env/state_encoder.py
-"""8-channel split-level state encoder for Multi-Head DQN.
+"""12-channel split-level state encoder for Multi-Head DQN.
 
 Output shape: (C, R, S, T) where
-  C = 8 channels
+  C = 12 channels
   R = n_rows
   S = total_splits (n_bays * split_factor)
   T = n_tiers
+
+Channels 0-7:  original spatial/urgency features
+Channels 8-11: demand signals and container identity
 """
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -18,10 +21,11 @@ from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 
 
-# ── Channel specification ──────────────────────────────────────
+# -- Channel specification ---------------------------------------------------
 @dataclass(frozen=True)
 class ChannelSpec:
     """Named channel indices for the state tensor."""
+    # Original channels
     OCCUPANCY: int = 0
     CONTAINER_START: int = 1
     CONTAINER_TYPE: int = 2
@@ -29,28 +33,37 @@ class ChannelSpec:
     DEPARTURE_URGENCY: int = 4
     BLOCKS_URGENT: int = 5
     TRAIN_HEAT: int = 6
-    TRUCK_HEAT: int = 7
+    TRUCK_HEAT: int = 7     # Now: actual truck PARKING location heat
+    # New channels
+    TRUCK_DEMAND: int = 8   # 1.0 if a parked truck wants this container
+    TRAIN_DEMAND: int = 9   # 1.0 if a train wants this container
+    DIRECTION: int = 10     # 0.0 = import, 1.0 = export
+    CONTAINER_HASH: int = 11  # Unique per-container fingerprint [0, 1]
 
     @staticmethod
     def num_channels() -> int:
-        return 8
+        return 12
 
 
 CH = ChannelSpec()
 NUM_CHANNELS = CH.num_channels()
 
-# ── Container type categorical values ──────────────────────────
+# -- Container type categorical values ----------------------------------------
 TYPE_REGULAR: float = 0.25
 TYPE_REEFER: float = 0.50
 TYPE_DANGEROUS: float = 0.75
 TYPE_SWAP: float = 1.00
 
-# ── Normalisation / heat constants ─────────────────────────────
+# -- Normalisation / heat constants -------------------------------------------
 MAX_DEPARTURE_DAYS: float = 30.0
 SECONDS_PER_DAY: float = 86_400.0
 TRAIN_HEAT_SIGMA_BAYS: float = 3.0
 TRUCK_HEAT_SIGMA_BAYS: float = 2.0
 DEFAULT_URGENCY: float = 1.0  # far away = not urgent
+
+# -- Hash constants -----------------------------------------------------------
+_HASH_PRIME: int = 2654435761  # Knuth multiplicative hash constant
+_HASH_MOD: int = 2**32
 
 
 class SplitLevelStateEncoder:
@@ -62,10 +75,9 @@ class SplitLevelStateEncoder:
         self.yard = yard
         self.rail = rail
         self._split_factor = yard.split_factor
-        # Pre-allocated coordinate vector for vectorised heat
         self._splits_f = np.arange(yard.total_splits, dtype=np.float32)
 
-    # ── Public API ─────────────────────────────────────────────
+    # -- Public API -----------------------------------------------------------
 
     def encode(
         self,
@@ -80,13 +92,16 @@ class SplitLevelStateEncoder:
 
         tensor = np.zeros((NUM_CHANNELS, R, S, T), dtype=np.float32)
 
-        # ── Ch 0  OCCUPANCY  (from yard mask, transpose T,R,S → R,S,T) ──
+        # -- Collect demand sets ONCE before container loop -----------------
+        truck_wanted_ids = _collect_truck_demand(trucks)
+        train_wanted_ids = _collect_train_demand(trains)
+
+        # -- Ch 0  OCCUPANCY ------------------------------------------------
         tensor[CH.OCCUPANCY] = self.yard.occupancy_mask.transpose(1, 2, 0).astype(
             np.float32
         )
 
-        # ── Per-container channels (single pass) ─────────────────
-        # Urgency grid for blocking analysis (default = far away)
+        # -- Per-container channels (single pass) ---------------------------
         urgency_grid = np.full((R, S, T), -1.0, dtype=np.float32)
 
         for rec in self.yard.iter_records():
@@ -95,6 +110,7 @@ class SplitLevelStateEncoder:
             r, t = pl.row, pl.tier
             s0 = pl.abs_start
             s1 = min(s0 + rec.n_splits, S)
+            cid = c.container_id
 
             # Ch 1  CONTAINER_START
             tensor[CH.CONTAINER_START, r, s0, t] = 1.0
@@ -109,12 +125,26 @@ class SplitLevelStateEncoder:
             # Ch 4  DEPARTURE_URGENCY
             urg = _compute_urgency(c, now)
             tensor[CH.DEPARTURE_URGENCY, r, s0:s1, t] = urg
-            urgency_grid[r, s0, t] = urg  # store at start for blocking
+            urgency_grid[r, s0, t] = urg
 
-        # ── Ch 5  BLOCKS_URGENT  (vectorised over tiers) ─────────
+            # Ch 8  TRUCK_DEMAND - "a parked truck wants this container"
+            if cid in truck_wanted_ids:
+                tensor[CH.TRUCK_DEMAND, r, s0:s1, t] = 1.0
+
+            # Ch 9  TRAIN_DEMAND - "a train wants this container"
+            if cid in train_wanted_ids:
+                tensor[CH.TRAIN_DEMAND, r, s0:s1, t] = 1.0
+
+            # Ch 10 DIRECTION - import vs export
+            tensor[CH.DIRECTION, r, s0:s1, t] = _direction_value(c)
+
+            # Ch 11 CONTAINER_HASH - unique fingerprint for differentiation
+            tensor[CH.CONTAINER_HASH, r, s0:s1, t] = _container_hash(cid)
+
+        # -- Ch 5  BLOCKS_URGENT  (vectorised over tiers) -------------------
         _fill_blocking(tensor, urgency_grid, R, S, T)
 
-        # ── Ch 6  TRAIN_HEAT ─────────────────────────────────────
+        # -- Ch 6  TRAIN_HEAT (from rail anchor positions) ------------------
         train_anchors = self._collect_train_anchors(trains)
         if train_anchors:
             heat = _gaussian_heat(
@@ -123,18 +153,18 @@ class SplitLevelStateEncoder:
             )
             tensor[CH.TRAIN_HEAT, :, :, :] = heat[np.newaxis, :, np.newaxis]
 
-        # ── Ch 7  TRUCK_HEAT ─────────────────────────────────────
-        truck_bays = self._collect_truck_bays(trucks)
-        if truck_bays:
+        # -- Ch 7  TRUCK_HEAT (from actual PARKING positions) ---------------
+        truck_parking_bays = self._collect_truck_parking_bays(trucks)
+        if truck_parking_bays:
             heat = _gaussian_heat(
-                truck_bays, self._splits_f, self._split_factor,
+                truck_parking_bays, self._splits_f, self._split_factor,
                 TRUCK_HEAT_SIGMA_BAYS, S,
             )
             tensor[CH.TRUCK_HEAT, :, :, :] = heat[np.newaxis, :, np.newaxis]
 
         return tensor
 
-    # ── Mask helpers (used by agent for action masking) ─────────
+    # -- Mask helpers ---------------------------------------------------------
 
     def get_occupancy_mask(self) -> np.ndarray:
         """Occupancy as (R, S, T) bool for container selection masking."""
@@ -145,10 +175,7 @@ class SplitLevelStateEncoder:
         n_splits_needed: int,
         goods_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Valid placement positions as (R, S, T) bool.
-
-        Uses vectorised cumsum to check contiguous free splits.
-        """
+        """Valid placement positions as (R, S, T) bool."""
         R = self.yard.n_rows
         S = self.yard.total_splits
         T = self.yard.n_tiers
@@ -157,7 +184,6 @@ class SplitLevelStateEncoder:
         valid = np.zeros((R, S, T), dtype=bool)
 
         for t in range(T):
-            # Support check: tier > 0 needs full support below
             if t > 0:
                 support = self.yard._get_support_mask(t, n_splits_needed)
             else:
@@ -174,7 +200,6 @@ class SplitLevelStateEncoder:
                 contiguous = (cs[end_idx] - cs[start_idx]) == n_splits_needed
                 valid[r, : S - n_splits_needed + 1, t] = contiguous
 
-                # Apply support mask
                 if support is not None:
                     sup_row = support[r, :]
                     for s in range(S - n_splits_needed + 1):
@@ -183,13 +208,12 @@ class SplitLevelStateEncoder:
                         ):
                             valid[r, s, t] = False
 
-        # Apply goods-type zoning mask
         if goods_mask is not None:
             valid &= goods_mask
 
         return valid
 
-    # ── Internal helpers ───────────────────────────────────────
+    # -- Internal helpers -----------------------------------------------------
 
     def _collect_train_anchors(self, trains: Dict[str, Train]) -> List[int]:
         """Gather anchor bays for all active trains."""
@@ -200,29 +224,46 @@ class SplitLevelStateEncoder:
                 anchors.append(bay)
         return anchors
 
-    def _collect_truck_bays(self, trucks: Dict[str, Truck]) -> List[int]:
-        """Estimate target bays from truck pickup containers."""
+    def _collect_truck_parking_bays(self, trucks: Dict[str, Truck]) -> List[int]:
+        """Gather ACTUAL parking spot bays for parked trucks.
+
+        Previously used container locations (circular/useless).
+        Now uses the truck's real parking position.
+        """
         bays: List[int] = []
-        default_bay = self.yard.n_bays // 2
         for tk in trucks.values():
-            pickup_ids = getattr(tk, "pickup_container_ids", None)
-            if not pickup_ids:
-                bays.append(default_bay)
-                continue
-            found: List[int] = []
-            for cid in pickup_ids:
-                pl = self.yard.get_placement(cid)
-                if pl:
-                    found.append(pl.bay)
-            if found:
-                found.sort()
-                bays.append(found[len(found) // 2])
-            else:
-                bays.append(default_bay)
+            spot = getattr(tk, "parking_spot", None)
+            if spot is not None:
+                bay = getattr(spot, "bay", None)
+                if bay is not None:
+                    bays.append(bay)
         return bays
 
 
-# ── Module-level helpers (pure functions) ──────────────────────
+# -- Demand collection -------------------------------------------------------
+
+
+def _collect_truck_demand(trucks: Dict[str, Truck]) -> Set[str]:
+    """Collect all container IDs wanted by PARKED trucks."""
+    wanted: Set[str] = set()
+    for tk in trucks.values():
+        if not getattr(tk, "parking_spot", None):
+            continue  # Only parked trucks create actionable demand
+        pickup_ids = getattr(tk, "pickup_container_ids", None)
+        if pickup_ids:
+            wanted.update(pickup_ids)
+    return wanted
+
+
+def _collect_train_demand(trains: Dict[str, Train]) -> Set[str]:
+    """Collect all container IDs wanted by active trains."""
+    wanted: Set[str] = set()
+    for train in trains.values():
+        wanted.update(train.get_all_pickup_container_ids())
+    return wanted
+
+
+# -- Module-level helpers (pure functions) ------------------------------------
 
 
 def _container_type_value(c) -> float:
@@ -235,6 +276,30 @@ def _container_type_value(c) -> float:
     if gt == "DangerousGoods":
         return TYPE_DANGEROUS
     return TYPE_REGULAR
+
+
+def _direction_value(c) -> float:
+    """Encode container direction: 0.0 = import, 1.0 = export."""
+    direction = getattr(c, "direction", None)
+    if direction is None:
+        return 0.5  # Unknown
+    d_str = direction.value if hasattr(direction, "value") else str(direction)
+    if d_str == "Export":
+        return 1.0
+    if d_str == "Import":
+        return 0.0
+    return 0.5
+
+
+def _container_hash(container_id: str) -> float:
+    """Deterministic hash normalised to [0, 1].
+
+    Gives each container a unique 'color' so the CNN can
+    distinguish adjacent containers of same type/urgency.
+    """
+    h = hash(container_id) & 0xFFFFFFFF
+    h = (h * _HASH_PRIME) % _HASH_MOD
+    return h / _HASH_MOD
 
 
 def _compute_urgency(c, now: datetime) -> float:
@@ -253,21 +318,14 @@ def _fill_blocking(
     S: int,
     T: int,
 ) -> None:
-    """Compute BLOCKS_URGENT channel from urgency grid.
-
-    A container at tier t blocks if its urgency > the urgency of the
-    container at the same (row, start_split) at tier t-1.
-    Blocking severity = difference in normalised urgency.
-    """
+    """Compute BLOCKS_URGENT channel from urgency grid."""
     if T < 2:
         return
 
-    occ = tensor[CH.OCCUPANCY]  # (R, S, T)
+    occ = tensor[CH.OCCUPANCY]
 
     for t in range(1, T):
-        # Positions where both current tier and below are occupied
         both = (occ[:, :, t] > 0.5) & (occ[:, :, t - 1] > 0.5)
-        # Urgency values at start positions (only valid where grid >= 0)
         above_urg = urgency_grid[:, :, t]
         below_urg = urgency_grid[:, :, t - 1]
         valid = both & (above_urg >= 0) & (below_urg >= 0)

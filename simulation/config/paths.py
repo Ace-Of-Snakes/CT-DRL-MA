@@ -1,7 +1,6 @@
 """File path configuration for data and output."""
 from pathlib import Path
 from typing import Final
-import os
 
 
 class DataPaths:
@@ -29,11 +28,6 @@ class DataPaths:
     
     # Driving plan
     DRIVING_PLAN: Final[Path] = BASE_DIR / "driving_plan.json"
-    
-    @classmethod
-    def get_wagon_count(cls) -> int:
-        """Get wagon count from environment or default."""
-        return int(os.getenv("WAGON_COUNT", "29"))
 
 
 class OutputPaths:

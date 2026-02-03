@@ -10,7 +10,8 @@ from simulation.core.containers.container import Container
 from simulation.core.vehicles.train import Train
 from simulation.core.facilities.yard import OptimizedStorageYard
 from simulation.core.enums import Direction
-from simulation.config.train_config import TrainLoaderConfig
+from simulation.config.operations_config import OperationsDefaults
+from simulation.core.factories.container_factory import ContainerFactory
 
 LENGTH_TOLERANCE_M: float = 0.001
 
@@ -30,7 +31,7 @@ class TrainLoader:
 
     def __init__(
         self,
-        container_factory,
+        container_factory: ContainerFactory,
         overgeneration_factor: Optional[float] = None,
     ):
         if not container_factory:
@@ -38,7 +39,7 @@ class TrainLoader:
         self.factory = container_factory
         self.overgeneration_factor = (
             overgeneration_factor if overgeneration_factor is not None
-            else TrainLoaderConfig.OVERGENERATION_FACTOR
+            else OperationsDefaults.TRAIN_OVERGENERATION_FACTOR
         )
 
     # ================================================================
@@ -115,7 +116,7 @@ class TrainLoader:
         Single-pass first-fit-decreasing bin packing.
 
         Sort containers longest-first, then assign each to the first wagon
-        with enough remaining capacity. O(n·log·n + n·m) where n=containers, m=wagons.
+        with enough remaining capacity. O(nÂ·logÂ·n + nÂ·m) where n=containers, m=wagons.
         """
         num_wagons = len(train.wagons)
         if num_wagons == 0:
@@ -147,7 +148,7 @@ class TrainLoader:
     def rearrange_wagons_for_goods(train: Train, yard: OptimizedStorageYard) -> List[int]:
         """
         Reorder wagons in-place: reefer at ends, DG in center, regular between.
-        Returns old→new index mapping.
+        Returns old->new index mapping.
         """
         wagons = train.wagons
         n = len(wagons)

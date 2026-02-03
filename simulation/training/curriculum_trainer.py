@@ -24,15 +24,16 @@ import torch
 from simulation.rl.multihead_dqn.config import (
     MultiHeadDQNConfig, YardDims, BackboneConfig, HeadConfig, DQNConfig,
 )
+from simulation.env.state_encoder import NUM_CHANNELS
 from simulation.rl.multihead_dqn.agent import MultiHeadDQNAgent
 
 
-# ── Safety limits ──────────────────────────────────────────────
+# -- Safety limits --
 MAX_STEPS_PER_DAY: int = 5_000
 DEBUG_INTERVAL_STEPS: int = 100
 
 
-# ── Curriculum schedule (separate from network config) ─────────
+# -- Curriculum schedule (separate from network config) --
 @dataclass
 class CurriculumSchedule:
     """Curriculum scaling parameters."""
@@ -51,9 +52,9 @@ class CurriculumSchedule:
         return min(self.start_imports + stage * self.increment, self.max_imports)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Metrics
-# ═══════════════════════════════════════════════════════════════
+# 
+# -- Metrics --
+# 
 
 @dataclass
 class DayMetrics:
@@ -84,9 +85,9 @@ class StageMetrics:
     final_epsilon: float
 
 
-# ═══════════════════════════════════════════════════════════════
-# Logger
-# ═══════════════════════════════════════════════════════════════
+# 
+# -- Logger --
+# 
 
 class MetricsLogger:
     """CSV + JSON logging for training runs."""
@@ -142,9 +143,9 @@ class MetricsLogger:
             json.dump(data, f, indent=2, default=str)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Trainer
-# ═══════════════════════════════════════════════════════════════
+# 
+# -- Trainer --
+# 
 
 class CurriculumTrainer:
     """Trains MultiHead DQN agent through curriculum stages."""
@@ -157,6 +158,9 @@ class CurriculumTrainer:
         output_dir: str,
         seed: int = 42,
         verbose: bool = True,
+        skip_tutorials: bool = False,
+        tutorial_epochs: int = 500,
+        tutorial_mastery: float = 0.9,
     ):
         self.env_factory = env_factory
         self.schedule = schedule
@@ -164,6 +168,9 @@ class CurriculumTrainer:
         self.output_dir = Path(output_dir)
         self.seed = seed
         self.verbose = verbose
+        self.skip_tutorials = skip_tutorials
+        self.tutorial_epochs = tutorial_epochs
+        self.tutorial_mastery = tutorial_mastery
 
         random.seed(seed)
         np.random.seed(seed)
@@ -185,7 +192,51 @@ class CurriculumTrainer:
             else:
                 print(msg, flush=True)
 
-    # ── Main entry point ──────────────────────────────────────
+    def _run_tutorial_phase(self):
+        """Run tutorial scenarios before curriculum stages."""
+        from simulation.training.tutorial_runner import TutorialRunner
+        
+        self._print("\n" + "=" * 60)
+        self._print("PHASE 0: Tutorial Scenarios")
+        self._print(f"Target: {self.tutorial_mastery:.0%} pass rate on all scenarios")
+        self._print(f"Max epochs: {self.tutorial_epochs}")
+        self._print("=" * 60)
+        
+        runner = TutorialRunner(
+            env_factory=self.env_factory,
+            agent_or_config=self.agent,
+            verbose=self.verbose,
+        )
+        
+        summary = runner.train_all(
+            epochs=self.tutorial_epochs,
+            mastery_threshold=self.tutorial_mastery,
+            window_size=20,
+            min_epochs=10,
+            log_every=10,
+        )
+        
+        # Summary output
+        self._print("\n" + "-" * 40)
+        if summary.get('mastered', False):
+            self._print(f"TUTORIALS MASTERED in {summary['epochs_completed']} epochs!")
+        else:
+            self._print(f"Tutorial phase ended after {summary['epochs_completed']} epochs")
+            self._print(f"(Mastery not achieved - continuing anyway)")
+        
+        self._print("\nFinal pass rates:")
+        names = summary.get('scenario_names', {})
+        for sid, rate in summary['pass_rates'].items():
+            name = names.get(sid, f"scenario_{sid}")
+            status = "OK" if rate >= self.tutorial_mastery else "LOW"
+            self._print(f"  S{sid} {name}: {rate:.0%} [{status}]")
+        
+        ckpt = self.ckpt_dir / "tutorial_complete.pt"
+        self.agent.save(str(ckpt))
+        self._print(f"\nSaved tutorial checkpoint: {ckpt}")
+        self._print("=" * 60 + "\n")
+
+    # -- Main entry point --
 
     def train(self, start_stage: int = 0, load_checkpoint: Optional[str] = None):
         """Run full curriculum training."""
@@ -194,16 +245,16 @@ class CurriculumTrainer:
         self._print(f"Stages: {sched.num_stages}  |  Days/stage: {sched.days_per_stage}")
         self._print(f"Output: {self.output_dir}  |  Device: {self.agent_cfg.device}\n")
 
-        # ── Create environment ────────────────────────────────
-        self._print("Creating environment …")
+        # -- Create environment --
+        self._print("Creating environment ...")
         self.env = self.env_factory()
         yard = self.env.yard
-        self._print(f"  Yard : {yard.n_rows}R × {yard.n_bays}B × {yard.n_tiers}T "
+        self._print(f"  Yard : {yard.n_rows}R x {yard.n_bays}B x {yard.n_tiers}T "
                      f"(sf={yard.split_factor}, splits={yard.total_splits})")
         self._print(f"  Cranes: {self.env.num_cranes}")
 
-        # ── Create agent ──────────────────────────────────────
-        self._print("Creating agent …")
+        # -- Create agent --
+        self._print("Creating agent ...")
         self.agent = MultiHeadDQNAgent(self.agent_cfg)
         params = sum(p.numel() for p in self.agent.q_net.parameters())
         self._print(f"  Parameters: {params:,}\n")
@@ -212,7 +263,11 @@ class CurriculumTrainer:
             self._print(f"Loading checkpoint: {load_checkpoint}")
             self.agent.load(load_checkpoint)
 
-        # ── Stage loop ────────────────────────────────────────
+        # -- Tutorial Phase (Phase 0) --
+        if not self.skip_tutorials:
+            self._run_tutorial_phase()
+
+        # -- Stage loop --
         global_day = 0
         for stage in range(start_stage, sched.num_stages):
             cap = sched.imports_for_stage(stage)
@@ -237,7 +292,7 @@ class CurriculumTrainer:
         self.agent.save(str(final))
         self._print(f"\n=== Training Complete ===\nFinal: {final}")
 
-    # ── Stage ─────────────────────────────────────────────────
+    # -- Stage --
 
     def _train_stage(self, stage: int) -> StageMetrics:
         total_reward = 0.0
@@ -293,7 +348,7 @@ class CurriculumTrainer:
             final_epsilon=self.agent._get_epsilon(),
         )
 
-    # ── Day ───────────────────────────────────────────────────
+    # -- Day --
 
     def _run_day(self, stage: int, day: int, date: datetime) -> DayMetrics:
         day_reward = 0.0
@@ -336,7 +391,7 @@ class CurriculumTrainer:
             steps=step,
         )
 
-    # ── Debug ─────────────────────────────────────────────────
+    # -- Debug --
 
     def _print_day_zero(self):
         env = self.env
@@ -360,9 +415,9 @@ class CurriculumTrainer:
                     f"mv={moves}, R={reward:.2f}")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Environment factory
-# ═══════════════════════════════════════════════════════════════
+# 
+# -- Environment factory --
+# 
 
 def create_env_factory(
     rows: int = 5, bays: int = 58, tiers: int = 5,
@@ -424,19 +479,19 @@ def build_agent_config(
     )
     return MultiHeadDQNConfig(
         yard=yard,
-        backbone=BackboneConfig(in_channels=8),
+        backbone=BackboneConfig(in_channels=NUM_CHANNELS),
         heads=HeadConfig(),
         training=DQNConfig(),
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════
+# 
+# -- CLI --
+# 
 
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="Curriculum training — MultiHead DQN")
+    p = argparse.ArgumentParser(description="Curriculum training - MultiHead DQN")
     p.add_argument("--output-dir", type=str, default="runs/curriculum")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--start-stage", type=int, default=0)
@@ -451,6 +506,9 @@ def main():
     p.add_argument("--max-imports", type=int, default=220)
     p.add_argument("--increment", type=int, default=20)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--skip-tutorials", action="store_true", help="Skip tutorial phase")
+    p.add_argument("--tutorial-epochs", type=int, default=500, help="Max tutorial epochs (runs until mastery)")
+    p.add_argument("--tutorial-mastery", type=float, default=0.9)
     args = p.parse_args()
 
     schedule = CurriculumSchedule(
@@ -468,6 +526,9 @@ def main():
     trainer = CurriculumTrainer(
         env_factory=env_factory, schedule=schedule, agent_config=agent_cfg,
         output_dir=args.output_dir, seed=args.seed, verbose=not args.quiet,
+        skip_tutorials=args.skip_tutorials,
+        tutorial_epochs=args.tutorial_epochs,
+        tutorial_mastery=args.tutorial_mastery,
     )
     trainer.train(start_stage=args.start_stage, load_checkpoint=args.load_checkpoint)
 

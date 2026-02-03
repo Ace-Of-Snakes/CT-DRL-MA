@@ -1,4 +1,29 @@
-# simulation/core/facilities/constants.py
+"""Central constants for the container terminal simulation."""
+from typing import Final
+
+# === VEHICLE DIMENSIONS ===
+STANDARD_VEHICLE_LENGTH_M: Final[float] = 24.4  # 80 feet in meters
+STANDARD_VEHICLE_LENGTH_FT: Final[int] = 80
+MIN_CONTAINER_LENGTH_M: Final[float] = 6.1  # Minimum container length
+
+# === TIME CONSTANTS ===
+SECONDS_PER_MINUTE: Final[int] = 60
+SECONDS_PER_HOUR: Final[int] = 3_600
+SECONDS_PER_DAY: Final[int] = 86_400
+SECONDS_PER_WEEK: Final[int] = 604_800
+
+# === TERMINAL OPERATIONS ===
+TERMINAL_TRUCK_TASK_DURATION_S: Final[float] = 300.0  # 5 minutes for TT jobs
+DEFAULT_STEP_MINUTES: Final[int] = 5  # Default simulation step size
+
+# === PARKING ===
+DEFAULT_PARKING_PREFIX: Final[str] = "P"
+
+# === NUMERIC DEFAULTS ===
+EPSILON_TOLERANCE: Final[float] = 1e-3  # For floating point comparisons
+DEFAULT_BUFFER_TIME_HOURS: Final[int] = 4
+
+# === TERMINAL LAYOUT ===
 import pandas as pd
 import numpy as np
 # this is going to be a funcitonal draft which is to be replaced by a more sophisticated
@@ -37,23 +62,3 @@ CONTAINER_LENGTH_PERMUTATIONS.sort(key=lambda x: sum(x), reverse=True)
 CONTAINER_STARTING_POSITIONS ={
     length : set() for length in CONTAINER_LENGTHS_FT
 }
-
-def perm_to_positions(perm):
-    positions = []
-    position = 0
-    for length in perm:
-        positions.append(position)
-        position += CONTAINER_LENGTH_TO_SUB_BAYS[length]
-    return positions
-
-for perm in CONTAINER_LENGTH_PERMUTATIONS:
-    # print(perm, ' : ', perm_to_positions(perm))
-    positions = perm_to_positions(perm)
-    for length, pos in zip(perm, positions):
-        CONTAINER_STARTING_POSITIONS[length].add(pos)
-
-if __name__ == "__main__":
-    print(CONTAINER_LENGTHS_FT)
-    print(CONTAINER_LENGTH_TO_SUB_BAYS)
-    print(CONTAINER_LENGTH_PERMUTATIONS)
-    print(CONTAINER_STARTING_POSITIONS)

@@ -10,6 +10,7 @@ from scipy.stats import gaussian_kde
 
 from simulation.core.containers.container import Container
 from simulation.core.enums import Direction, GoodsType
+from simulation.core.constants import SECONDS_PER_DAY
 from simulation.config.paths import DataPaths
 from simulation.utils.id_generator import IDGenerator
 
@@ -335,7 +336,7 @@ class ContainerFactory:
             dwell_days = round(dwell_days)
         
         # Use total_seconds for precise timedelta
-        dwell_seconds = dwell_days * 86400  # Convert to seconds
+        dwell_seconds = dwell_days * SECONDS_PER_DAY  # Convert to seconds
         departure_date = arrival_date + timedelta(seconds=round(dwell_seconds))
         
         # Map string goods_type to enum

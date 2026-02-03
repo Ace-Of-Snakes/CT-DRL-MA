@@ -39,13 +39,13 @@ def move_time(x1: float, y1: float, z1: float,
     dy = abs(y2 - y1)
 
     # Hoist: lower to source z, then raise to plane, then lower to dest z
-    hoist_down = axis_time(abs(plane_z - z1), hoist_v, hoist_a)
-    hoist_up   = axis_time(abs(plane_z - z1), hoist_v, hoist_a)
+    hoist_to_pickup   = axis_time(abs(plane_z - z1), hoist_v, hoist_a)
+    hoist_from_pickup = axis_time(abs(plane_z - z1), hoist_v, hoist_a)
 
     # In-plane: critical path between gantry (x) and trolley (y)
     gx = axis_time(dx, gantry_v, gantry_a)
     gy = axis_time(dy, trolley_v, trolley_a)
     plane = gx if gx >= gy else gy
 
-    hoist_lower = axis_time(abs(plane_z - z2), hoist_v, hoist_a)
-    return hoist_down + hoist_up + plane + hoist_lower + handling_s
+    hoist_to_dest = axis_time(abs(plane_z - z2), hoist_v, hoist_a)
+    return hoist_to_pickup + hoist_from_pickup + plane + hoist_to_dest + handling_s

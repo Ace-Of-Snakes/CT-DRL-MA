@@ -1,5 +1,5 @@
 # simulation/rl/multihead_dqn/state_utils.py
-"""State encoding utilities — re-exports canonical ChannelSpec.
+"""State encoding utilities -- re-exports canonical ChannelSpec.
 
 The production encoder lives in simulation.env.state_encoder.
 This module provides a lightweight SplitLevelEncoder for standalone
@@ -8,7 +8,7 @@ agent tests that don't require OptimizedStorageYard.
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 
-# ── Canonical channel specification (single source of truth) ───
+# "" Canonical channel specification (single source of truth) """
 from simulation.env.state_encoder import (
     ChannelSpec,
     CH,
@@ -52,7 +52,7 @@ class SplitLevelEncoder:
         train_anchors: Optional[Dict[str, int]] = None,
         truck_bays: Optional[List[int]] = None,
     ) -> np.ndarray:
-        """Encode yard state from raw dicts — for testing only."""
+        """Encode yard state from raw dicts -- for testing only."""
         R, S, T = self.n_rows, self.total_splits, self.n_tiers
         tensor = np.zeros((NUM_CHANNELS, R, S, T), dtype=np.float32)
 

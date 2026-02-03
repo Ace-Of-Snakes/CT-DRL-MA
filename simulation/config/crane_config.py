@@ -47,4 +47,3 @@ class CraneDefaults:
     
     NUM_CRANES: Final[int] = 2
     ZONE_OVERLAP_BAYS: Final[int] = 4  # Bay overlap between crane zones
-    PROXIMITY_SEARCH_BAYS: Final[int] = 3  # Search radius for placements

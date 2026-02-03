@@ -6,10 +6,7 @@ from typing import List, Dict, Optional, Tuple
 
 from simulation.core.vehicles.train import Train
 from simulation.planning.time_encoder import WeeklyTimeEncoder
-from simulation.core.constants import SECONDS_PER_WEEK, SECONDS_PER_HOUR
-
-
-DEFAULT_BUFFER_TIME_HOURS: int = 4
+from simulation.core.constants import SECONDS_PER_WEEK, SECONDS_PER_HOUR, DEFAULT_BUFFER_TIME_HOURS
 
 
 @dataclass
@@ -150,7 +147,7 @@ class TrainScheduler:
         if _in_interval(dep2, arr1_buf, dep1_buf):
             return True
 
-        # Both wrap → guaranteed overlap
+        # Both wrap -> guaranteed overlap
         if arr1_buf > dep1_buf:
             if arr2 > dep2:
                 return True

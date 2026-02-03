@@ -9,12 +9,6 @@ from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M
 from simulation.core.enums import TrainStatus
 from simulation.utils.id_generator import IDGenerator
 
-# Remove all these constants - now in central files:
-# DEFAULT_NUM_WAGONS = 10  → Keep as default parameter
-# DEFAULT_WAGON_LENGTH = 24.4  → Use STANDARD_VEHICLE_LENGTH_M
-# TRAIN_ID_PREFIX, MIN/MAX_RANDOM → IDGenerator
-# TRAIN_STATUS_* → TrainStatus enum
-
 
 @dataclass
 class ContainerLocation:

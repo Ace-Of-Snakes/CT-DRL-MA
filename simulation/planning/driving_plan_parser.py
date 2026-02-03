@@ -7,6 +7,7 @@ from simulation.core.vehicles.train import Train
 from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.config.paths import DataPaths
 from simulation.config.train_config import TrainDefaults
+from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M
 
 # JSON field indices for arrival/departure arrays
 _DAY = 0
@@ -19,7 +20,7 @@ _TYPO_MAP: Dict[str, str] = {'tueday': 'tuesday'}
 
 
 class DrivingPlanParser:
-    """Parser for weekly driving plan JSON → Train objects."""
+    """Parser for weekly driving plan JSON -> Train objects."""
 
     def __init__(self, json_path: Optional[str] = None):
         self.json_path = json_path or str(DataPaths.DRIVING_PLAN)
@@ -109,7 +110,7 @@ class DrivingPlanParser:
         train = Train(
             train_id=tid,
             num_wagons=TrainDefaults.NUM_WAGONS,
-            wagon_length=TrainDefaults.WAGON_LENGTH_M,
+            wagon_length=STANDARD_VEHICLE_LENGTH_M,
             arrival_time=None,
             departure_time=None,
             operator=operator,

@@ -35,7 +35,7 @@ def test_config():
     print(f"  Yard dims: {yard.spatial_shape}")
     print(f"  Total positions: {yard.total_positions}")
     print(f"  Device: {cfg.device}")
-    print("  ✓ Config OK")
+    print("Config OK")
     return cfg
 
 
@@ -95,7 +95,7 @@ def test_network(cfg: MultiHeadDQNConfig):
     q_park = net.q_parking(global_feat, parking_feats, parking_mask)
     print(f"  Q parking: {q_park.shape}")
     
-    print("  ✓ Network OK")
+    print("Network OK")
     return net
 
 
@@ -149,7 +149,7 @@ def test_agent(cfg: MultiHeadDQNConfig):
             print(f", parking_idx={result.parking_idx}", end="")
         print()
     
-    print("  ✓ Agent OK")
+    print("Agent OK")
     return agent
 
 
@@ -183,7 +183,7 @@ def test_replay(cfg: MultiHeadDQNConfig, agent: MultiHeadDQNAgent):
         losses.append(loss)
     
     print(f"  Losses: {[f'{l:.4f}' for l in losses[:5]]}")
-    print("  ✓ Replay/Optimization OK")
+    print("Replay/Optimization OK")
 
 
 def test_state_encoder():
@@ -214,7 +214,7 @@ def test_state_encoder():
     print(f"  Occupied positions: {occupancy.sum()}")
     print(f"  Valid placements: {validity.sum()}")
     
-    print("  ✓ State encoder OK")
+    print("State encoder OK")
 
 
 def main():
@@ -235,7 +235,7 @@ def main():
         print("=" * 50)
         
     except Exception as e:
-        print(f"\n✗ Test failed with error: {e}")
+        print(f"\n✗-- Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         return 1

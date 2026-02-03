@@ -14,8 +14,6 @@ from simulation.core.facilities.parking import OptimizedParkingArea, ParkingSpot
 from simulation.core.enums import MoveType
 from simulation.config.operations_config import OperationsDefaults
 
-PROXIMITY: int = OperationsDefaults.PROXIMITY_SEARCH_BAYS
-
 
 @dataclass(frozen=True)
 class Move:
@@ -80,7 +78,7 @@ class TerminalLogisticsManager:
 
         for anchor in anchors:
             for d in self.yard.search_placements(
-                container, target_bay=anchor, max_proximity=PROXIMITY
+                container, target_bay=anchor, max_proximity=OperationsDefaults.PROXIMITY_SEARCH_BAYS
             ):
                 key = (d.row, d.bay, d.tier, d.start_split)
                 if key not in seen:
@@ -403,7 +401,7 @@ class TerminalLogisticsManager:
             spot: ParkingSpot = args["spot"]
             return bool(truck and self.parking.allocate(truck, spot.bay, spot.split))
 
-        # --- Train ↔ Yard ---
+        # -- Train " Yard ------------------------------------------------
         if mt == MoveType.TRAIN_TO_YARD:
             train = trains.get(args["train_id"])
             if not train:
@@ -428,11 +426,11 @@ class TerminalLogisticsManager:
             train.remove_pickup_container(container_id)
             return True
 
-        # --- Yard ↔ Yard ---
+        # -- Yard " Yard -------------------------------------------------
         if mt == MoveType.YARD_TO_YARD:
             return self.yard.move_container(args["container_id"], args["placement"])
 
-        # --- Truck ↔ Yard ---
+        # -- Truck " Yard ------------------------------------------------
         if mt == MoveType.TRUCK_TO_YARD:
             if not _require_parked("truck_id"):
                 return False
@@ -457,7 +455,7 @@ class TerminalLogisticsManager:
             truck.remove_pickup_container_id(container_id)
             return True
 
-        # --- Train ↔ Truck ---
+        # -- Train " Truck -----------------------------------------------
         if mt == MoveType.TRAIN_TO_TRUCK:
             if not _require_parked("truck_id"):
                 return False

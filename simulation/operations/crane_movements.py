@@ -152,7 +152,7 @@ class TerminalRMGC:
     # ----- Endpoint dispatch -----
 
     def _build_dispatch(self) -> None:
-        """Build move-type → resolver dispatch table."""
+        """Build move-type -> resolver dispatch table."""
         self._dispatch: Dict[MoveType, Callable] = {
             MoveType.YARD_TO_YARD: self._ep_yard_to_yard,
             MoveType.YARD_TO_TRAIN: self._ep_yard_to_train,
@@ -215,7 +215,7 @@ class TerminalRMGC:
         trucks: Dict[str, Truck],
         yard: OptimizedStorageYard,
     ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
-        """Resolve move → (source_xyz, dest_xyz). Accepts Move dataclass or dict."""
+        """Resolve move -> (source_xyz, dest_xyz). Accepts Move dataclass or dict."""
         move_type = move.type if hasattr(move, "type") else move["type"]
         args = move.args if hasattr(move, "args") else move["args"]
 

@@ -114,23 +114,24 @@ class MultiHeadDQNAgent:
         validity_mask: np.ndarray,
         vehicle_feats: Optional[np.ndarray] = None,
         vehicle_mask: Optional[np.ndarray] = None,
+        import_mask: Optional[np.ndarray] = None,
         parking_feats: Optional[np.ndarray] = None,
         parking_mask: Optional[np.ndarray] = None,
         epsilon: Optional[float] = None
     ) -> ActionResult:
-        """
-        Select action through hierarchical decision process.
-        
+        """Select action through hierarchical decision process.
+
         Args:
             state: (C, R, S, T) yard state tensor
             occupancy_mask: (R, S, T) bool - where containers exist
             validity_mask: (R, S, T) bool - where placement is valid
             vehicle_feats: (V, Fv) features for trains/trucks
             vehicle_mask: (V,) bool - which vehicles available
+            import_mask: (V,) bool - which vehicles have importable containers
             parking_feats: (P, Fp) features for parking actions
             parking_mask: (P,) bool - which parking actions valid
             epsilon: Override epsilon value
-            
+
         Returns:
             ActionResult with complete decision
         """
@@ -149,29 +150,30 @@ class MultiHeadDQNAgent:
         # Check what actions are available
         has_containers = occ_t.any()
         has_parking = parking_mask is not None and parking_mask.any()
+        has_imports = import_mask is not None and import_mask.any()
         
-        if not has_containers and not has_parking:
-            # No valid actions
+        if not has_containers and not has_parking and not has_imports:
             return ActionResult(action_type=ActionType.MOVE_CONTAINER)
         
-        # Stage 1: Decide action type
+        # Stage 1: Decide action type (MOVE / PARK / IMPORT)
         if random.random() < eps:
-            # Random action type (weighted by availability)
-            if has_containers and has_parking:
-                action_type = random.choice([ActionType.MOVE_CONTAINER, ActionType.SLOT_PARKING])
-            elif has_containers:
-                action_type = ActionType.MOVE_CONTAINER
-            else:
-                action_type = ActionType.SLOT_PARKING
+            choices = []
+            if has_containers:
+                choices.append(ActionType.MOVE_CONTAINER)
+            if has_parking:
+                choices.append(ActionType.SLOT_PARKING)
+            if has_imports:
+                choices.append(ActionType.IMPORT_VEHICLE)
+            action_type = random.choice(choices) if choices else ActionType.MOVE_CONTAINER
         else:
-            # Greedy: compare best Q from each branch
-            q_type = self.q_net.q_action_type(global_feat)[0]  # (2,)
+            q_type = self.q_net.q_action_type(global_feat)[0]  # (3,)
             
-            # Mask unavailable types
             if not has_containers:
                 q_type[ActionType.MOVE_CONTAINER] = float('-inf')
             if not has_parking:
                 q_type[ActionType.SLOT_PARKING] = float('-inf')
+            if not has_imports:
+                q_type[ActionType.IMPORT_VEHICLE] = float('-inf')
             
             action_type = ActionType(q_type.argmax().item())
         
@@ -179,6 +181,10 @@ class MultiHeadDQNAgent:
         if action_type == ActionType.SLOT_PARKING:
             return self._select_parking(
                 global_feat, parking_feats, parking_mask, eps
+            )
+        elif action_type == ActionType.IMPORT_VEHICLE:
+            return self._select_import(
+                global_feat, vehicle_feats, import_mask, eps
             )
         else:
             return self._select_container_move(
@@ -208,6 +214,36 @@ class MultiHeadDQNAgent:
         return ActionResult(
             action_type=ActionType.SLOT_PARKING,
             parking_idx=idx
+        )
+    
+    def _select_import(
+        self,
+        global_feat: torch.Tensor,
+        vehicle_feats: np.ndarray,
+        import_mask: np.ndarray,
+        eps: float
+    ) -> ActionResult:
+        """Select which vehicle to import from."""
+        if vehicle_feats.shape[0] == 0:
+            return ActionResult(action_type=ActionType.IMPORT_VEHICLE)
+
+        veh_t = self._to_tensor(vehicle_feats).unsqueeze(0)
+        mask_t = self._to_bool_tensor(import_mask).unsqueeze(0)
+
+        # Dummy container features (no container selected yet for imports)
+        feat_dim = self.q_net.backbone.out_channels
+        dummy_feat = torch.zeros(1, feat_dim, device=self.device)
+
+        if random.random() < eps:
+            valid_indices = np.where(import_mask)[0]
+            idx = random.choice(valid_indices) if len(valid_indices) > 0 else -1
+        else:
+            q_veh = self.q_net.q_vehicle(global_feat, dummy_feat, veh_t, mask_t)[0]
+            idx = q_veh.argmax().item()
+
+        return ActionResult(
+            action_type=ActionType.IMPORT_VEHICLE,
+            vehicle_idx=idx
         )
     
     def _select_container_move(

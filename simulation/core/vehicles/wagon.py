@@ -4,10 +4,6 @@ from collections import OrderedDict
 from simulation.core.containers.container import Container
 from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_LENGTH_M
 
-# Removed constants - now in central files
-# WAGON_LENGTH_STANDARD → STANDARD_VEHICLE_LENGTH_M
-# MIN_CONTAINER_LENGTH → MIN_CONTAINER_LENGTH_M
-
 
 class Wagon:
     """

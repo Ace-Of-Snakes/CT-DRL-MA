@@ -17,8 +17,7 @@ from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container
 from simulation.core.enums import Direction
-
-RECALC_WINDOW_MIN: int = 30
+from simulation.config.operations_config import OperationsDefaults
 
 
 @dataclass
@@ -90,7 +89,7 @@ class LogisticsManager:
                 cap_total=int(self.daily_train_import_cap),
             )
 
-        # 2) Count imports → derive export target
+        # 2) Count imports -> derive export target
         imports_arriving = max(0, sum(
             st.train.get_container_count() for st in todays_trains
         ))
@@ -169,8 +168,8 @@ class LogisticsManager:
         now: datetime,
         day_plan: DayPlan,
     ) -> None:
-        """Recalculate pickup assignments for trains arriving within RECALC_WINDOW_MIN."""
-        horizon = now + timedelta(minutes=RECALC_WINDOW_MIN)
+        """Recalculate pickup assignments for trains arriving within recalc window."""
+        horizon = now + timedelta(minutes=OperationsDefaults.RECALC_WINDOW_MINUTES)
         day_name = now.strftime("%A").lower()
 
         imminent: List[Train] = []
@@ -318,7 +317,7 @@ class LogisticsManager:
         return latest
 
     def _throttle_train_imports(self, trains: List[Train], cap_total: int) -> None:
-        """Remove imports across trains until total ≤ cap_total (balanced)."""
+        """Remove imports across trains until total <= cap_total (balanced)."""
         active = [t for t in trains if t.get_container_count() > 0]
         if not active:
             return

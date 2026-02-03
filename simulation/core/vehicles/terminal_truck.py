@@ -10,11 +10,6 @@ from simulation.core.constants import (
 from simulation.core.enums import TerminalTruckStatus
 from simulation.utils.id_generator import IDGenerator
 
-# Removed constants - now in central files
-# TERMINAL_TRUCK_MAX_LENGTH → STANDARD_VEHICLE_LENGTH_M
-# Status constants → TerminalTruckStatus enum
-# Task time limits → TERMINAL_TRUCK_TASK_DURATION_S
-
 
 class TerminalTruck(Truck):
     """
@@ -177,7 +172,7 @@ class TerminalTruck(Truck):
         status_str = f"status: {self.status.value}"
         
         if self.status == TerminalTruckStatus.BUSY and self.current_source:
-            status_str += f" ({self.current_source} → {self.current_destination})"
+            status_str += f" ({self.current_source} -> {self.current_destination})"
         
         return f"Terminal Truck {self.truck_id}: {container_str}, {status_str}"
     

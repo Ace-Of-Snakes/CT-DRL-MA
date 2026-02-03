@@ -156,6 +156,7 @@ class SpatialPlacementHead(nn.Module):
     
     def __init__(self, in_channels: int, global_dim: int):
         super().__init__()
+        self.in_channels = in_channels
         # Inject global context into spatial features
         self.global_proj = nn.Linear(global_dim, in_channels)
         
@@ -214,7 +215,7 @@ class SpatialPlacementHead(nn.Module):
     ) -> torch.Tensor:
         """Build relative position features from source container."""
         B = source_pos.size(0)
-        F = 64  # encoding dimension (will be projected)
+        F = self.in_channels  # must match backbone out_channels
         
         # Create coordinate grids
         r_coords = torch.arange(R, device=device).float() / max(R - 1, 1)

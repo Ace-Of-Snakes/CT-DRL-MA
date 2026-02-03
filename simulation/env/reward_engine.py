@@ -53,7 +53,7 @@ class RewardEngine:
         return self._compute_wait_reward(wait_minutes)
 
     def _compute_wait_reward(self, wait_minutes: float) -> float:
-        """Sliding scale: fast_minutes → max reward, slow_minutes → min reward."""
+        """Sliding scale: fast_minutes -> max reward, slow_minutes -> min reward."""
         w = self.weights
         if wait_minutes <= w.truck_wait_fast_minutes:
             return w.truck_wait_reward_fast
