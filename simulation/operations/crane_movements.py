@@ -104,10 +104,10 @@ class TerminalRMGC:
     def _truck_xyz(self, truck: Truck) -> Tuple[float, float, float]:
         """(x, y, z) for a parked truck."""
         bay, split = 0, 0
-        if isinstance(truck.parking_spot, str):
-            parsed = ParkingSpot.from_string(truck.parking_spot)
-            if parsed is not None:
-                bay, split = parsed.bay, parsed.split
+        spot = truck.parking_spot
+        if spot is not None:
+            bay = getattr(spot, 'bay', 0)
+            split = getattr(spot, 'split', 0)
 
         x = (bay + split / max(1, self.yard.split_factor)) * self.geom.bay_length_m
         y = self.parking_y

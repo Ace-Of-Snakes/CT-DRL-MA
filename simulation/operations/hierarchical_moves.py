@@ -103,11 +103,11 @@ class HierarchicalMoveGenerator:
 
     @staticmethod
     def _parse_parking_bay(truck: Truck) -> int:
-        """Extract bay index from truck parking spot string."""
-        if not isinstance(truck.parking_spot, str):
+        """Extract bay index from truck parking spot."""
+        spot = truck.parking_spot
+        if spot is None:
             return 0
-        parsed = ParkingSpot.from_string(truck.parking_spot)
-        return parsed.bay if parsed is not None else 0
+        return getattr(spot, "bay", 0)
 
     # ================================================================
     # Stage 1: list moveable containers

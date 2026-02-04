@@ -20,7 +20,7 @@ class Truck:
         containers: List of containers currently loaded on the truck
         arrival_time: When the truck arrived at the terminal
         departure_time: When the truck departed from the terminal
-        parking_spot: Current parking spot position
+        parking_spot: Current parking spot (ParkingSpot object or None)
         status: Current status of the truck
         pickup_container_ids: IDs of containers to pick up
     """
@@ -31,7 +31,7 @@ class Truck:
         max_length: float = STANDARD_VEHICLE_LENGTH_M,
         containers: Optional[List[Container]] = None,
         arrival_time: Optional[datetime] = None,
-        parking_spot: Optional[str] = None,
+        parking_spot=None,
         prefix: str = None
     ):
         """

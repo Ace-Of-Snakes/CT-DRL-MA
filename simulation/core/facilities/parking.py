@@ -100,8 +100,8 @@ class OptimizedParkingArea:
         self.truck_ids[bay, split] = truck.truck_id
         self._truck_spots[truck.truck_id] = (bay, split)
         
-        # Update truck's parking spot (string for compatibility)
-        truck.parking_spot = f"{self.prefix}_{bay}_{split}"
+        # Update truck's parking spot
+        truck.parking_spot = ParkingSpot(bay=bay, split=split)
         
         return True
 
