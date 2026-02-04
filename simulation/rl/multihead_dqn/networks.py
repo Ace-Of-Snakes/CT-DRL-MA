@@ -1,470 +1,462 @@
 # multihead_dqn/networks.py
-"""Neural network components for Multi-Head DQN."""
+"""Factored-CNN Multi-Head Q-Network.
+
+Architecture rationale:
+  Containers are 1D objects (1 row × 20-53 splits × 1 tier) embedded in
+  a 3D grid (5 × 1160 × 5).  Standard (3,3,3) kernels waste parameters
+  mixing noise across rows/tiers and see only ~7 of a container's 20-40
+  splits.  Instead we factorise the convolution:
+
+  Stage 1: (1, 21, 1) kernels along S axis — extract container profiles.
+           Two layers give RF = 41 splits (one 40ft container).
+           Second layer strides ×4 → (5, 290, 5) = 7 250 positions.
+
+  Stage 2: (3, 1, 3) kernel across R×T — stacking & cross-row context.
+           Each (row, tier) can see its neighbours (blocking, support).
+
+  Stage 3: (1, 5, 1) kernel along S — neighbourhood refinement.
+           Total RF_S ≈ 57 splits (~3 bays).
+
+  Global:  Occupied-only max+mean pooling (no spatial dilution).
+           At 0.5% occupancy, naive avg-pool dilutes 200×; ours doesn't.
+
+  Container selection: 1×1 conv → per-position Q-values, masked by
+           CONTAINER_START at downsampled resolution.
+
+  Per-container embedding: index feat_map at selected position.
+           64-dim feature already encodes all container+context info.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional, List
+from dataclasses import dataclass
 
-from simulation.rl.multihead_dqn.config import BackboneConfig, HeadConfig, YardDims, ActionType, DestinationType
+from simulation.rl.multihead_dqn.config import (
+    CNNConfig, HeadConfig, YardDims, ActionType, DestinationType,
+)
+
+# State tensor channel indices (must match state_encoder.ChannelSpec)
+_CH_OCCUPANCY = 0
+_CH_CONTAINER_START = 1
 
 
-class ConvBlock(nn.Module):
-    """Single 3D conv block with optional batchnorm."""
-    
-    def __init__(
-        self,
-        in_ch: int,
-        out_ch: int,
-        kernel_size: int = 3,
-        use_bn: bool = True,
-        dropout: float = 0.0
-    ):
+# ================================================================
+# Encoded state container
+# ================================================================
+
+@dataclass
+class EncodedState:
+    """Outputs from CNN backbone encoding."""
+    global_feat: torch.Tensor    # (B, global_dim)
+    feat_map: torch.Tensor       # (B, feat_channels, R, S_down, T)
+
+
+# ================================================================
+# CNN Backbone
+# ================================================================
+
+class FactoredCNNBackbone(nn.Module):
+    """Factored 1D CNN for container terminal yard states.
+
+    Processes (B, C, R, S, T) → (B, feat_ch, R, S_down, T).
+    Each dimension gets the kernel shape that matches its patterns:
+      S (splits): long 1D kernels matching container lengths
+      R×T (row/tier): short 2D kernels for stacking context
+    """
+
+    def __init__(self, cfg: CNNConfig):
         super().__init__()
-        padding = kernel_size // 2
-        layers = [nn.Conv3d(in_ch, out_ch, kernel_size, padding=padding)]
-        if use_bn:
-            layers.append(nn.BatchNorm3d(out_ch))
-        layers.append(nn.ReLU(inplace=True))
-        if dropout > 0:
-            layers.append(nn.Dropout3d(dropout))
-        self.block = nn.Sequential(*layers)
-    
+        C_in = cfg.n_state_channels
+        C1 = cfg.stage1_channels
+        C2 = cfg.feat_channels
+        k = cfg.container_kernel
+        pk = cfg.container_pad
+        rk = cfg.cross_kernel
+        rp = cfg.cross_pad
+        fk = cfg.refine_kernel
+        fp = cfg.refine_pad
+        G = cfg.gn_groups
+
+        # Stage 1a: (1,21,1) no stride — RF_S = 21 (one 20ft container)
+        self.conv1a = nn.Conv3d(C_in, C1, (1, k, 1), padding=(0, pk, 0))
+        self.gn1a = nn.GroupNorm(G, C1)
+
+        # Stage 1b: (1,21,1) stride 4 — RF_S = 41 (one 40ft container)
+        self.conv1b = nn.Conv3d(
+            C1, C2, (1, k, 1),
+            stride=(1, cfg.s_stride, 1),
+            padding=(0, pk, 0),
+        )
+        self.gn1b = nn.GroupNorm(G, C2)
+
+        # Stage 2: (3,1,3) — cross-row/tier context (stacking, blocking)
+        self.conv2 = nn.Conv3d(C2, C2, (rk, 1, rk), padding=(rp, 0, rp))
+        self.gn2 = nn.GroupNorm(G, C2)
+
+        # Stage 3: (1,5,1) — neighbourhood refinement, RF_S ≈ 57
+        self.conv3 = nn.Conv3d(C2, C2, (1, fk, 1), padding=(0, fp, 0))
+        self.gn3 = nn.GroupNorm(G, C2)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+        """(B, C, R, S, T) → (B, feat_channels, R, S_down, T)."""
+        x = F.relu(self.gn1a(self.conv1a(x)), inplace=True)
+        x = F.relu(self.gn1b(self.conv1b(x)), inplace=True)
+        x = F.relu(self.gn2(self.conv2(x)), inplace=True)
+        x = F.relu(self.gn3(self.conv3(x)), inplace=True)
+        return x
 
 
-class CNNBackbone(nn.Module):
+class OccupiedPooling(nn.Module):
+    """Max + mean pooling over occupied positions only.
+
+    At typical occupancy (0.5%), naive AdaptiveAvgPool dilutes
+    container features 200×. This module pools ONLY over positions
+    where containers exist, preserving signal strength.
     """
-    3D CNN backbone for spatial feature extraction.
-    Input: (B, C, R, S, T)
-    Output: feature_map (B, F, R, S, T), global_feat (B, F)
-    """
-    
-    def __init__(self, cfg: BackboneConfig):
+
+    def __init__(self, feat_channels: int, global_dim: int):
         super().__init__()
-        channels = [cfg.in_channels] + cfg.hidden_channels
-        
-        blocks = []
-        for i in range(len(cfg.hidden_channels)):
-            blocks.append(ConvBlock(
-                channels[i],
-                channels[i + 1],
-                kernel_size=cfg.kernel_sizes[i],
-                use_bn=cfg.use_batchnorm,
-                dropout=cfg.dropout
-            ))
-        self.conv_blocks = nn.Sequential(*blocks)
-        self.out_channels = cfg.hidden_channels[-1]
-        
-        # Global pooling for context vector
-        self.global_pool = nn.AdaptiveAvgPool3d(1)
-    
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (feature_map, global_features)."""
-        feat_map = self.conv_blocks(x)  # (B, F, R, S, T)
-        global_feat = self.global_pool(feat_map).flatten(1)  # (B, F)
-        return feat_map, global_feat
+        self.fc = nn.Sequential(
+            nn.Linear(2 * feat_channels, global_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, feat_map: torch.Tensor,
+                occ_mask: torch.Tensor) -> torch.Tensor:
+        """Pool feat_map using occupancy mask.
+
+        Args:
+            feat_map: (B, C, R, S_down, T)
+            occ_mask: (B, R, S_down, T) bool
+        Returns:
+            (B, global_dim)
+        """
+        mask = occ_mask.unsqueeze(1)                  # (B, 1, R, S_down, T)
+        mask_f = mask.float()
+
+        # Mean over occupied positions
+        n_occ = mask_f.sum(dim=(2, 3, 4)).clamp(min=1.0)     # (B, 1)
+        g_mean = (feat_map * mask_f).sum(dim=(2, 3, 4)) / n_occ  # (B, C)
+
+        # Max over occupied positions
+        g_max = torch.where(mask, feat_map, torch.full_like(feat_map, -1e9))
+        g_max = g_max.amax(dim=(2, 3, 4))                     # (B, C)
+        g_max = g_max * (n_occ > 0).float()                    # zero if empty
+
+        return self.fc(torch.cat([g_mean, g_max], dim=1))
+
+
+# ================================================================
+# Decision Heads
+# ================================================================
+
+class DuelingHead(nn.Module):
+    """Dueling V+A for fixed-size action spaces."""
+
+    def __init__(self, in_features: int, n_actions: int, hidden: int = 64):
+        super().__init__()
+        self.value = nn.Sequential(
+            nn.Linear(in_features, hidden), nn.ReLU(inplace=True),
+            nn.Linear(hidden, 1),
+        )
+        self.advantage = nn.Sequential(
+            nn.Linear(in_features, hidden), nn.ReLU(inplace=True),
+            nn.Linear(hidden, n_actions),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        v = self.value(x)
+        a = self.advantage(x)
+        return v + a - a.mean(dim=-1, keepdim=True)
 
 
 class ActionTypeHead(nn.Module):
-    """Decides: MOVE_CONTAINER vs SLOT_PARKING."""
-    
-    def __init__(self, in_features: int, hidden: int = 64):
+    """MOVE_CONTAINER / SLOT_PARKING / IMPORT_VEHICLE."""
+
+    def __init__(self, global_dim: int, hidden: int = 64, dueling: bool = True):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_features, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, len(ActionType))
+        n = len(ActionType)
+        self.net = (
+            DuelingHead(global_dim, n, hidden) if dueling
+            else nn.Sequential(
+                nn.Linear(global_dim, hidden), nn.ReLU(inplace=True),
+                nn.Linear(hidden, n),
+            )
         )
-    
+
     def forward(self, global_feat: torch.Tensor) -> torch.Tensor:
-        """Returns Q-values for action types: (B, 2)."""
         return self.net(global_feat)
 
 
 class ContainerSelectionHead(nn.Module):
+    """Per-position Q-values via 1×1 conv on the CNN feat_map.
+
+    Outputs one Q-value per (row, s_down, tier) position. Masked
+    by CONTAINER_START so only actual containers are selectable.
     """
-    Selects which container to move via spatial attention.
-    Uses feature map directly - occupied positions are valid selections.
-    """
-    
-    def __init__(self, in_channels: int):
+
+    def __init__(self, feat_channels: int):
         super().__init__()
-        # 1x1 conv to produce per-position Q-values
+        mid = feat_channels // 2
         self.conv = nn.Sequential(
-            nn.Conv3d(in_channels, in_channels // 2, kernel_size=1),
+            nn.Conv3d(feat_channels, mid, 1),
             nn.ReLU(inplace=True),
-            nn.Conv3d(in_channels // 2, 1, kernel_size=1)
+            nn.Conv3d(mid, 1, 1),
         )
-    
-    def forward(
-        self,
-        feat_map: torch.Tensor,
-        occupancy_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
+
+    def forward(self, feat_map: torch.Tensor,
+                container_mask: torch.Tensor) -> torch.Tensor:
+        """Score each position for container selection.
+
         Args:
-            feat_map: (B, F, R, S, T)
-            occupancy_mask: (B, R, S, T) bool - True where containers exist
+            feat_map: (B, C, R, S_down, T)
+            container_mask: (B, R, S_down, T) bool — True at CONTAINER_START
         Returns:
-            Q-values: (B, R*S*T) with -inf for unoccupied positions
+            q_flat: (B, R*S_down*T) with -inf for non-container positions
         """
-        q_spatial = self.conv(feat_map).squeeze(1)  # (B, R, S, T)
-        
-        # Mask unoccupied positions
-        q_flat = q_spatial.reshape(q_spatial.size(0), -1)
-        mask_flat = occupancy_mask.reshape(occupancy_mask.size(0), -1)
-        
-        # Apply mask: -inf for invalid positions
-        q_flat = q_flat.masked_fill(~mask_flat, float('-inf'))
-        return q_flat
+        q = self.conv(feat_map).squeeze(1)               # (B, R, S_down, T)
+        q_flat = q.reshape(q.size(0), -1)
+        mask_flat = container_mask.reshape(container_mask.size(0), -1)
+        return q_flat.masked_fill(~mask_flat, float("-inf"))
 
 
 class DestTypeHead(nn.Module):
-    """Decides destination type: YARD, TRAIN, or TRUCK."""
-    
-    def __init__(self, global_dim: int, container_feat_dim: int, hidden: int = 64):
+    """YARD / TRAIN / TRUCK destination type."""
+
+    def __init__(self, global_dim: int, feat_dim: int,
+                 hidden: int = 64, dueling: bool = True):
         super().__init__()
-        # Conditioned on global context + selected container features
-        self.net = nn.Sequential(
-            nn.Linear(global_dim + container_feat_dim, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, len(DestinationType))
+        n = len(DestinationType)
+        combined = global_dim + feat_dim
+        self.net = (
+            DuelingHead(combined, n, hidden) if dueling
+            else nn.Sequential(
+                nn.Linear(combined, hidden), nn.ReLU(inplace=True),
+                nn.Linear(hidden, n),
+            )
         )
-    
-    def forward(
-        self,
-        global_feat: torch.Tensor,
-        container_feat: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Args:
-            global_feat: (B, G)
-            container_feat: (B, F) - features of selected container
-        Returns:
-            Q-values: (B, 3) for YARD/TRAIN/TRUCK
-        """
-        combined = torch.cat([global_feat, container_feat], dim=-1)
-        return self.net(combined)
+
+    def forward(self, global_feat: torch.Tensor,
+                container_feat: torch.Tensor) -> torch.Tensor:
+        return self.net(torch.cat([global_feat, container_feat], dim=-1))
 
 
-class SpatialPlacementHead(nn.Module):
+class ProximityPlacementHead(nn.Module):
+    """Split-level placement within a proximity window.
+
+    Instead of scoring all 29,000 positions or 1,450 bay-level positions,
+    scores only the ±proximity_bays window around a reference bay at full
+    split resolution.  Matches OperationsDefaults.PROXIMITY_SEARCH_BAYS.
+
+    Factorised: Q(r, s, t) = Q_split(s) + Q_row_tier(r, t).
+    Output: R × window_splits × T positions.
     """
-    Outputs Q-values for yard placement positions.
-    Conditioned on source container position via relative encoding.
-    """
-    
-    def __init__(self, in_channels: int, global_dim: int):
+
+    _HIDDEN_SPLIT: int = 128
+    _HIDDEN_RT: int = 64
+
+    def __init__(self, input_dim: int, proximity_bays: int,
+                 split_factor: int, n_rows: int, n_tiers: int):
         super().__init__()
-        self.in_channels = in_channels
-        # Inject global context into spatial features
-        self.global_proj = nn.Linear(global_dim, in_channels)
-        
-        # Spatial processing with relative position awareness
-        self.conv = nn.Sequential(
-            nn.Conv3d(in_channels * 2, in_channels, kernel_size=3, padding=1),
+        self.proximity_bays = proximity_bays
+        self.split_factor = split_factor
+        self.n_rows = n_rows
+        self.n_tiers = n_tiers
+        self.window_bays = 2 * proximity_bays + 1
+        self.window_splits = self.window_bays * split_factor
+
+        self.split_net = nn.Sequential(
+            nn.Linear(input_dim, self._HIDDEN_SPLIT),
             nn.ReLU(inplace=True),
-            nn.Conv3d(in_channels, in_channels // 2, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(in_channels // 2, 1, kernel_size=1)
+            nn.Linear(self._HIDDEN_SPLIT, self.window_splits),
         )
-    
-    def forward(
-        self,
-        feat_map: torch.Tensor,
-        global_feat: torch.Tensor,
-        source_pos: torch.Tensor,
-        validity_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
+        self.row_tier_net = nn.Sequential(
+            nn.Linear(input_dim, self._HIDDEN_RT),
+            nn.ReLU(inplace=True),
+            nn.Linear(self._HIDDEN_RT, n_rows * n_tiers),
+        )
+
+    def forward(self, global_feat: torch.Tensor,
+                container_feat: torch.Tensor,
+                validity_window: torch.Tensor) -> torch.Tensor:
+        """Score positions within the proximity window.
+
         Args:
-            feat_map: (B, F, R, S, T)
             global_feat: (B, G)
-            source_pos: (B, 3) - (row, split, tier) of source container
-            validity_mask: (B, R, S, T) bool - True where placement is valid
+            container_feat: (B, F)
+            validity_window: (B, R, window_splits, T) bool
         Returns:
-            Q-values: (B, R*S*T) with -inf for invalid positions
+            q_flat: (B, R*window_splits*T) with -inf for invalid
         """
-        B, F, R, S, T = feat_map.shape
-        device = feat_map.device
-        
-        # Create relative position encoding
-        rel_pos = self._build_relative_encoding(source_pos, R, S, T, device)  # (B, F, R, S, T)
-        
-        # Inject global context
-        g = self.global_proj(global_feat)  # (B, F)
-        g = g.view(B, F, 1, 1, 1).expand(-1, -1, R, S, T)
-        
-        # Combine: features + relative encoding + global
-        combined = torch.cat([feat_map + g, rel_pos], dim=1)  # (B, 2F, R, S, T)
-        
-        q_spatial = self.conv(combined).squeeze(1)  # (B, R, S, T)
-        q_flat = q_spatial.reshape(B, -1)  # (B, R*S*T)
-        
-        # Mask invalid placements
-        mask_flat = validity_mask.reshape(B, -1)
-        q_flat = q_flat.masked_fill(~mask_flat, float('-inf'))
-        
-        return q_flat
-    
-    def _build_relative_encoding(
-        self,
-        source_pos: torch.Tensor,
-        R: int, S: int, T: int,
-        device: torch.device
-    ) -> torch.Tensor:
-        """Build relative position features from source container."""
-        B = source_pos.size(0)
-        F = self.in_channels  # must match backbone out_channels
-        
-        # Create coordinate grids
-        r_coords = torch.arange(R, device=device).float() / max(R - 1, 1)
-        s_coords = torch.arange(S, device=device).float() / max(S - 1, 1)
-        t_coords = torch.arange(T, device=device).float() / max(T - 1, 1)
-        
-        # Meshgrid: (R, S, T) each
-        rr, ss, tt = torch.meshgrid(r_coords, s_coords, t_coords, indexing='ij')
-        
-        # Normalize source positions
-        src_r = source_pos[:, 0:1].float() / max(R - 1, 1)  # (B, 1)
-        src_s = source_pos[:, 1:2].float() / max(S - 1, 1)
-        src_t = source_pos[:, 2:3].float() / max(T - 1, 1)
-        
-        # Compute relative distances: (B, R, S, T)
-        rel_r = rr.unsqueeze(0) - src_r.view(B, 1, 1, 1)
-        rel_s = ss.unsqueeze(0) - src_s.view(B, 1, 1, 1)
-        rel_t = tt.unsqueeze(0) - src_t.view(B, 1, 1, 1)
-        
-        # Stack as channels: (B, 3, R, S, T)
-        rel_encoding = torch.stack([rel_r, rel_s, rel_t], dim=1)
-        
-        # Expand to match feature dimension via simple repetition
-        # (B, 3, R, S, T) -> (B, F, R, S, T) by repeating and truncating
-        n_repeats = (F + 2) // 3
-        rel_encoding = rel_encoding.repeat(1, n_repeats, 1, 1, 1)[:, :F]
-        
-        return rel_encoding
+        x = torch.cat([global_feat, container_feat], dim=-1)
+        B = x.size(0)
+        R, W, T = self.n_rows, self.window_splits, self.n_tiers
+
+        split_q = self.split_net(x)                              # (B, W)
+        rt_q = self.row_tier_net(x).view(B, R, T)               # (B, R, T)
+
+        q_grid = split_q.view(B, 1, W, 1) + rt_q.view(B, R, 1, T)
+        q_flat = q_grid.reshape(B, -1)
+        mask_flat = validity_window.reshape(B, -1)
+        return q_flat.masked_fill(~mask_flat, float("-inf"))
 
 
 class VehicleSelectionHead(nn.Module):
-    """Selects which train/truck to load container onto."""
-    
-    def __init__(self, global_dim: int, container_feat_dim: int, vehicle_feat_dim: int, hidden: int = 64):
+    """Scores each vehicle for loading or import."""
+
+    def __init__(self, global_dim: int, feat_dim: int,
+                 vehicle_feat_dim: int, hidden: int = 64):
         super().__init__()
-        self.vehicle_encoder = nn.Sequential(
-            nn.Linear(vehicle_feat_dim, hidden),
-            nn.ReLU(inplace=True)
+        self.vehicle_enc = nn.Sequential(
+            nn.Linear(vehicle_feat_dim, hidden), nn.ReLU(inplace=True),
         )
         self.scorer = nn.Sequential(
-            nn.Linear(global_dim + container_feat_dim + hidden, hidden),
+            nn.Linear(global_dim + feat_dim + hidden, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, 1)
+            nn.Linear(hidden, 1),
         )
-    
-    def forward(
-        self,
-        global_feat: torch.Tensor,
-        container_feat: torch.Tensor,
-        vehicle_feats: torch.Tensor,
-        vehicle_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Args:
-            global_feat: (B, G)
-            container_feat: (B, Fc)
-            vehicle_feats: (B, V, Fv) - features for each vehicle
-            vehicle_mask: (B, V) bool - True for valid vehicles
-        Returns:
-            Q-values: (B, V) with -inf for invalid vehicles
-        """
-        B, V, Fv = vehicle_feats.shape
-        
-        # Encode vehicles
-        v_enc = self.vehicle_encoder(vehicle_feats)  # (B, V, H)
-        
-        # Expand global and container features
-        g_exp = global_feat.unsqueeze(1).expand(-1, V, -1)  # (B, V, G)
-        c_exp = container_feat.unsqueeze(1).expand(-1, V, -1)  # (B, V, Fc)
-        
-        # Combine and score
-        combined = torch.cat([g_exp, c_exp, v_enc], dim=-1)  # (B, V, G+Fc+H)
-        q_values = self.scorer(combined).squeeze(-1)  # (B, V)
-        
-        # Mask invalid vehicles
-        q_values = q_values.masked_fill(~vehicle_mask, float('-inf'))
-        
-        return q_values
+
+    def forward(self, global_feat, container_feat, vehicle_feats, vehicle_mask):
+        B, V, _ = vehicle_feats.shape
+        v_enc = self.vehicle_enc(vehicle_feats)                  # (B, V, H)
+        g_exp = global_feat.unsqueeze(1).expand(-1, V, -1)
+        c_exp = container_feat.unsqueeze(1).expand(-1, V, -1)
+        combined = torch.cat([g_exp, c_exp, v_enc], dim=-1)
+        q = self.scorer(combined).squeeze(-1)                    # (B, V)
+        return q.masked_fill(~vehicle_mask, float("-inf"))
 
 
 class ParkingHead(nn.Module):
-    """Selects which truck to assign parking slot."""
-    
+    """Scores each parking slot for a truck."""
+
     def __init__(self, global_dim: int, parking_feat_dim: int, hidden: int = 64):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(parking_feat_dim, hidden),
-            nn.ReLU(inplace=True)
+            nn.Linear(parking_feat_dim, hidden), nn.ReLU(inplace=True),
         )
         self.scorer = nn.Sequential(
             nn.Linear(global_dim + hidden, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, 1)
+            nn.Linear(hidden, 1),
         )
-    
-    def forward(
-        self,
-        global_feat: torch.Tensor,
-        parking_feats: torch.Tensor,
-        parking_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Args:
-            global_feat: (B, G)
-            parking_feats: (B, P, Fp) - features for pending parking requests
-            parking_mask: (B, P) bool - True for valid parking actions
-        Returns:
-            Q-values: (B, P) with -inf for invalid
-        """
-        B, P, Fp = parking_feats.shape
-        
-        p_enc = self.encoder(parking_feats)  # (B, P, H)
-        g_exp = global_feat.unsqueeze(1).expand(-1, P, -1)  # (B, P, G)
-        
+
+    def forward(self, global_feat, parking_feats, parking_mask):
+        B, P, _ = parking_feats.shape
+        p_enc = self.encoder(parking_feats)                      # (B, P, H)
+        g_exp = global_feat.unsqueeze(1).expand(-1, P, -1)
         combined = torch.cat([g_exp, p_enc], dim=-1)
-        q_values = self.scorer(combined).squeeze(-1)  # (B, P)
-        
-        q_values = q_values.masked_fill(~parking_mask, float('-inf'))
-        return q_values
+        q = self.scorer(combined).squeeze(-1)                    # (B, P)
+        return q.masked_fill(~parking_mask, float("-inf"))
 
 
-class MultiHeadQNetwork(nn.Module):
+# ================================================================
+# Complete Q-Network
+# ================================================================
+
+class FactoredCNNQNetwork(nn.Module):
+    """Factored-CNN Q-Network for container terminal operations.
+
+    Pipeline:
+      State (C, R, S, T)
+        → FactoredCNNBackbone  → feat_map (F, R, S_down, T)
+        → OccupiedPooling      → global_feat (G)
+        → Decision heads       → Q-values per action stage
+
+    Container embedding = feat_map[:, r, s_down, t] at the selected
+    position — the CNN features already encode all per-container info
+    (type, urgency, blocking, demand) plus spatial context (neighbours,
+    vehicle proximity, congestion).
     """
-    Complete Multi-Head Q-Network.
-    
-    Decision flow:
-    1. ActionTypeHead: MOVE_CONTAINER or SLOT_PARKING
-    2. If MOVE: ContainerSelectionHead -> DestTypeHead
-    3. If YARD dest: SpatialPlacementHead
-    4. If TRAIN/TRUCK dest: VehicleSelectionHead
-    5. If PARKING: ParkingHead
-    """
-    
-    def __init__(
-        self,
-        yard: YardDims,
-        backbone_cfg: BackboneConfig,
-        head_cfg: HeadConfig
-    ):
+
+    def __init__(self, yard: YardDims, cnn_cfg: CNNConfig, head_cfg: HeadConfig):
         super().__init__()
         self.yard = yard
-        
-        # Backbone
-        self.backbone = CNNBackbone(backbone_cfg)
-        feat_dim = self.backbone.out_channels
-        global_dim = head_cfg.global_hidden
-        
-        # Global projection
-        self.global_fc = nn.Linear(feat_dim, global_dim)
-        
+        self.cnn_cfg = cnn_cfg
+
+        Fc = cnn_cfg.feat_channels
+        G = cnn_cfg.global_dim
+
+        # Backbone + pooling
+        self.backbone = FactoredCNNBackbone(cnn_cfg)
+        self.pool = OccupiedPooling(Fc, G)
+
         # Decision heads
-        self.action_type_head = ActionTypeHead(global_dim)
-        self.container_head = ContainerSelectionHead(feat_dim)
-        self.dest_type_head = DestTypeHead(global_dim, feat_dim)
-        self.spatial_head = SpatialPlacementHead(feat_dim, global_dim)
-        self.vehicle_head = VehicleSelectionHead(
-            global_dim, feat_dim, head_cfg.vehicle_feat_dim
+        self.action_type_head = ActionTypeHead(G, head_cfg.hidden, head_cfg.dueling)
+        self.container_head = ContainerSelectionHead(Fc)
+        self.dest_type_head = DestTypeHead(G, Fc, head_cfg.hidden, head_cfg.dueling)
+        self.placement_head = ProximityPlacementHead(
+            G + Fc, head_cfg.proximity_bays, yard.split_factor,
+            yard.n_rows, yard.n_tiers,
         )
-        self.parking_head = ParkingHead(global_dim, head_cfg.vehicle_feat_dim)
-    
-    def encode_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Encode state through backbone.
+        self.vehicle_head = VehicleSelectionHead(G, Fc, head_cfg.vehicle_feat_dim)
+        self.parking_head = ParkingHead(G, head_cfg.vehicle_feat_dim)
+
+    # ----------------------------------------------------------------
+    # Encoding
+    # ----------------------------------------------------------------
+
+    def _downsample_occ(self, state: torch.Tensor) -> torch.Tensor:
+        """Downsample occupancy channel to match feat_map resolution.
+
+        Uses max-pool so any occupied split in a stride-window → True.
+
         Args:
             state: (B, C, R, S, T)
         Returns:
-            feat_map: (B, F, R, S, T)
-            global_feat: (B, G)
+            (B, R, S_down, T) bool
         """
-        feat_map, global_raw = self.backbone(state)
-        global_feat = F.relu(self.global_fc(global_raw))
-        return feat_map, global_feat
-    
-    def extract_container_features(
-        self,
-        feat_map: torch.Tensor,
-        positions: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Extract features for selected container positions.
+        occ = state[:, _CH_OCCUPANCY: _CH_OCCUPANCY + 1]  # (B, 1, R, S, T)
+        stride = self.cnn_cfg.s_stride
+        occ_down = F.max_pool3d(occ, (1, stride, 1), stride=(1, stride, 1))
+        return occ_down.squeeze(1) > 0.5
+
+    def encode_state(self, state: torch.Tensor) -> EncodedState:
+        """Full state → CNN features + global embedding.
+
         Args:
-            feat_map: (B, F, R, S, T)
-            positions: (B, 3) - (row, split, tier) indices
+            state: (B, C, R, S, T)
         Returns:
-            features: (B, F)
+            EncodedState with feat_map and global_feat
         """
-        B, F, R, S, T = feat_map.shape
-        
-        # Gather features at specified positions
-        r_idx = positions[:, 0].long()
-        s_idx = positions[:, 1].long()
-        t_idx = positions[:, 2].long()
-        
-        # Index: feat_map[b, :, r, s, t]
-        features = feat_map[
-            torch.arange(B, device=feat_map.device),
-            :,
-            r_idx,
-            s_idx,
-            t_idx
-        ]  # (B, F)
-        
-        return features
-    
-    def q_action_type(self, global_feat: torch.Tensor) -> torch.Tensor:
-        """Q-values for MOVE_CONTAINER vs SLOT_PARKING."""
+        feat_map = self.backbone(state)
+        occ_down = self._downsample_occ(state)
+        global_feat = self.pool(feat_map, occ_down)
+        return EncodedState(global_feat=global_feat, feat_map=feat_map)
+
+    def extract_container_feat(self, feat_map: torch.Tensor,
+                               pos_down: torch.Tensor) -> torch.Tensor:
+        """Extract per-container feature from feat_map.
+
+        Differentiable indexing — gradients flow back through backbone.
+
+        Args:
+            feat_map: (B, C, R, S_down, T)
+            pos_down: (B, 3) long — (row, s_down, tier)
+        Returns:
+            (B, feat_channels)
+        """
+        B = feat_map.size(0)
+        idx = torch.arange(B, device=feat_map.device)
+        return feat_map[idx, :, pos_down[:, 0], pos_down[:, 1], pos_down[:, 2]]
+
+    # ----------------------------------------------------------------
+    # Q-value accessors (clean API for agent)
+    # ----------------------------------------------------------------
+
+    def q_action_type(self, global_feat):
         return self.action_type_head(global_feat)
-    
-    def q_container_selection(
-        self,
-        feat_map: torch.Tensor,
-        occupancy_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Q-values for container selection (flattened spatial)."""
-        return self.container_head(feat_map, occupancy_mask)
-    
-    def q_dest_type(
-        self,
-        global_feat: torch.Tensor,
-        container_feat: torch.Tensor
-    ) -> torch.Tensor:
-        """Q-values for destination type."""
+
+    def q_container_selection(self, feat_map, container_mask):
+        return self.container_head(feat_map, container_mask)
+
+    def q_dest_type(self, global_feat, container_feat):
         return self.dest_type_head(global_feat, container_feat)
-    
-    def q_placement(
-        self,
-        feat_map: torch.Tensor,
-        global_feat: torch.Tensor,
-        source_pos: torch.Tensor,
-        validity_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Q-values for yard placement (flattened spatial)."""
-        return self.spatial_head(feat_map, global_feat, source_pos, validity_mask)
-    
-    def q_vehicle(
-        self,
-        global_feat: torch.Tensor,
-        container_feat: torch.Tensor,
-        vehicle_feats: torch.Tensor,
-        vehicle_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Q-values for train/truck selection."""
+
+    def q_placement(self, global_feat, container_feat, validity_window):
+        return self.placement_head(global_feat, container_feat, validity_window)
+
+    def q_vehicle(self, global_feat, container_feat, vehicle_feats, vehicle_mask):
         return self.vehicle_head(global_feat, container_feat, vehicle_feats, vehicle_mask)
-    
-    def q_parking(
-        self,
-        global_feat: torch.Tensor,
-        parking_feats: torch.Tensor,
-        parking_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Q-values for parking action selection."""
+
+    def q_parking(self, global_feat, parking_feats, parking_mask):
         return self.parking_head(global_feat, parking_feats, parking_mask)

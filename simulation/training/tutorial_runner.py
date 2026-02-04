@@ -92,10 +92,7 @@ class TutorialRunner:
 
             for ex in info.get("executed", []):
                 move_log.append(ex)
-                if ex.get("auto_transfer"):
-                    auto_moves += 1
-                else:
-                    agent_moves += 1
+                agent_moves += 1
 
             # Store transitions for training
             for t in info.get("transitions", []):
@@ -204,12 +201,17 @@ class TutorialRunner:
             
             avg_rate = sum(rates.values()) / len(rates) if rates else 0
             mastered_count = sum(1 for r in rates.values() if r >= mastery_threshold)
-            print(f"    Average: {avg_rate:.1%} | Mastered: {mastered_count}/{len(ALL_SCENARIOS)}", flush=True)
+            eps_str = f"{self.agent._get_epsilon():.3f}" if hasattr(self.agent, '_get_epsilon') else "?"
+            print(f"    Average: {avg_rate:.1%} | Mastered: {mastered_count}/{len(ALL_SCENARIOS)} | ε={eps_str}", flush=True)
 
         mastered = False
         epoch = 0
         
         for epoch in range(epochs):
+            # Fast epsilon decay for tutorials (epoch-based, not step-based)
+            self.agent.set_tutorial_epsilon(epoch)
+            eps = self.agent._get_epsilon()
+
             steps_this_epoch = 0
             epoch_passed = 0
             epoch_reward = 0.0
@@ -225,9 +227,13 @@ class TutorialRunner:
                 epoch_reward += result.total_reward
                 steps_this_epoch += result.steps
 
-                # Periodic learning
+                # Periodic learning (every step for faster convergence)
                 if steps_this_epoch % learn_every == 0:
                     self.agent.optimize()
+
+            # Extra optimization at end of each epoch (replay buffer has fresh data)
+            for _ in range(min(10, steps_this_epoch // 4)):
+                self.agent.optimize()
 
             # Calculate current pass rates
             rates = get_pass_rates()
@@ -246,6 +252,9 @@ class TutorialRunner:
 
         # Final summary
         final_rates = get_pass_rates()
+        
+        # Clear tutorial epsilon — return to step-based for curriculum
+        self.agent.clear_epsilon_override()
         
         if self.verbose and not mastered:
             print(f"\n  Tutorial training ended after {epoch + 1} epochs", flush=True)

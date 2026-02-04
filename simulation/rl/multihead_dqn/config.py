@@ -1,7 +1,7 @@
 # multihead_dqn/config.py
-"""Configuration for Multi-Head DQN agent."""
+"""Configuration for Factored-CNN Multi-Head DQN agent."""
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Tuple
 from enum import IntEnum
 import torch
 
@@ -22,40 +22,68 @@ class DestinationType(IntEnum):
 
 @dataclass
 class YardDims:
-    """Yard dimensions at split resolution."""
+    """Yard dimensions."""
     n_rows: int
-    n_splits: int  # total_splits = n_bays * split_factor
+    n_splits: int
     n_tiers: int
     n_bays: int
-    split_factor: int
-    
+    split_factor: int  # splits per bay (typically 20)
+
     @property
     def spatial_shape(self) -> Tuple[int, int, int]:
-        """Returns (R, S, T) for tensor shapes."""
         return (self.n_rows, self.n_splits, self.n_tiers)
-    
+
     @property
     def total_positions(self) -> int:
         return self.n_rows * self.n_splits * self.n_tiers
 
 
 @dataclass
-class BackboneConfig:
-    """CNN backbone configuration."""
-    in_channels: int = 12  # 8 original + 4 demand/identity channels
-    hidden_channels: List[int] = field(default_factory=lambda: [32, 64, 64])
-    kernel_sizes: List[int] = field(default_factory=lambda: [3, 3, 3])
-    use_batchnorm: bool = True
-    dropout: float = 0.0
+class CNNConfig:
+    """Factored CNN backbone configuration.
+
+    Kernel design:
+      (1, container_kernel, 1) along S — matches container shape
+      (cross_kernel, 1, cross_kernel) across R×T — stacking context
+      (1, refine_kernel, 1) along S — neighborhood awareness
+
+    Total receptive field:
+      S ≈ 57 splits (~3 bays),  R = 3 rows,  T = 3 tiers
+    """
+    n_state_channels: int = 12
+    stage1_channels: int = 32        # first conv output channels
+    feat_channels: int = 64          # backbone output channels
+    global_dim: int = 128            # after occupied-only pooling
+    s_stride: int = 4                # downsample factor along splits
+    gn_groups: int = 8               # GroupNorm groups
+    # Factored kernel sizes
+    container_kernel: int = 21       # (1, k, 1) — 20ft container = 20 splits
+    cross_kernel: int = 3            # (r, 1, t) — stacking / cross-row
+    refine_kernel: int = 5           # (1, k, 1) — neighborhood
+
+    @property
+    def container_pad(self) -> int:
+        """Symmetric padding for container-axis kernels."""
+        return self.container_kernel // 2
+
+    @property
+    def cross_pad(self) -> int:
+        """Symmetric padding for cross-row/tier kernels."""
+        return self.cross_kernel // 2
+
+    @property
+    def refine_pad(self) -> int:
+        """Symmetric padding for refinement kernel."""
+        return self.refine_kernel // 2
 
 
 @dataclass
 class HeadConfig:
     """Configuration for decision heads."""
-    global_hidden: int = 128
-    spatial_features: int = 64  # feature dim before spatial head
-    vehicle_feat_dim: int = 8   # features per train/truck
-    max_vehicles: int = 20      # max trains + trucks to consider
+    hidden: int = 64                 # hidden size for MLP heads
+    vehicle_feat_dim: int = 8        # external vehicle feature dim
+    dueling: bool = True             # dueling V+A for fixed-size heads
+    proximity_bays: int = 3          # OperationsDefaults.PROXIMITY_SEARCH_BAYS
 
 
 @dataclass
@@ -64,19 +92,24 @@ class DQNConfig:
     gamma: float = 0.99
     lr: float = 3e-4
     batch_size: int = 32
-    replay_size: int = 100_000
+    replay_size: int = 5_000
     target_tau: float = 0.005
     grad_clip: float = 1.0
-    
-    # Epsilon schedule
+
+    # Epsilon (curriculum stages, step-based)
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 100_000
-    
-    # Multi-step returns (optional)
-    n_step: int = 1
-    
-    # Prioritized replay (optional)
+    epsilon_decay_steps: int = 50_000
+
+    # Tutorial epsilon (epoch-based, fast decay)
+    tutorial_epsilon_start: float = 0.9
+    tutorial_epsilon_end: float = 0.05
+    tutorial_epsilon_epochs: int = 80
+
+    double_dqn: bool = True
+    n_step: int = 3
+
+    # Prioritized replay
     use_per: bool = False
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
@@ -85,13 +118,23 @@ class DQNConfig:
 
 @dataclass
 class MultiHeadDQNConfig:
-    """Complete configuration."""
-    yard: YardDims = None  # Must be set
-    backbone: BackboneConfig = field(default_factory=BackboneConfig)
+    """Complete agent configuration."""
+    yard: YardDims = None
+    cnn: CNNConfig = field(default_factory=CNNConfig)
     heads: HeadConfig = field(default_factory=HeadConfig)
     training: DQNConfig = field(default_factory=DQNConfig)
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
-    
+
     def __post_init__(self):
         if self.yard is None:
             raise ValueError("YardDims must be provided")
+        if self.yard.n_splits % self.cnn.s_stride != 0:
+            raise ValueError(
+                f"n_splits ({self.yard.n_splits}) must be divisible by "
+                f"s_stride ({self.cnn.s_stride})"
+            )
+
+    @property
+    def s_down(self) -> int:
+        """Downsampled split count after CNN stride."""
+        return self.yard.n_splits // self.cnn.s_stride

@@ -22,7 +22,7 @@ from tqdm import tqdm
 import torch
 
 from simulation.rl.multihead_dqn.config import (
-    MultiHeadDQNConfig, YardDims, BackboneConfig, HeadConfig, DQNConfig,
+    MultiHeadDQNConfig, YardDims, CNNConfig, HeadConfig, DQNConfig,
 )
 from simulation.env.state_encoder import NUM_CHANNELS
 from simulation.rl.multihead_dqn.agent import MultiHeadDQNAgent
@@ -479,7 +479,7 @@ def build_agent_config(
     )
     return MultiHeadDQNConfig(
         yard=yard,
-        backbone=BackboneConfig(in_channels=NUM_CHANNELS),
+        cnn=CNNConfig(n_state_channels=NUM_CHANNELS),
         heads=HeadConfig(),
         training=DQNConfig(),
     )

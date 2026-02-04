@@ -7,8 +7,9 @@ Output shape: (C, R, S, T) where
   S = total_splits (n_bays * split_factor)
   T = n_tiers
 
-Channels 0-7:  original spatial/urgency features
-Channels 8-11: demand signals and container identity
+Key improvement: TRUCK_DEMAND and TRAIN_DEMAND encode the TARGET VEHICLE'S
+bay position (normalized) instead of binary 1.0. This creates a spatial
+gradient linking containers to their destination vehicle.
 """
 import numpy as np
 from typing import Dict, List, Optional, Set, Tuple
@@ -22,10 +23,10 @@ from simulation.core.vehicles.truck import Truck
 
 
 # -- Channel specification ---------------------------------------------------
+
 @dataclass(frozen=True)
 class ChannelSpec:
     """Named channel indices for the state tensor."""
-    # Original channels
     OCCUPANCY: int = 0
     CONTAINER_START: int = 1
     CONTAINER_TYPE: int = 2
@@ -33,10 +34,10 @@ class ChannelSpec:
     DEPARTURE_URGENCY: int = 4
     BLOCKS_URGENT: int = 5
     TRAIN_HEAT: int = 6
-    TRUCK_HEAT: int = 7     # Now: actual truck PARKING location heat
-    # New channels
-    TRUCK_DEMAND: int = 8   # 1.0 if a parked truck wants this container
-    TRAIN_DEMAND: int = 9   # 1.0 if a train wants this container
+    TRUCK_HEAT: int = 7
+    # Demand channels — encode TARGET BAY POSITION (not binary)
+    TRUCK_DEMAND: int = 8   # truck_bay / n_bays if a truck wants this container
+    TRAIN_DEMAND: int = 9   # train_anchor / n_bays if a train wants this container
     DIRECTION: int = 10     # 0.0 = import, 1.0 = export
     CONTAINER_HASH: int = 11  # Unique per-container fingerprint [0, 1]
 
@@ -59,10 +60,10 @@ MAX_DEPARTURE_DAYS: float = 30.0
 SECONDS_PER_DAY: float = 86_400.0
 TRAIN_HEAT_SIGMA_BAYS: float = 3.0
 TRUCK_HEAT_SIGMA_BAYS: float = 2.0
-DEFAULT_URGENCY: float = 1.0  # far away = not urgent
+DEFAULT_URGENCY: float = 1.0
 
 # -- Hash constants -----------------------------------------------------------
-_HASH_PRIME: int = 2654435761  # Knuth multiplicative hash constant
+_HASH_PRIME: int = 2654435761
 _HASH_MOD: int = 2**32
 
 
@@ -89,12 +90,13 @@ class SplitLevelStateEncoder:
         R = self.yard.n_rows
         S = self.yard.total_splits
         T = self.yard.n_tiers
+        n_bays = self.yard.n_bays
 
         tensor = np.zeros((NUM_CHANNELS, R, S, T), dtype=np.float32)
 
-        # -- Collect demand sets ONCE before container loop -----------------
-        truck_wanted_ids = _collect_truck_demand(trucks)
-        train_wanted_ids = _collect_train_demand(trains)
+        # Collect demand maps ONCE: container_id -> normalised target bay
+        truck_demand = _collect_truck_demand_spatial(trucks, n_bays)
+        train_demand = _collect_train_demand_spatial(trains, self.rail, n_bays)
 
         # -- Ch 0  OCCUPANCY ------------------------------------------------
         tensor[CH.OCCUPANCY] = self.yard.occupancy_mask.transpose(1, 2, 0).astype(
@@ -127,24 +129,24 @@ class SplitLevelStateEncoder:
             tensor[CH.DEPARTURE_URGENCY, r, s0:s1, t] = urg
             urgency_grid[r, s0, t] = urg
 
-            # Ch 8  TRUCK_DEMAND - "a parked truck wants this container"
-            if cid in truck_wanted_ids:
-                tensor[CH.TRUCK_DEMAND, r, s0:s1, t] = 1.0
+            # Ch 8  TRUCK_DEMAND — normalised truck bay position
+            if cid in truck_demand:
+                tensor[CH.TRUCK_DEMAND, r, s0:s1, t] = truck_demand[cid]
 
-            # Ch 9  TRAIN_DEMAND - "a train wants this container"
-            if cid in train_wanted_ids:
-                tensor[CH.TRAIN_DEMAND, r, s0:s1, t] = 1.0
+            # Ch 9  TRAIN_DEMAND — normalised train anchor position
+            if cid in train_demand:
+                tensor[CH.TRAIN_DEMAND, r, s0:s1, t] = train_demand[cid]
 
-            # Ch 10 DIRECTION - import vs export
+            # Ch 10 DIRECTION
             tensor[CH.DIRECTION, r, s0:s1, t] = _direction_value(c)
 
-            # Ch 11 CONTAINER_HASH - unique fingerprint for differentiation
+            # Ch 11 CONTAINER_HASH
             tensor[CH.CONTAINER_HASH, r, s0:s1, t] = _container_hash(cid)
 
-        # -- Ch 5  BLOCKS_URGENT  (vectorised over tiers) -------------------
+        # -- Ch 5  BLOCKS_URGENT -------------------------------------------
         _fill_blocking(tensor, urgency_grid, R, S, T)
 
-        # -- Ch 6  TRAIN_HEAT (from rail anchor positions) ------------------
+        # -- Ch 6  TRAIN_HEAT (from rail anchor positions) -----------------
         train_anchors = self._collect_train_anchors(trains)
         if train_anchors:
             heat = _gaussian_heat(
@@ -153,7 +155,7 @@ class SplitLevelStateEncoder:
             )
             tensor[CH.TRAIN_HEAT, :, :, :] = heat[np.newaxis, :, np.newaxis]
 
-        # -- Ch 7  TRUCK_HEAT (from actual PARKING positions) ---------------
+        # -- Ch 7  TRUCK_HEAT (from actual PARKING positions) --------------
         truck_parking_bays = self._collect_truck_parking_bays(trucks)
         if truck_parking_bays:
             heat = _gaussian_heat(
@@ -167,7 +169,6 @@ class SplitLevelStateEncoder:
     # -- Mask helpers ---------------------------------------------------------
 
     def get_occupancy_mask(self) -> np.ndarray:
-        """Occupancy as (R, S, T) bool for container selection masking."""
         return self.yard.occupancy_mask.transpose(1, 2, 0)
 
     def get_validity_mask(
@@ -175,11 +176,10 @@ class SplitLevelStateEncoder:
         n_splits_needed: int,
         goods_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Valid placement positions as (R, S, T) bool."""
         R = self.yard.n_rows
         S = self.yard.total_splits
         T = self.yard.n_tiers
-        occ = self.yard.occupancy_mask  # (T, R, S) bool
+        occ = self.yard.occupancy_mask
 
         valid = np.zeros((R, S, T), dtype=bool)
 
@@ -210,13 +210,11 @@ class SplitLevelStateEncoder:
 
         if goods_mask is not None:
             valid &= goods_mask
-
         return valid
 
     # -- Internal helpers -----------------------------------------------------
 
     def _collect_train_anchors(self, trains: Dict[str, Train]) -> List[int]:
-        """Gather anchor bays for all active trains."""
         anchors: List[int] = []
         for tid in trains:
             bay = self.rail.get_anchor_bay(tid)
@@ -225,11 +223,6 @@ class SplitLevelStateEncoder:
         return anchors
 
     def _collect_truck_parking_bays(self, trucks: Dict[str, Truck]) -> List[int]:
-        """Gather ACTUAL parking spot bays for parked trucks.
-
-        Previously used container locations (circular/useless).
-        Now uses the truck's real parking position.
-        """
         bays: List[int] = []
         for tk in trucks.values():
             spot = getattr(tk, "parking_spot", None)
@@ -240,34 +233,49 @@ class SplitLevelStateEncoder:
         return bays
 
 
-# -- Demand collection -------------------------------------------------------
+# -- Spatial demand collection -----------------------------------------------
 
+def _collect_truck_demand_spatial(
+    trucks: Dict[str, Truck], n_bays: int,
+) -> Dict[str, float]:
+    """Map container_id -> normalised truck parking bay.
 
-def _collect_truck_demand(trucks: Dict[str, Truck]) -> Set[str]:
-    """Collect all container IDs wanted by PARKED trucks."""
-    wanted: Set[str] = set()
+    Instead of binary 1.0, encodes WHERE the truck is parked so the
+    CNN sees a spatial pointer from container to target vehicle.
+    Minimum value clamped to 0.1 so demand is never confused with 0.0 (no demand).
+    """
+    demand: Dict[str, float] = {}
     for tk in trucks.values():
-        if not getattr(tk, "parking_spot", None):
-            continue  # Only parked trucks create actionable demand
+        spot = getattr(tk, "parking_spot", None)
+        if spot is None:
+            continue
+        bay = getattr(spot, "bay", 0)
+        val = max(0.1, bay / max(n_bays - 1, 1))
         pickup_ids = getattr(tk, "pickup_container_ids", None)
         if pickup_ids:
-            wanted.update(pickup_ids)
-    return wanted
+            for cid in pickup_ids:
+                demand[cid] = val
+    return demand
 
 
-def _collect_train_demand(trains: Dict[str, Train]) -> Set[str]:
-    """Collect all container IDs wanted by active trains."""
-    wanted: Set[str] = set()
-    for train in trains.values():
-        wanted.update(train.get_all_pickup_container_ids())
-    return wanted
+def _collect_train_demand_spatial(
+    trains: Dict[str, Train], rail, n_bays: int,
+) -> Dict[str, float]:
+    """Map container_id -> normalised train anchor bay."""
+    demand: Dict[str, float] = {}
+    for tid, train in trains.items():
+        anchor = rail.get_anchor_bay(tid)
+        if anchor is None:
+            continue
+        val = max(0.1, anchor / max(n_bays - 1, 1))
+        for cid in train.get_all_pickup_container_ids():
+            demand[cid] = val
+    return demand
 
 
 # -- Module-level helpers (pure functions) ------------------------------------
 
-
 def _container_type_value(c) -> float:
-    """Categorical scalar for container type."""
     if getattr(c, "is_swap_body", False) or getattr(c, "is_trailer", False):
         return TYPE_SWAP
     gt = getattr(c, "goods_type", "Regular")
@@ -279,10 +287,9 @@ def _container_type_value(c) -> float:
 
 
 def _direction_value(c) -> float:
-    """Encode container direction: 0.0 = import, 1.0 = export."""
     direction = getattr(c, "direction", None)
     if direction is None:
-        return 0.5  # Unknown
+        return 0.5
     d_str = direction.value if hasattr(direction, "value") else str(direction)
     if d_str == "Export":
         return 1.0
@@ -292,18 +299,16 @@ def _direction_value(c) -> float:
 
 
 def _container_hash(container_id: str) -> float:
-    """Deterministic hash normalised to [0, 1].
+    """Deterministic hash normalised to [0.1, 1.0].
 
-    Gives each container a unique 'color' so the CNN can
-    distinguish adjacent containers of same type/urgency.
+    Clamped above 0.1 so non-zero always means 'container present'.
     """
     h = hash(container_id) & 0xFFFFFFFF
     h = (h * _HASH_PRIME) % _HASH_MOD
-    return h / _HASH_MOD
+    return 0.1 + 0.9 * (h / _HASH_MOD)
 
 
 def _compute_urgency(c, now: datetime) -> float:
-    """Normalised departure urgency: 0.0 = imminent, 1.0 = far away."""
     dep = getattr(c, "departure_date", None)
     if dep is None:
         return DEFAULT_URGENCY
@@ -311,19 +316,10 @@ def _compute_urgency(c, now: datetime) -> float:
     return min(1.0, days / MAX_DEPARTURE_DAYS)
 
 
-def _fill_blocking(
-    tensor: np.ndarray,
-    urgency_grid: np.ndarray,
-    R: int,
-    S: int,
-    T: int,
-) -> None:
-    """Compute BLOCKS_URGENT channel from urgency grid."""
+def _fill_blocking(tensor, urgency_grid, R, S, T):
     if T < 2:
         return
-
     occ = tensor[CH.OCCUPANCY]
-
     for t in range(1, T):
         both = (occ[:, :, t] > 0.5) & (occ[:, :, t - 1] > 0.5)
         above_urg = urgency_grid[:, :, t]
@@ -333,24 +329,15 @@ def _fill_blocking(
         tensor[CH.BLOCKS_URGENT, :, :, t] = severity
 
 
-def _gaussian_heat(
-    anchor_bays: List[int],
-    splits_f: np.ndarray,
-    split_factor: int,
-    sigma_bays: float,
-    total_splits: int,
-) -> np.ndarray:
-    """Vectorised Gaussian heat over splits from a list of anchor bays."""
+def _gaussian_heat(anchor_bays, splits_f, split_factor, sigma_bays, total_splits):
     heat = np.zeros(total_splits, dtype=np.float32)
     sigma_splits = sigma_bays * split_factor
     half_center = split_factor / 2.0
-
     for bay in anchor_bays:
         center = bay * split_factor + half_center
         center = min(max(0.0, center), total_splits - 1.0)
         dist = np.abs(splits_f - center)
         heat += np.exp(-0.5 * (dist / sigma_splits) ** 2)
-
     mx = heat.max()
     if mx > 0:
         heat /= mx
