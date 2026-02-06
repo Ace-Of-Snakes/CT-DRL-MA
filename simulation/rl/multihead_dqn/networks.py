@@ -2,25 +2,25 @@
 """Factored-CNN Multi-Head Q-Network.
 
 Architecture rationale:
-  Containers are 1D objects (1 row × 20-53 splits × 1 tier) embedded in
-  a 3D grid (5 × 1160 × 5).  Standard (3,3,3) kernels waste parameters
+  Containers are 1D objects (1 row Ã— 20-53 splits Ã— 1 tier) embedded in
+  a 3D grid (5 Ã— 1160 Ã— 5).  Standard (3,3,3) kernels waste parameters
   mixing noise across rows/tiers and see only ~7 of a container's 20-40
   splits.  Instead we factorise the convolution:
 
-  Stage 1: (1, 21, 1) kernels along S axis — extract container profiles.
+  Stage 1: (1, 21, 1) kernels along S axis â€” extract container profiles.
            Two layers give RF = 41 splits (one 40ft container).
-           Second layer strides ×4 → (5, 290, 5) = 7 250 positions.
+           Second layer strides Ã—4 â†’ (5, 290, 5) = 7 250 positions.
 
-  Stage 2: (3, 1, 3) kernel across R×T — stacking & cross-row context.
+  Stage 2: (3, 1, 3) kernel across RÃ—T â€” stacking & cross-row context.
            Each (row, tier) can see its neighbours (blocking, support).
 
-  Stage 3: (1, 5, 1) kernel along S — neighbourhood refinement.
-           Total RF_S ≈ 57 splits (~3 bays).
+  Stage 3: (1, 5, 1) kernel along S â€” neighbourhood refinement.
+           Total RF_S â‰ˆ 57 splits (~3 bays).
 
   Global:  Occupied-only max+mean pooling (no spatial dilution).
-           At 0.5% occupancy, naive avg-pool dilutes 200×; ours doesn't.
+           At 0.5% occupancy, naive avg-pool dilutes 200Ã—; ours doesn't.
 
-  Container selection: 1×1 conv → per-position Q-values, masked by
+  Container selection: 1Ã—1 conv â†’ per-position Q-values, masked by
            CONTAINER_START at downsampled resolution.
 
   Per-container embedding: index feat_map at selected position.
@@ -58,10 +58,10 @@ class EncodedState:
 class FactoredCNNBackbone(nn.Module):
     """Factored 1D CNN for container terminal yard states.
 
-    Processes (B, C, R, S, T) → (B, feat_ch, R, S_down, T).
+    Processes (B, C, R, S, T) â†’ (B, feat_ch, R, S_down, T).
     Each dimension gets the kernel shape that matches its patterns:
       S (splits): long 1D kernels matching container lengths
-      R×T (row/tier): short 2D kernels for stacking context
+      RÃ—T (row/tier): short 2D kernels for stacking context
     """
 
     def __init__(self, cfg: CNNConfig):
@@ -77,11 +77,11 @@ class FactoredCNNBackbone(nn.Module):
         fp = cfg.refine_pad
         G = cfg.gn_groups
 
-        # Stage 1a: (1,21,1) no stride — RF_S = 21 (one 20ft container)
+        # Stage 1a: (1,21,1) no stride â€” RF_S = 21 (one 20ft container)
         self.conv1a = nn.Conv3d(C_in, C1, (1, k, 1), padding=(0, pk, 0))
         self.gn1a = nn.GroupNorm(G, C1)
 
-        # Stage 1b: (1,21,1) stride 4 — RF_S = 41 (one 40ft container)
+        # Stage 1b: (1,21,1) stride 4 â€” RF_S = 41 (one 40ft container)
         self.conv1b = nn.Conv3d(
             C1, C2, (1, k, 1),
             stride=(1, cfg.s_stride, 1),
@@ -89,16 +89,16 @@ class FactoredCNNBackbone(nn.Module):
         )
         self.gn1b = nn.GroupNorm(G, C2)
 
-        # Stage 2: (3,1,3) — cross-row/tier context (stacking, blocking)
+        # Stage 2: (3,1,3) â€” cross-row/tier context (stacking, blocking)
         self.conv2 = nn.Conv3d(C2, C2, (rk, 1, rk), padding=(rp, 0, rp))
         self.gn2 = nn.GroupNorm(G, C2)
 
-        # Stage 3: (1,5,1) — neighbourhood refinement, RF_S ≈ 57
+        # Stage 3: (1,5,1) â€” neighbourhood refinement, RF_S â‰ˆ 57
         self.conv3 = nn.Conv3d(C2, C2, (1, fk, 1), padding=(0, fp, 0))
         self.gn3 = nn.GroupNorm(G, C2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, C, R, S, T) → (B, feat_channels, R, S_down, T)."""
+        """(B, C, R, S, T) â†’ (B, feat_channels, R, S_down, T)."""
         x = F.relu(self.gn1a(self.conv1a(x)), inplace=True)
         x = F.relu(self.gn1b(self.conv1b(x)), inplace=True)
         x = F.relu(self.gn2(self.conv2(x)), inplace=True)
@@ -110,7 +110,7 @@ class OccupiedPooling(nn.Module):
     """Max + mean pooling over occupied positions only.
 
     At typical occupancy (0.5%), naive AdaptiveAvgPool dilutes
-    container features 200×. This module pools ONLY over positions
+    container features 200Ã—. This module pools ONLY over positions
     where containers exist, preserving signal strength.
     """
 
@@ -189,7 +189,7 @@ class ActionTypeHead(nn.Module):
 
 
 class ContainerSelectionHead(nn.Module):
-    """Per-position Q-values via 1×1 conv on the CNN feat_map.
+    """Per-position Q-values via 1Ã—1 conv on the CNN feat_map.
 
     Outputs one Q-value per (row, s_down, tier) position. Masked
     by CONTAINER_START so only actual containers are selectable.
@@ -210,7 +210,7 @@ class ContainerSelectionHead(nn.Module):
 
         Args:
             feat_map: (B, C, R, S_down, T)
-            container_mask: (B, R, S_down, T) bool — True at CONTAINER_START
+            container_mask: (B, R, S_down, T) bool â€” True at CONTAINER_START
         Returns:
             q_flat: (B, R*S_down*T) with -inf for non-container positions
         """
@@ -245,11 +245,11 @@ class ProximityPlacementHead(nn.Module):
     """Split-level placement within a proximity window.
 
     Instead of scoring all 29,000 positions or 1,450 bay-level positions,
-    scores only the ±proximity_bays window around a reference bay at full
+    scores only the Â±proximity_bays window around a reference bay at full
     split resolution.  Matches OperationsDefaults.PROXIMITY_SEARCH_BAYS.
 
     Factorised: Q(r, s, t) = Q_split(s) + Q_row_tier(r, t).
-    Output: R × window_splits × T positions.
+    Output: R Ã— window_splits Ã— T positions.
     """
 
     _HIDDEN_SPLIT: int = 128
@@ -358,12 +358,12 @@ class FactoredCNNQNetwork(nn.Module):
 
     Pipeline:
       State (C, R, S, T)
-        → FactoredCNNBackbone  → feat_map (F, R, S_down, T)
-        → OccupiedPooling      → global_feat (G)
-        → Decision heads       → Q-values per action stage
+        â†’ FactoredCNNBackbone  â†’ feat_map (F, R, S_down, T)
+        â†’ OccupiedPooling      â†’ global_feat (G)
+        â†’ Decision heads       â†’ Q-values per action stage
 
     Container embedding = feat_map[:, r, s_down, t] at the selected
-    position — the CNN features already encode all per-container info
+    position â€” the CNN features already encode all per-container info
     (type, urgency, blocking, demand) plus spatial context (neighbours,
     vehicle proximity, congestion).
     """
@@ -384,6 +384,7 @@ class FactoredCNNQNetwork(nn.Module):
         self.action_type_head = ActionTypeHead(G, head_cfg.hidden, head_cfg.dueling)
         self.container_head = ContainerSelectionHead(Fc)
         self.dest_type_head = DestTypeHead(G, Fc, head_cfg.hidden, head_cfg.dueling)
+        # Placement uses n_rows (yard only), NOT n_state_rows (yard + parking)
         self.placement_head = ProximityPlacementHead(
             G + Fc, head_cfg.proximity_bays, yard.split_factor,
             yard.n_rows, yard.n_tiers,
@@ -398,7 +399,7 @@ class FactoredCNNQNetwork(nn.Module):
     def _downsample_occ(self, state: torch.Tensor) -> torch.Tensor:
         """Downsample occupancy channel to match feat_map resolution.
 
-        Uses max-pool so any occupied split in a stride-window → True.
+        Uses max-pool so any occupied split in a stride-window â†’ True.
 
         Args:
             state: (B, C, R, S, T)
@@ -411,7 +412,7 @@ class FactoredCNNQNetwork(nn.Module):
         return occ_down.squeeze(1) > 0.5
 
     def encode_state(self, state: torch.Tensor) -> EncodedState:
-        """Full state → CNN features + global embedding.
+        """Full state â†’ CNN features + global embedding.
 
         Args:
             state: (B, C, R, S, T)
@@ -427,11 +428,11 @@ class FactoredCNNQNetwork(nn.Module):
                                pos_down: torch.Tensor) -> torch.Tensor:
         """Extract per-container feature from feat_map.
 
-        Differentiable indexing — gradients flow back through backbone.
+        Differentiable indexing â€” gradients flow back through backbone.
 
         Args:
             feat_map: (B, C, R, S_down, T)
-            pos_down: (B, 3) long — (row, s_down, tier)
+            pos_down: (B, 3) long â€” (row, s_down, tier)
         Returns:
             (B, feat_channels)
         """

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Union
 from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig
 from simulation.rl.multihead_dqn.agent import MultiHeadDQNAgent
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.training.tutorial_scenarios import (
     ALL_SCENARIOS,
     TUTORIAL_TIME,
@@ -30,6 +31,9 @@ TUTORIAL_END_HOUR = 23
 TUTORIAL_END_MINUTE = 59
 TUTORIAL_REWARD_TIMEOUT = -5.0   # penalty if max_steps exhausted
 TUTORIAL_REWARD_SUCCESS = 5.0    # bonus on pass
+
+# Debug: scenario IDs to trace dest_type choices (empty = no tracing)
+_TRACE_SCENARIO_IDS = {3}
 
 
 # ================================================================
@@ -83,8 +87,9 @@ class TutorialRunner:
 
         total_reward = 0.0
         agent_moves = 0
-        auto_moves = 0
         move_log: List[Dict] = []
+        last_transition: Optional[Transition] = None
+        trace = self.verbose and scenario.id in _TRACE_SCENARIO_IDS
 
         for step in range(scenario.max_steps):
             state, reward, done, info = env.step_all_cranes(self.agent)
@@ -94,21 +99,30 @@ class TutorialRunner:
                 move_log.append(ex)
                 agent_moves += 1
 
-            # Store transitions for training
+            # Store transitions for training, keep reference to last one
             for t in info.get("transitions", []):
                 self.agent.remember(t)
+                last_transition = t
+
+            # --- S3 trace: dest_type choice + reward per step ---
+            if trace:
+                _log_step_trace(scenario, step, info)
 
             # Check scenario success
             if scenario.check_success(env):
                 total_reward += TUTORIAL_REWARD_SUCCESS
-                passed = scenario.check_pass(env, agent_moves, auto_moves)
+                # Patch terminal transition so Q-learning doesn't bootstrap
+                # from the post-success state (which may be empty/unusual).
+                if last_transition is not None:
+                    last_transition.done = True
+                    last_transition.reward += TUTORIAL_REWARD_SUCCESS
+                passed = scenario.check_pass(env, agent_moves)
                 return TutorialResult(
                     scenario_id=scenario.id,
                     name=scenario.name,
                     passed=passed,
                     steps=step + 1,
                     agent_moves=agent_moves,
-                    auto_moves=auto_moves,
                     total_reward=total_reward,
                     move_log=move_log,
                 )
@@ -118,13 +132,15 @@ class TutorialRunner:
 
         # Max steps exhausted -> fail
         total_reward += TUTORIAL_REWARD_TIMEOUT
+        if last_transition is not None:
+            last_transition.done = True
+            last_transition.reward += TUTORIAL_REWARD_TIMEOUT
         return TutorialResult(
             scenario_id=scenario.id,
             name=scenario.name,
             passed=False,
             steps=scenario.max_steps,
             agent_moves=agent_moves,
-            auto_moves=auto_moves,
             total_reward=total_reward,
             move_log=move_log,
         )
@@ -202,7 +218,7 @@ class TutorialRunner:
             avg_rate = sum(rates.values()) / len(rates) if rates else 0
             mastered_count = sum(1 for r in rates.values() if r >= mastery_threshold)
             eps_str = f"{self.agent._get_epsilon():.3f}" if hasattr(self.agent, '_get_epsilon') else "?"
-            print(f"    Average: {avg_rate:.1%} | Mastered: {mastered_count}/{len(ALL_SCENARIOS)} | ε={eps_str}", flush=True)
+            print(f"    Average: {avg_rate:.1%} | Mastered: {mastered_count}/{len(ALL_SCENARIOS)} | ÃŽÂµ={eps_str}", flush=True)
 
         mastered = False
         epoch = 0
@@ -253,7 +269,7 @@ class TutorialRunner:
         # Final summary
         final_rates = get_pass_rates()
         
-        # Clear tutorial epsilon — return to step-based for curriculum
+        # Clear tutorial epsilon Ã¢â‚¬â€ return to step-based for curriculum
         self.agent.clear_epsilon_override()
         
         if self.verbose and not mastered:
@@ -316,6 +332,43 @@ class TutorialRunner:
         # Sync RMGC
         env.rmgc.set_layout(yard=env.yard, rail=env.rail, num_tracks=env.num_tracks)
         env._train_heat_bays = set()
+
+
+# ================================================================
+# Step tracing (debug)
+# ================================================================
+
+# Readable dest_type labels
+_DEST_LABELS = {0: "YARD", 1: "TRAIN", 2: "TRUCK", -1: "n/a"}
+
+
+def _log_step_trace(scenario: "TutorialScenario", step: int, info: Dict) -> None:
+    """Print compact per-step trace for debugging dest_type drift."""
+    executed = info.get("executed", [])
+    crane_results = info.get("crane_results", [])
+    transitions = info.get("transitions", [])
+
+    if not executed and not crane_results:
+        return  # idle step, skip noise
+
+    parts = [f"    S{scenario.id} t={step:2d}"]
+
+    # Move types + rewards from crane results
+    for cr in crane_results:
+        r = cr.get("reward", 0.0)
+        valid = cr.get("was_valid", False)
+        parts.append(f"r={r:+.2f}{'✓' if valid else '✗'}")
+
+    # Executed move types
+    for ex in executed:
+        parts.append(ex.get("move_type", "?"))
+
+    # Dest types from transitions
+    for t in transitions:
+        dt = getattr(t, "dest_type", -1)
+        parts.append(f"dest={_DEST_LABELS.get(dt, dt)}")
+
+    print(" | ".join(parts), flush=True)
 
 
 # ================================================================

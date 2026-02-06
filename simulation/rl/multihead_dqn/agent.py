@@ -19,6 +19,13 @@ from simulation.rl.multihead_dqn.replay_buffer import (
 
 # State tensor channel indices (must match state_encoder.ChannelSpec)
 _CH_CONTAINER_START = 1
+_CH_DIRECTION = 10             # 0.0 = Import, 1.0 = Export
+
+# Direction-based destination masking threshold
+_DIRECTION_EXPORT_THRESHOLD = 0.5
+
+# Vehicle feature indices (must match env._build_vehicle_features)
+_VEH_FEAT_IS_TRAIN = 0        # 1.0 = train, 0.0 = truck
 
 
 @dataclass
@@ -38,10 +45,10 @@ class MultiHeadDQNAgent:
 
     Architecture:
       (1,21,1) + (3,1,3) + (1,5,1) factored CNN backbone
-      → occupied-only pooling → global_feat
-      → spatial container selection via 1×1 conv on feat_map
-      → per-container embedding via feat_map indexing
-      → factorized placement at bay resolution
+      -> occupied-only pooling -> global_feat
+      -> spatial container selection via 1x1 conv on feat_map
+      -> per-container embedding via feat_map indexing
+      -> factorized placement at bay resolution
     """
 
     def __init__(self, cfg: MultiHeadDQNConfig):
@@ -50,6 +57,8 @@ class MultiHeadDQNAgent:
         self.yard = cfg.yard
         self._s_stride = cfg.cnn.s_stride
         self._s_down = cfg.s_down
+        self._n_rows = cfg.yard.n_rows            # yard-only rows (5)
+        self._n_state_rows = cfg.yard.n_state_rows  # yard + parking (6)
 
         # Networks
         self.q_net = FactoredCNNQNetwork(cfg.yard, cfg.cnn, cfg.heads).to(self.device)
@@ -135,7 +144,7 @@ class MultiHeadDQNAgent:
 
     def _find_container_start(self, r: int, s_down: int, t: int,
                               state: np.ndarray) -> int:
-        """Map downsampled position → original CONTAINER_START split.
+        """Map downsampled position -> original CONTAINER_START split.
 
         Searches the stride-window [s_down*stride, (s_down+1)*stride)
         for the actual container start marker.
@@ -148,7 +157,7 @@ class MultiHeadDQNAgent:
         return s_start  # fallback
 
     def _unflatten_down(self, flat_idx: int) -> Tuple[int, int, int]:
-        """Unflatten index from (R, S_down, T) layout → (row, s_down, tier)."""
+        """Unflatten index from (R_state, S_down, T) layout -> (row, s_down, tier)."""
         T = self.yard.n_tiers
         S_d = self._s_down
         tier = flat_idx % T
@@ -173,7 +182,7 @@ class MultiHeadDQNAgent:
         parking_mask: Optional[np.ndarray] = None,
         epsilon: Optional[float] = None,
     ) -> ActionResult:
-        """Hierarchical action selection with ε-greedy exploration."""
+        """Hierarchical action selection with ÃƒÅ½Ã‚Âµ-greedy exploration."""
         self.step_count += 1
         eps = epsilon if epsilon is not None else self._get_epsilon()
 
@@ -248,7 +257,7 @@ class MultiHeadDQNAgent:
 
     def _select_container_move(self, encoded, state, validity_mask,
                                vehicle_feats, vehicle_mask, eps):
-        """Select container → destination → placement/vehicle."""
+        """Select container -> destination -> placement/vehicle."""
         # Build downsampled container-start mask
         cstart_down = self._downsample_container_mask(state)  # (R, S_down, T)
         cstart_t = self._to_bool_tensor(cstart_down).unsqueeze(0)  # (1, R, S_down, T)
@@ -272,17 +281,28 @@ class MultiHeadDQNAgent:
         pos_t = torch.tensor([[row, s_down, tier]], dtype=torch.long, device=self.device)
         container_feat = self.q_net.extract_container_feat(encoded.feat_map, pos_t)
 
-        # Stage 3: Destination type
+        # Stage 3: Destination type with direction masking
+        # Import (ch10 Ã¢â€°Ë† 0) Ã¢â€ â€™ leaves on TRUCK; Export (ch10 Ã¢â€°Ë† 1) Ã¢â€ â€™ leaves on TRAIN
         has_vehicles = vehicle_mask is not None and len(vehicle_mask) > 0 and vehicle_mask.any()
-        if random.random() < eps:
+        is_import = state[_CH_DIRECTION, row, s_orig, tier] < _DIRECTION_EXPORT_THRESHOLD
+        can_train = has_vehicles and not is_import
+        can_truck = has_vehicles and is_import
+
+        # Separate higher epsilon floor for dest_type prevents catastrophic
+        # forgetting of rare vehicle destinations in the aux-trained head.
+        dest_eps = max(eps, self.cfg.training.dest_epsilon_floor)
+        if random.random() < dest_eps:
             choices = [DestinationType.YARD]
-            if has_vehicles:
-                choices.extend([DestinationType.TRAIN, DestinationType.TRUCK])
+            if can_train:
+                choices.append(DestinationType.TRAIN)
+            if can_truck:
+                choices.append(DestinationType.TRUCK)
             dest_type = random.choice(choices)
         else:
             q = self.q_net.q_dest_type(encoded.global_feat, container_feat)[0]
-            if not has_vehicles:
+            if not can_train:
                 q[DestinationType.TRAIN] = float("-inf")
+            if not can_truck:
                 q[DestinationType.TRUCK] = float("-inf")
             dest_type = DestinationType(q.argmax().item())
 
@@ -301,11 +321,9 @@ class MultiHeadDQNAgent:
                                validity_mask, eps):
         """Select placement at split resolution within proximity window.
 
-        Window = ±proximity_bays around the container's current bay,
-        matching the terminal's PROXIMITY_SEARCH_BAYS constraint.
-        Output is full split-level precision within the window.
+        Validity mask has R_state rows but placement head uses n_rows (yard only).
         """
-        R = self.yard.n_rows
+        R = self._n_rows  # yard-only rows (5)
         T = self.yard.n_tiers
         W = self._window_splits
 
@@ -313,8 +331,9 @@ class MultiHeadDQNAgent:
         ref_bay = container_pos[1] // self.yard.split_factor
         start_split = self._window_start_split(ref_bay)
 
-        # Extract validity window at split resolution: (R, W, T)
-        window_mask = validity_mask[:, start_split:start_split + W, :]
+        # Slice to yard rows, then extract proximity window: (R, W, T)
+        yard_validity = validity_mask[:R]
+        window_mask = yard_validity[:, start_split:start_split + W, :]
         window_t = self._to_bool_tensor(window_mask).unsqueeze(0)  # (1, R, W, T)
 
         if random.random() < eps:
@@ -332,7 +351,7 @@ class MultiHeadDQNAgent:
             )[0]
             flat_idx = q.argmax().item()
 
-        # Unflatten (R, W, T) → (row, window_split, tier)
+        # Unflatten (R, W, T) -> (row, window_split, tier)
         tier = flat_idx % T
         ws = (flat_idx // T) % W
         row = flat_idx // (W * T)
@@ -355,16 +374,34 @@ class MultiHeadDQNAgent:
 
     def _select_vehicle(self, encoded, container_feat, container_pos,
                         dest_type, vehicle_feats, vehicle_mask, eps):
+        """Select target vehicle, filtered by type matching dest_type."""
         if vehicle_feats.shape[0] == 0:
             return ActionResult(
                 action_type=ActionType.MOVE_CONTAINER,
                 container_pos=container_pos,
                 dest_type=DestinationType.YARD,
             )
+
+        # Filter mask by vehicle type: feat[0] = is_train (1.0=train, 0.0=truck)
+        is_train = vehicle_feats[:, _VEH_FEAT_IS_TRAIN] > 0.5
+        if dest_type == DestinationType.TRAIN:
+            type_mask = vehicle_mask & is_train
+        elif dest_type == DestinationType.TRUCK:
+            type_mask = vehicle_mask & ~is_train
+        else:
+            type_mask = vehicle_mask
+
+        if not type_mask.any():
+            return ActionResult(
+                action_type=ActionType.MOVE_CONTAINER,
+                container_pos=container_pos,
+                dest_type=DestinationType.YARD,
+            )
+
         veh_t = self._to_tensor(vehicle_feats).unsqueeze(0)
-        mask_t = self._to_bool_tensor(vehicle_mask).unsqueeze(0)
+        mask_t = self._to_bool_tensor(type_mask).unsqueeze(0)
         if random.random() < eps:
-            valid = np.where(vehicle_mask)[0]
+            valid = np.where(type_mask)[0]
             idx = random.choice(valid) if len(valid) > 0 else -1
         else:
             q = self.q_net.q_vehicle(encoded.global_feat, container_feat, veh_t, mask_t)[0]
@@ -420,8 +457,15 @@ class MultiHeadDQNAgent:
 
     def _compute_loss(self, transitions: List[Transition],
                       weights: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """TD loss with Double DQN across action_type and dest_type stages."""
+        """TD loss on action_type + auxiliary reward-prediction for dest_type.
+
+        The main TD target bootstraps only from action_type Q-values,
+        ensuring consistency (target and current use the same heads).
+        The dest_type head is trained separately as a reward predictor
+        so it learns to discriminate TRUCK vs YARD from immediate rewards.
+        """
         gamma = self.cfg.training.gamma
+        dest_aux_weight = self.cfg.training.dest_aux_weight
 
         states = np.stack([t.state for t in transitions])
         next_states = np.stack([t.next_state for t in transitions])
@@ -436,40 +480,39 @@ class MultiHeadDQNAgent:
         # Encode full batch through backbone (single forward pass)
         encoded = self.q_net.encode_state(states_t)
 
-        # -- Q for taken actions (all stages) --
+        # -- Main Q: action_type only (consistent with target) --
         q_values = []
+        # -- Auxiliary: collect dest_type predictions + rewards --
+        aux_preds = []
+        aux_targets = []
+
         for i, t in enumerate(transitions):
-            q_total = torch.tensor(0.0, device=self.device)
-
-            # Stage 1: action type
+            # Stage 1: action type Q-value (this is the TD-trained head)
             q_type = self.q_net.q_action_type(encoded.global_feat[i:i + 1])[0]
-            q_total = q_total + q_type[t.action_type]
+            q_values.append(q_type[t.action_type])
 
-            # Stage 3: dest type (for MOVE_CONTAINER with valid container)
+            # Auxiliary dest_type: train as reward predictor for MOVE transitions
             if (t.action_type == ActionType.MOVE_CONTAINER
                     and t.container_pos is not None
                     and t.dest_type is not None
                     and t.dest_type >= 0):
-                # Convert original split → downsampled position
                 r, s_orig, tier = t.container_pos
                 s_down = s_orig // self._s_stride
                 pos_down = torch.tensor(
                     [[r, s_down, tier]], dtype=torch.long, device=self.device,
                 )
-                # Index feat_map (differentiable — gradients flow to backbone)
                 cont_feat = self.q_net.extract_container_feat(
                     encoded.feat_map[i:i + 1], pos_down,
                 )
                 q_dest = self.q_net.q_dest_type(
                     encoded.global_feat[i:i + 1], cont_feat,
                 )[0]
-                q_total = q_total + q_dest[t.dest_type]
-
-            q_values.append(q_total)
+                aux_preds.append(q_dest[t.dest_type])
+                aux_targets.append(t.reward)
 
         q_values_t = torch.stack(q_values)
 
-        # -- Target Q (Double DQN) --
+        # -- Target Q (Double DQN, action_type only) --
         with torch.no_grad():
             if self.cfg.training.double_dqn:
                 online_enc = self.q_net.encode_state(next_states_t)
@@ -489,11 +532,19 @@ class MultiHeadDQNAgent:
         td_errors = targets - q_values_t
 
         if weights is not None:
-            loss = (weights * F.smooth_l1_loss(q_values_t, targets, reduction="none")).mean()
+            td_loss = (weights * F.smooth_l1_loss(q_values_t, targets, reduction="none")).mean()
         else:
-            loss = F.smooth_l1_loss(q_values_t, targets)
+            td_loss = F.smooth_l1_loss(q_values_t, targets)
 
-        return loss, td_errors.detach()
+        # -- Auxiliary dest_type loss: reward prediction --
+        total_loss = td_loss
+        if aux_preds:
+            aux_preds_t = torch.stack(aux_preds)
+            aux_targets_t = torch.tensor(aux_targets, dtype=torch.float32, device=self.device)
+            aux_loss = F.smooth_l1_loss(aux_preds_t, aux_targets_t)
+            total_loss = td_loss + dest_aux_weight * aux_loss
+
+        return total_loss, td_errors.detach()
 
     # ----------------------------------------------------------------
     # Utilities

@@ -3,7 +3,7 @@
 Unified container terminal environment for hierarchical DQN training.
 
 Merges base simulation infrastructure (arrivals, departures, cranes, RMGC)
-with hierarchical stepping (action pool Ã¢â€ â€™ stage1/stage2 Ã¢â€ â€™ execute).
+with hierarchical stepping (action pool -> stage1/stage2 -> execute).
 
 Optimised for training throughput:
 - State encoded once per step_all_cranes, passed between crane steps
@@ -19,30 +19,30 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 import numpy as np
 from numpy.typing import NDArray
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Facilities (optimised) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Facilities (optimised) ----------------------------------------------------
 from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
 from simulation.core.facilities.parking import OptimizedParkingArea
 from simulation.core.facilities.railyard import OptimizedRailYard, RailSlot
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Vehicles Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Vehicles -----------------------------------------------
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Env components Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Env components -----------------------------------------
 from simulation.env.reward_engine import RewardEngine
 from simulation.env.state_encoder import SplitLevelStateEncoder
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Operations (optimised) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Operations (optimised) ----------------------------------------------------
 from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
 from simulation.operations.hierarchical_moves import HierarchicalMoveGenerator
 from simulation.operations.crane_movements import TerminalRMGC
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Planning & analytics Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Planning & analytics -----------------------------------
 from simulation.planning.logistics_manager import LogisticsManager, DayPlan
 from simulation.analytics.stats_tracker import StatsTracker
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ RL agent types Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- RL agent types -----------------------------------------
 from simulation.rl.features.featurizers import (
     MoveableContainer, Destination, ParkingAction,
     SourceType, DestinationType,
@@ -53,12 +53,12 @@ from simulation.rl.multihead_dqn.config import (
 )
 from simulation.rl.multihead_dqn.replay_buffer import Transition
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Config & enums Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-from simulation.core.enums import MoveType, TruckStatus, Direction
+# -- Config & enums -----------------------------------------
+from simulation.core.enums import MoveType, TruckStatus
 from simulation.config.crane_config import CraneDefaults
 from simulation.config.operations_config import OperationsDefaults
 
-# Ã¢â€â‚¬Ã¢â€â‚¬ Constants Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# -- Constants ----------------------------------------------
 DEFAULT_STEP_MINUTES: int = 5
 IDLE_TICK_SECONDS: float = 30.0  # Time advance when crane has nothing to do
 TERMINAL_TRUCK_COUNT: int = 2
@@ -67,16 +67,16 @@ DAY_END_HOUR: int = 23
 DAY_END_MINUTE: int = 59
 
 # MultiHead agent integration
-DEFAULT_N_SPLITS: int = 10          # 20ft container Ã¢â‚¬â€ smallest common size
+DEFAULT_N_SPLITS: int = 10          # 20ft container -- smallest common size
 VEHICLE_FEAT_DIM: int = 8           # must match HeadConfig.vehicle_feat_dim
 SECONDS_PER_DAY: float = 86_400.0
 MAX_DEPARTURE_HOURS: float = 24.0
 MAX_TRUCK_WAIT_HOURS: float = 4.0
 
 
-# Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+# ============================================================
 # Data classes
-# Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+# ============================================================
 
 @dataclass(slots=True)
 class CraneState:
@@ -96,38 +96,26 @@ class HierarchicalStepResult:
     was_valid_move: bool = False
 
 
-
-
 @dataclass(slots=True)
 class ImportAction:
-    """Pending import: container on vehicle waiting to unload to yard."""
-    vehicle_id: str
+    """Pre-validated import action for a single vehicle."""
+    vehicle_idx: int
+    move: Move
     container_id: str
-    move_type: MoveType  # TRAIN_TO_YARD or TRUCK_TO_YARD
 
 
-def _is_direction(container, direction_str: str) -> bool:
-    """Check container direction handling both enum and string values."""
-    d = getattr(container, 'direction', None)
-    if d is None:
-        return False
-    if hasattr(d, 'value'):
-        return d.value == direction_str
-    return str(d) == direction_str
-
-
-# Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+# ============================================================
 # Environment
-# Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+# ============================================================
 
 class ContainerTerminalEnv:
     """
     Unified environment: simulation infrastructure + hierarchical stepping.
 
     Public API used by CurriculumTrainer:
-        reset(day_start, ...)  Ã¢â€ â€™ NDArray
-        step_all_cranes(agent) Ã¢â€ â€™ (state, reward, done, info)
-        get_carryover()        Ã¢â€ â€™ (trains_dict, trucks_dict)
+        reset(day_start, ...)  -> NDArray
+        step_all_cranes(agent) -> (state, reward, done, info)
+        get_carryover()        -> (trains_dict, trucks_dict)
     """
 
     def __init__(
@@ -146,7 +134,7 @@ class ContainerTerminalEnv:
         max_retries: int = 1,
         no_destination_penalty: float = -1.0,
     ):
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Core references Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Core references ----------------------------------------
         self.yard = yard
         self.rail = rail
         self.parking = parking
@@ -158,12 +146,12 @@ class ContainerTerminalEnv:
         self.auto_park = bool(auto_park)
         self.stats = stats
 
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Hierarchical config Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Hierarchical config ------------------------------------
         self.max_retries = max_retries
         self.no_destination_penalty = no_destination_penalty
 
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Components Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-        self.encoder = SplitLevelStateEncoder(yard, rail)
+        # -- Components ---------------------------------------------
+        self.encoder = SplitLevelStateEncoder(yard, rail, parking=parking)
         self.reward_engine = RewardEngine(yard)
         self.move_gen = HierarchicalMoveGenerator(
             yard=yard, rail=rail, parking=parking,
@@ -173,7 +161,7 @@ class ContainerTerminalEnv:
             yard=yard, rail=rail, num_tracks=num_tracks,
         )
 
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Simulation state Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Simulation state ---------------------------------------
         self.current_time: Optional[datetime] = None
         self.day_index: int = 0
         self.day_plan: Optional[DayPlan] = None
@@ -283,7 +271,7 @@ class ContainerTerminalEnv:
         state = self._encode_state()
 
         if not idle_cranes:
-            # All cranes busy Ã¢â€ â€™ fast-forward to next available
+            # All cranes busy -> fast-forward to next available
             next_time = min(c.busy_until for c in self.cranes if c.busy_until is not None)
             advance_min = (next_time - now).total_seconds() / 60.0
             self.current_time = next_time
@@ -340,16 +328,17 @@ class ContainerTerminalEnv:
         crane_id: int,
         state_np: NDArray[np.float32],
     ) -> HierarchicalStepResult:
-        """Execute one hierarchical step: agent decides all actions.
+        """Execute one step with retry loop for invalid placements.
 
-        The agent chooses between:
-        1. IMPORT_VEHICLE: unload container from train/truck to yard
-        2. SLOT_PARKING: park an unparked truck
-        3. MOVE_CONTAINER: restack in yard, or load onto train/truck
-        Invalid placements penalised; retries up to max_retries.
+        Design:
+        1. Agent picks action: import, parking, yard move, or vehicle load
+        2. Placement is validated before execution
+        3. Invalid -> penalty, time stands still, agent retries
+        4. After max_retries -> advance time, return accumulated penalty
         """
         info: Dict[str, Any] = {"crane_id": crane_id, "executed": [], "retries": 0}
 
+        # -- agent decision with retry on invalid moves -------------
         total_penalty = 0.0
 
         for retry in range(self.max_retries):
@@ -379,7 +368,7 @@ class ContainerTerminalEnv:
                 parking_mask=park_mask,
             )
 
-            # Parking Ã¢â‚¬â€ no spatial validation needed
+            # Parking -- no spatial validation needed
             if action.action_type == AgentActionType.SLOT_PARKING:
                 result = self._execute_parking_action(
                     state_np, action, park_list, crane_id, info,
@@ -395,7 +384,7 @@ class ContainerTerminalEnv:
                 result.reward += total_penalty
                 return result
 
-            # Container move Ã¢â‚¬â€ validate placement, then execute
+            # Container move -- validate placement, then execute
             result = self._try_execute_move(
                 state_np, action, veh_list, crane_id, info,
             )
@@ -431,9 +420,10 @@ class ContainerTerminalEnv:
         """Validate and execute a spatial move.
 
         Returns HierarchicalStepResult on success, None on invalid move.
-        Time only advances on success.
+        Cost computed BEFORE execution so RMGC can still find the
+        container in the yard (exports/imports remove it).
         """
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Validate container selection Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Validate container selection ---------------------------
         if action.container_pos is None:
             return None
         row, split, tier = action.container_pos
@@ -445,7 +435,7 @@ class ContainerTerminalEnv:
         container_id = container.container_id
         dest_type = action.dest_type
 
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Build move based on destination type Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Build move based on destination type -------------------
         if dest_type is None or dest_type == AgentDestType.YARD:
             move = self._validate_yard_placement(container, record, action)
         elif dest_type == AgentDestType.TRAIN:
@@ -456,20 +446,30 @@ class ContainerTerminalEnv:
             return None
 
         if move is None:
-            return None  # validation failed Ã¢â‚¬â€ caller handles retry
+            return None  # validation failed -- caller handles retry
 
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Execute via TLM Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-        try:
-            self.tlm.execute(move, self.trains, self.trucks, self.terminal_trucks)
-        except Exception as e:
-            info.setdefault("errors", []).append(str(e))
-            return None
-
-        # Ã¢â€â‚¬Ã¢â€â‚¬ Crane timing & reward Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        # -- Compute cost BEFORE execution --------------------------
+        # Container is still in the yard at this point; after TLM.execute
+        # it may be gone (exports, truck loads), making RMGC resolution
+        # impossible.
         epc = self.rmgc.endpoints_and_cost_for_move(
             move, self.trains, self.trucks, self.yard,
         )
         cost = epc[2] if epc else None
+
+        # -- Execute via TLM ----------------------------------------
+        try:
+            success = self.tlm.execute(
+                move, self.trains, self.trucks, self.terminal_trucks,
+            )
+        except Exception as e:
+            info.setdefault("errors", []).append(str(e))
+            return None
+
+        if not success:
+            return None  # TLM rejected the move
+
+        # -- Crane timing & reward ----------------------------------
         if crane_id < len(self.cranes) and cost:
             self.cranes[crane_id].busy_until = (
                 self.current_time + timedelta(seconds=cost.time_s)
@@ -509,7 +509,7 @@ class ContainerTerminalEnv:
             info=info, transition=transition, was_valid_move=True,
         )
 
-    # Ã¢â€â‚¬Ã¢â€â‚¬ Placement validators Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    # -- Placement validators -----------------------------------
 
     def _validate_yard_placement(
         self,
@@ -571,12 +571,23 @@ class ContainerTerminalEnv:
         action: ActionResult,
         vehicle_list: List,
     ) -> Optional[Move]:
-        """Validate a yard-to-train load. Returns Move or None."""
+        """Validate a yard-to-train load. Returns Move or None.
+
+        Only Export containers may leave on trains.
+        Train must list this container in its pickup manifest.
+        """
+        # Direction guard: only exports leave on trains
+        direction = getattr(container, "direction", None)
+        if direction is None or str(direction.value if hasattr(direction, "value") else direction) == "Import":
+            return None
         idx = action.vehicle_idx
         if idx < 0 or idx >= len(vehicle_list):
             return None
         veh = vehicle_list[idx]
         if not hasattr(veh, "train_id"):
+            return None
+        # Train must actually want this container
+        if container.container_id not in veh.get_all_pickup_container_ids():
             return None
         if not veh.has_space_for_container(container):
             return None
@@ -591,12 +602,24 @@ class ContainerTerminalEnv:
         action: ActionResult,
         vehicle_list: List,
     ) -> Optional[Move]:
-        """Validate a yard-to-truck load. Returns Move or None."""
+        """Validate a yard-to-truck load. Returns Move or None.
+
+        Only Import containers may leave on trucks.
+        Truck must list this container in its pickup manifest.
+        """
+        # Direction guard: only imports leave on trucks
+        direction = getattr(container, "direction", None)
+        if direction is None or str(direction.value if hasattr(direction, "value") else direction) == "Export":
+            return None
         idx = action.vehicle_idx
         if idx < 0 or idx >= len(vehicle_list):
             return None
         veh = vehicle_list[idx]
         if not hasattr(veh, "truck_id"):
+            return None
+        # Truck must actually want this container
+        pickup_ids = getattr(veh, 'pickup_container_ids', set())
+        if container.container_id not in pickup_ids:
             return None
         if not veh.can_accommodate_container(container):
             return None
@@ -664,7 +687,7 @@ class ContainerTerminalEnv:
             info=info, transition=transition, was_valid_move=True,
         )
 
-    # Ã¢â€â‚¬Ã¢â€â‚¬ Convenience wrappers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    # -- Convenience wrappers -----------------------------------
 
     def _idle_step(self, info: Dict) -> HierarchicalStepResult:
         """Advance time with zero reward (nothing to do)."""
@@ -674,148 +697,142 @@ class ContainerTerminalEnv:
             done=self._check_day_end(), info=info, was_valid_move=False,
         )
 
-    # Import features (vehicle -> yard)
+    # ================================================================
+    # Auto-import (train->yard, truck->yard)
+    # ================================================================
+    # Uses yard.find_single_placement directly -- avoids TLM list methods
+    # that call search_placements (missing on OptimizedStorageYard).
+
+    # ================================================================
+    # Import mask + execution (agent-driven imports)
     # ================================================================
 
     def _build_import_mask(
         self, vehicle_list: List,
-    ) -> Tuple[np.ndarray, List[Optional["ImportAction"]]]:
-        """Build import mask over the vehicle feature array.
+    ) -> Tuple[np.ndarray, List]:
+        """Build boolean mask over vehicle_list indicating importable vehicles.
 
-        Marks which vehicles have containers to unload into the yard.
-        The mask has the same length as vehicle_list so it can be
-        passed directly alongside vehicle_feats to the agent.
+        A vehicle is importable if it carries containers that can be
+        unloaded into the yard (Import from trains, Export from trucks).
 
-        Returns (import_mask (V,), import_actions per-vehicle-index).
+        Returns (mask (V,), actions list aligned with vehicle_list).
         """
-        V = len(vehicle_list)
-        mask = np.zeros(V, dtype=bool)
-        actions: List[Optional[ImportAction]] = [None] * V
+        n = len(vehicle_list)
+        if n == 0:
+            return np.zeros(0, dtype=bool), []
 
-        for i, vehicle in enumerate(vehicle_list):
-            if hasattr(vehicle, 'train_id'):
-                import_containers = [
-                    c for c in vehicle.get_all_containers()
-                    if _is_direction(c, "Import")
-                ]
-                if not import_containers:
-                    continue
-                container = import_containers[0]
-                anchor = self.tlm._goods_anchor(container)
-                if self.yard.find_single_placement(container, target_bay=anchor) is None:
-                    continue
-                mask[i] = True
-                actions[i] = ImportAction(
-                    vehicle_id=vehicle.train_id,
-                    container_id=container.container_id,
-                    move_type=MoveType.TRAIN_TO_YARD,
-                )
+        mask = np.zeros(n, dtype=bool)
+        actions: List[Optional[ImportAction]] = [None] * n
 
-            elif hasattr(vehicle, 'truck_id'):
-                if not vehicle.parking_spot or not vehicle.containers:
-                    continue
-                delivery_containers = [
-                    c for c in vehicle.containers
-                    if _is_direction(c, "Export")
-                ]
-                if not delivery_containers:
-                    continue
-                container = delivery_containers[0]
-                anchor = self.tlm._goods_anchor(container)
-                if self.yard.find_single_placement(container, target_bay=anchor) is None:
-                    continue
-                mask[i] = True
-                actions[i] = ImportAction(
-                    vehicle_id=vehicle.truck_id,
-                    container_id=container.container_id,
-                    move_type=MoveType.TRUCK_TO_YARD,
-                )
+        for idx, veh in enumerate(vehicle_list):
+            if hasattr(veh, "train_id"):
+                result = self._find_train_import(veh, idx)
+            elif hasattr(veh, "truck_id"):
+                result = self._find_truck_import(veh, idx)
+            else:
+                continue
+            if result is not None:
+                mask[idx] = True
+                actions[idx] = result
 
         return mask, actions
 
+    def _find_train_import(
+        self, train, vehicle_idx: int,
+    ) -> Optional[ImportAction]:
+        """Find first importable container from a train."""
+        for container in train.get_all_containers():
+            d = getattr(container, "direction", None)
+            d_str = str(d.value if hasattr(d, "value") else d) if d else ""
+            if d_str != "Import":
+                continue
+            anchor = self.tlm._goods_anchor(container)
+            placement = self.yard.find_single_placement(
+                container, target_bay=anchor,
+            )
+            if placement is None:
+                continue
+            move = Move(
+                type=MoveType.TRAIN_TO_YARD,
+                args={
+                    "train_id": train.train_id,
+                    "container_id": container.container_id,
+                    "placement": placement,
+                },
+            )
+            return ImportAction(
+                vehicle_idx=vehicle_idx,
+                move=move,
+                container_id=container.container_id,
+            )
+        return None
+
+    def _find_truck_import(
+        self, truck, vehicle_idx: int,
+    ) -> Optional[ImportAction]:
+        """Find first importable container from a parked delivery truck.
+
+        Only Export containers are unloaded from trucks (delivery trucks
+        bring Export containers that will later leave on trains).
+        """
+        if not truck.parking_spot or not truck.containers:
+            return None
+        for container in list(truck.containers):
+            d = getattr(container, "direction", None)
+            d_str = str(d.value if hasattr(d, "value") else d) if d else ""
+            if d_str != "Export":
+                continue
+            anchor = self.tlm._goods_anchor(container)
+            placement = self.yard.find_single_placement(
+                container, target_bay=anchor,
+            )
+            if placement is None:
+                continue
+            move = Move(
+                type=MoveType.TRUCK_TO_YARD,
+                args={
+                    "truck_id": truck.truck_id,
+                    "container_id": container.container_id,
+                    "placement": placement,
+                },
+            )
+            return ImportAction(
+                vehicle_idx=vehicle_idx,
+                move=move,
+                container_id=container.container_id,
+            )
+        return None
 
     def _execute_import_action(
         self,
         state_np: NDArray,
         action: ActionResult,
-        import_actions: List[Optional["ImportAction"]],
+        import_actions: List,
         crane_id: int,
         info: Dict,
     ) -> HierarchicalStepResult:
-        """Execute an agent-selected import (vehicle -> yard)."""
+        """Execute an agent-chosen import (vehicle -> yard)."""
         idx = action.vehicle_idx
-        if idx < 0 or idx >= len(import_actions):
+        if idx < 0 or idx >= len(import_actions) or import_actions[idx] is None:
             return self._idle_step(info)
 
-        imp = import_actions[idx]
-        if imp is None:
-            return self._idle_step(info)
+        ia: ImportAction = import_actions[idx]
 
-        # Locate container on the vehicle
-        container = None
-        if imp.move_type == MoveType.TRAIN_TO_YARD:
-            train = self.trains.get(imp.vehicle_id)
-            if train:
-                container = next(
-                    (c for c in train.get_all_containers()
-                     if c.container_id == imp.container_id), None
-                )
-        elif imp.move_type == MoveType.TRUCK_TO_YARD:
-            truck = self.trucks.get(imp.vehicle_id)
-            if truck:
-                container = next(
-                    (c for c in truck.containers
-                     if c.container_id == imp.container_id), None
-                )
-
-        if container is None:
-            return self._idle_step(info)
-
-        # Find yard placement via goods anchor heuristic
-        anchor = self.tlm._goods_anchor(container)
-        placement = self.yard.find_single_placement(
-            container, target_bay=anchor,
-        )
-        if placement is None:
-            # Yard full
-            self._advance_time()
-            return HierarchicalStepResult(
-                next_state=self._encode_state(),
-                reward=self.no_destination_penalty,
-                done=self._check_day_end(),
-                info=info, was_valid_move=False,
-            )
-
-        # Build move
-        if imp.move_type == MoveType.TRAIN_TO_YARD:
-            move = Move(
-                type=MoveType.TRAIN_TO_YARD,
-                args={
-                    "train_id": imp.vehicle_id,
-                    "container_id": imp.container_id,
-                    "placement": placement,
-                },
-            )
-        else:
-            move = Move(
-                type=MoveType.TRUCK_TO_YARD,
-                args={
-                    "truck_id": imp.vehicle_id,
-                    "container_id": imp.container_id,
-                    "placement": placement,
-                },
-            )
-
-        # Compute cost BEFORE execution
+        # Compute cost before execution
         epc = self.rmgc.endpoints_and_cost_for_move(
-            move, self.trains, self.trucks, self.yard,
+            ia.move, self.trains, self.trucks, self.yard,
         )
         cost = epc[2] if epc else None
 
         try:
-            self.tlm.execute(move, self.trains, self.trucks, self.terminal_trucks)
+            success = self.tlm.execute(
+                ia.move, self.trains, self.trucks, self.terminal_trucks,
+            )
         except Exception as e:
             info.setdefault("errors", []).append(str(e))
+            return self._idle_step(info)
+
+        if not success:
             return self._idle_step(info)
 
         if crane_id < len(self.cranes) and cost:
@@ -824,14 +841,15 @@ class ContainerTerminalEnv:
             )
 
         reward = self.reward_engine.immediate_reward(
-            move.type.value,
+            ia.move.type.value,
             cost.distance_m if cost else 0.0,
             cost.time_s if cost else 0.0,
         )
         info["executed"].append({
-            "move_type": move.type.value,
-            "container_id": imp.container_id,
-            "vehicle_id": imp.vehicle_id,
+            "move_type": ia.move.type.value,
+            "container_id": ia.container_id,
+            "distance_m": cost.distance_m if cost else 0.0,
+            "time_s": cost.time_s if cost else 0.0,
         })
 
         self._advance_time(cost.time_s if cost else 0.0)
@@ -859,15 +877,14 @@ class ContainerTerminalEnv:
     def _truck_bay_norm(self, truck) -> float:
         """Normalized bay position for a truck (0-1).
 
-        Priority: parking_spot.bay > pickup container bay > yard center.
+        Priority: parking bay (from _truck_spots) > pickup bay > center.
         """
         n_bays = max(self.yard.n_bays - 1, 1)
-        # Parked: use actual parking bay
-        spot = getattr(truck, 'parking_spot', None)
-        if spot is not None:
-            bay = getattr(spot, 'bay', None)
-            if bay is not None:
-                return bay / n_bays
+        # Parked: resolve actual bay from parking lookup
+        if self.parking and getattr(truck, 'parking_spot', None):
+            pos = self.parking._truck_spots.get(truck.truck_id)
+            if pos is not None:
+                return pos[0] / n_bays
         # Not parked: use pickup target container's bay
         target_bay, _, _ = self._pickup_info(truck)
         if target_bay is not None:
@@ -885,7 +902,7 @@ class ContainerTerminalEnv:
         feats_list: List[np.ndarray] = []
         now = self.current_time
 
-        # Trains Ã¢â‚¬â€ use proper Train API methods
+        # Trains -- use proper Train API methods
         for train_id, train in self.trains.items():
             anchor = self.rail.get_anchor_bay(train_id)
             dep = train.departure_time
@@ -907,7 +924,7 @@ class ContainerTerminalEnv:
             ], dtype=np.float32))
             vehicles.append(train)
 
-        # Trucks â€” use actual parking position and timing
+        # Trucks  use actual parking position and timing
         for truck_id, truck in self.trucks.items():
             # Position: actual parking bay if parked, else pickup target bay
             bay_norm = self._truck_bay_norm(truck)
@@ -916,7 +933,7 @@ class ContainerTerminalEnv:
             n_containers = len(truck.containers)
             n_pickup = len(getattr(truck, 'pickup_container_ids', set()))
 
-            # Wait time â†’ urgency (0 = just arrived, 1 = waited â‰¥ max)
+            # Wait time  urgency (0 = just arrived, 1 = waited  max)
             arr = getattr(truck, 'arrival_time', None)
             if arr and arr < now:
                 wait_hours = (now - arr).total_seconds() / 3600.0
@@ -1208,7 +1225,7 @@ class ContainerTerminalEnv:
     # ================================================================
 
     def _encode_state(self) -> NDArray[np.float32]:
-        """Single point for state encoding Ã¢â‚¬â€ (C, R, S, T) at split resolution."""
+        """Single point for state encoding -- (C, R, S, T) at split resolution."""
         return self.encoder.encode(
             self.trains, self.trucks, self.current_time,
         )

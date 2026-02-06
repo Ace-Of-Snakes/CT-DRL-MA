@@ -28,6 +28,12 @@ class YardDims:
     n_tiers: int
     n_bays: int
     split_factor: int  # splits per bay (typically 20)
+    n_parking_rows: int = 1  # extra rows appended for parking encoding
+
+    @property
+    def n_state_rows(self) -> int:
+        """Total rows in state tensor (yard + parking)."""
+        return self.n_rows + self.n_parking_rows
 
     @property
     def spatial_shape(self) -> Tuple[int, int, int]:
@@ -43,12 +49,12 @@ class CNNConfig:
     """Factored CNN backbone configuration.
 
     Kernel design:
-      (1, container_kernel, 1) along S — matches container shape
-      (cross_kernel, 1, cross_kernel) across R×T — stacking context
-      (1, refine_kernel, 1) along S — neighborhood awareness
+      (1, container_kernel, 1) along S Ã¢â‚¬â€ matches container shape
+      (cross_kernel, 1, cross_kernel) across RÃƒâ€”T Ã¢â‚¬â€ stacking context
+      (1, refine_kernel, 1) along S Ã¢â‚¬â€ neighborhood awareness
 
     Total receptive field:
-      S ≈ 57 splits (~3 bays),  R = 3 rows,  T = 3 tiers
+      S Ã¢â€°Ë† 57 splits (~3 bays),  R = 3 rows,  T = 3 tiers
     """
     n_state_channels: int = 12
     stage1_channels: int = 32        # first conv output channels
@@ -57,9 +63,9 @@ class CNNConfig:
     s_stride: int = 4                # downsample factor along splits
     gn_groups: int = 8               # GroupNorm groups
     # Factored kernel sizes
-    container_kernel: int = 21       # (1, k, 1) — 20ft container = 20 splits
-    cross_kernel: int = 3            # (r, 1, t) — stacking / cross-row
-    refine_kernel: int = 5           # (1, k, 1) — neighborhood
+    container_kernel: int = 21       # (1, k, 1) Ã¢â‚¬â€ 20ft container = 20 splits
+    cross_kernel: int = 3            # (r, 1, t) Ã¢â‚¬â€ stacking / cross-row
+    refine_kernel: int = 5           # (1, k, 1) Ã¢â‚¬â€ neighborhood
 
     @property
     def container_pad(self) -> int:
@@ -108,6 +114,13 @@ class DQNConfig:
 
     double_dqn: bool = True
     n_step: int = 3
+
+    # Dest-type exploration floor (prevents catastrophic forgetting
+    # when main epsilon is low and vehicle destinations are rare)
+    dest_epsilon_floor: float = 0.20
+
+    # Auxiliary dest_type loss weight
+    dest_aux_weight: float = 0.5
 
     # Prioritized replay
     use_per: bool = False
