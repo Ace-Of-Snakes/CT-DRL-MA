@@ -98,7 +98,7 @@ class DQNConfig:
     gamma: float = 0.99
     lr: float = 3e-4
     batch_size: int = 32
-    replay_size: int = 5_000
+    replay_size: int = 2_000  # ~3.3GB at 1.67MB/transition
     target_tau: float = 0.005
     grad_clip: float = 1.0
 
@@ -115,9 +115,8 @@ class DQNConfig:
     double_dqn: bool = True
     n_step: int = 3
 
-    # Dest-type exploration floor (prevents catastrophic forgetting
-    # when main epsilon is low and vehicle destinations are rare)
-    dest_epsilon_floor: float = 0.20
+    # Dest-type exploration floor (extra robustness for rare vehicle destinations)
+    dest_epsilon_floor: float = 0.15
 
     # Auxiliary dest_type loss weight
     dest_aux_weight: float = 0.5

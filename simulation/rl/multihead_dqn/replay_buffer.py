@@ -82,12 +82,16 @@ class ReplayBuffer:
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size: int) -> List[Transition]:
-        """Sample batch, decompressing states back to float32."""
+        """Sample batch, decompressing states to float32 COPIES (not in-place)."""
+        from copy import copy
         n = min(batch_size, len(self.buffer))
-        batch = random.sample(self.buffer, n)
-        for t in batch:
+        indices = random.sample(range(len(self.buffer)), n)
+        batch = []
+        for i in indices:
+            t = copy(self.buffer[i])  # shallow copy
             t.state = _decompress(t.state)
             t.next_state = _decompress(t.next_state)
+            batch.append(t)
         return batch
 
     def __len__(self) -> int:
@@ -136,7 +140,8 @@ class PrioritizedReplayBuffer:
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int) -> Tuple[List[Transition], np.ndarray, np.ndarray]:
-        """Sample with importance-sampling weights, decompressing states."""
+        """Sample with importance-sampling weights, decompressing to COPIES."""
+        from copy import copy
         self.frame += 1
         n = min(batch_size, self.size)
 
@@ -148,7 +153,7 @@ class PrioritizedReplayBuffer:
 
         transitions = []
         for i in indices:
-            t = self.buffer[i]
+            t = copy(self.buffer[i])  # shallow copy
             t.state = _decompress(t.state)
             t.next_state = _decompress(t.next_state)
             transitions.append(t)
