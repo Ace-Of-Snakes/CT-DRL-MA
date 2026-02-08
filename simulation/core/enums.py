@@ -39,6 +39,14 @@ class TerminalTruckStatus(str, Enum):
     BUSY = "busy"
 
 
+class Region(str, Enum):
+    """Unified spatial regions in the CNN state matrix."""
+    RAIL = "RAIL"
+    PARKING = "PARKING"
+    YARD = "YARD"
+    QUEUE = "QUEUE"
+
+
 class MoveType(str, Enum):
     """Types of container moves."""
     YARD_TO_YARD = "YARD_TO_YARD"
@@ -50,6 +58,7 @@ class MoveType(str, Enum):
     TRUCK_TO_TRAIN = "TRUCK_TO_TRAIN"
     YARD_TO_TERMINAL_TRUCK = "YARD_TO_TERMINAL_TRUCK"
     SLOT_TRUCK_PARKING = "SLOT_TRUCK_PARKING"
+    PARK_TRUCK = "PARK_TRUCK"
 
 
 class PositionType(str, Enum):

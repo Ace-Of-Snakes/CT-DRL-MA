@@ -1,7 +1,7 @@
 # simulation/training/tutorial_scenarios.py
 """Tutorial scenarios for curriculum training.
 
-14 progressive scenarios teaching individual skills before combining them.
+21 progressive scenarios teaching individual skills before combining them.
 Direction semantics enforced throughout:
   Import containers: arrive on TRAIN, leave on TRUCK (pickup)
   Export containers: arrive on TRUCK (delivery), leave on TRAIN
@@ -186,6 +186,13 @@ def _place_distractors(
     return placed
 
 
+def _slot_train(env, train: Train, track_id: int = 0,
+                anchor_bay: int = ANCHOR_BAY) -> None:
+    """Register train in env.trains and rail."""
+    env.trains[train.train_id] = train
+    env.rail.slot_train(train, RailSlot(track_id=track_id, anchor_bay=anchor_bay))
+
+
 # ================================================================
 # Base class
 # ================================================================
@@ -224,12 +231,12 @@ class TutorialScenario(ABC):
 class S1_ParkTruck(TutorialScenario):
     """Unparked pickup truck, Import container in yard.
 
-    Agent must SLOT_PARKING to park the truck.
+    Agent must SLOT_PARKING.
     """
     id = 1
     name = "park_truck"
     description = "Park an unparked pickup truck"
-    max_steps = 15
+    max_steps = 10
 
     def setup(self, env) -> None:
         c = _make_container("S1_C1", Direction.IMPORT)
@@ -238,37 +245,30 @@ class S1_ParkTruck(TutorialScenario):
         env.trucks[tk.truck_id] = tk
 
     def check_success(self, env) -> bool:
-        tk = env.trucks.get("S1_TK1")
-        if tk is None:
-            return True  # departed = full success
-        return tk.parking_spot is not None
+        truck = env.trucks.get("S1_TK1")
+        if truck is None:
+            # Truck departed — must have been parked + loaded first
+            return True
+        return truck.parking_spot is not None
 
 
 class S2_TrainImport(TutorialScenario):
-    """Train with 3 Import containers.
+    """Train with Import container, no trucks.
 
-    Agent must IMPORT_VEHICLE to unload train -> yard.
-    Three containers keep both cranes busy importing.
+    Agent must IMPORT_VEHICLE (train→yard).
     """
     id = 2
     name = "train_import"
-    description = "Unload 3 Import containers from train to yard"
+    description = "Import container from train to yard"
     max_steps = 15
 
     def setup(self, env) -> None:
-        containers = [
-            _make_container(f"S2_C{i}", Direction.IMPORT)
-            for i in range(3)
-        ]
-        tr = _make_train("S2_TR1", containers=containers)
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        c = _make_container("S2_C1", Direction.IMPORT)
+        tr = _make_train("S2_TR1", containers=[c])
+        _slot_train(env, tr)
 
     def check_success(self, env) -> bool:
-        return all(
-            env.yard.get_container(f"S2_C{i}") is not None
-            for i in range(3)
-        )
+        return env.yard.get_container("S2_C1") is not None
 
 
 class S3_YardToTruck(TutorialScenario):
@@ -307,8 +307,7 @@ class S4_YardToTrain(TutorialScenario):
         c = _make_container("S4_C1", Direction.EXPORT)
         env.yard.add_container(c, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         tr = _make_train("S4_TR1", pickup_ids=[c.container_id])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
 
     def check_success(self, env) -> bool:
         tr = env.trains.get("S4_TR1")
@@ -319,37 +318,40 @@ class S4_YardToTrain(TutorialScenario):
 # Phase 2 — Two-action chains
 # ================================================================
 
-class S5_ImportThenExport(TutorialScenario):
-    """Train has Import container, pre-parked truck wants it.
+class S5_ImportAndExport(TutorialScenario):
+    """Two independent actions on one train.
 
-    Agent: IMPORT_VEHICLE -> MOVE_CONTAINER->TRUCK.
+    Train carries 1 Import container + wants 1 Export from yard.
+    Agent: IMPORT_VEHICLE(train→yard) + MOVE_CONTAINER->TRAIN.
     """
     id = 5
-    name = "import_then_export"
-    description = "Import from train, then load onto pickup truck"
+    name = "import_and_export"
+    description = "Import one container from train, load a different export onto it"
     max_steps = 25
 
     def setup(self, env) -> None:
-        c = _make_container("S5_C1", Direction.IMPORT)
-        tr = _make_train("S5_TR1", containers=[c])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
-        tk = _make_truck("S5_TK1", pickup_ids=[c.container_id])
-        env.trucks[tk.truck_id] = tk
-        _park_truck_near(env, tk, ANCHOR_BAY)
+        imp = _make_container("S5_IMP", Direction.IMPORT)
+        exp = _make_container("S5_EXP", Direction.EXPORT)
+        env.yard.add_container(exp, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+        tr = _make_train("S5_TR1", containers=[imp], pickup_ids=[exp.container_id])
+        _slot_train(env, tr)
 
     def check_success(self, env) -> bool:
-        return "S5_TK1" not in env.trucks
-
+        tr = env.trains.get("S5_TR1")
+        if tr is None:
+            return False
+        export_loaded = tr.has_container("S5_EXP")
+        import_in_yard = env.yard.get_container("S5_IMP") is not None
+        return export_loaded and import_in_yard
 
 class S6_ParkThenImport(TutorialScenario):
-    """Delivery truck (unparked) carries Export container.
+    """Delivery truck with Export container (unparked), plus train.
 
-    Agent: SLOT_PARKING -> IMPORT_VEHICLE (truck->yard).
+    Agent: SLOT_PARKING -> IMPORT_VEHICLE(truck→yard).
     """
     id = 6
     name = "park_then_import"
-    description = "Park delivery truck, then unload Export to yard"
+    description = "Park delivery truck, then import its container to yard"
     max_steps = 25
 
     def setup(self, env) -> None:
@@ -358,11 +360,12 @@ class S6_ParkThenImport(TutorialScenario):
         env.trucks[tk.truck_id] = tk
 
     def check_success(self, env) -> bool:
-        return env.yard.get_container("S6_C1") is not None
+        return (env.yard.get_container("S6_C1") is not None
+                and "S6_TK1" not in env.trucks)
 
 
 # ================================================================
-# Phase 3 — Full chains (3 actions)
+# Phase 3 — Full chains
 # ================================================================
 
 class S7_FullChainTruck(TutorialScenario):
@@ -378,8 +381,7 @@ class S7_FullChainTruck(TutorialScenario):
     def setup(self, env) -> None:
         c = _make_container("S7_C1", Direction.IMPORT)
         tr = _make_train("S7_TR1", containers=[c])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
         tk = _make_truck("S7_TK1", pickup_ids=[c.container_id])
         env.trucks[tk.truck_id] = tk
 
@@ -400,8 +402,7 @@ class S8_DeliveryToTrain(TutorialScenario):
     def setup(self, env) -> None:
         c = _make_container("S8_C1", Direction.EXPORT)
         tr = _make_train("S8_TR1", pickup_ids=[c.container_id])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
         tk = _make_truck("S8_TK1", containers=[c])
         env.trucks[tk.truck_id] = tk
 
@@ -421,17 +422,15 @@ class S9_UnburyForTruck(TutorialScenario):
     """
     id = 9
     name = "unbury_for_truck"
-    description = "Restack blocker, load buried Import onto truck"
+    description = "Restack blocker to reach buried Import, load onto truck"
     max_steps = 25
 
     def setup(self, env) -> None:
         rng = random.Random(42)
         target = _make_container("S9_TARGET", Direction.IMPORT)
-        blocker = _make_container(
-            "S9_BLOCK", Direction.IMPORT,
-            departure=TUTORIAL_TIME + timedelta(days=10),
-        )
-        env.yard.add_container(target, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+        blocker = _make_container("S9_BLK1", Direction.IMPORT,
+                                   departure=TUTORIAL_TIME + timedelta(days=10))
+        env.yard.add_container(target,  _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         env.yard.add_container(blocker, _yard_placement(bay=ANCHOR_BAY, row=0, tier=1))
 
         _place_distractors(env, rng, 5, "S9", exclude_bays={ANCHOR_BAY})
@@ -446,38 +445,37 @@ class S9_UnburyForTruck(TutorialScenario):
 
 
 class S10_UnburyForTrain(TutorialScenario):
-    """Export target buried under blocker, 5 distractors.
+    """Export target buried under blocker, 5 distractors, train wants it.
 
     Agent: RESTACK blocker -> MOVE_CONTAINER->TRAIN.
     """
     id = 10
     name = "unbury_for_train"
-    description = "Restack blocker, load buried Export onto train"
+    description = "Restack blocker to reach buried Export, load onto train"
     max_steps = 25
 
     def setup(self, env) -> None:
         rng = random.Random(99)
         target = _make_container("S10_TARGET", Direction.EXPORT)
-        blocker = _make_container(
-            "S10_BLOCK", Direction.IMPORT,
-            departure=TUTORIAL_TIME + timedelta(days=10),
-        )
-        env.yard.add_container(target, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+        blocker = _make_container("S10_BLK1", Direction.EXPORT,
+                                   departure=TUTORIAL_TIME + timedelta(days=10))
+        env.yard.add_container(target,  _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         env.yard.add_container(blocker, _yard_placement(bay=ANCHOR_BAY, row=0, tier=1))
 
         _place_distractors(env, rng, 5, "S10", exclude_bays={ANCHOR_BAY})
 
         tr = _make_train("S10_TR1", pickup_ids=[target.container_id])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
 
     def check_success(self, env) -> bool:
         tr = env.trains.get("S10_TR1")
-        return tr is not None and tr.has_container("S10_TARGET")
+        return (tr is not None
+                and tr.has_container("S10_TARGET")
+                and env.yard.get_container("S10_TARGET") is None)
 
 
 # ================================================================
-# Phase 5 — Randomised generalization
+# Phase 5 — Randomised generalisation
 # ================================================================
 
 class S11_RandomImportChain(TutorialScenario):
@@ -499,8 +497,7 @@ class S11_RandomImportChain(TutorialScenario):
             length_ft=ft, length_m=m, container_type=label,
         )
         tr = _make_train("S11_TR1", containers=[c])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
 
         n_distractors = rng.randint(3, 8)
         _place_distractors(env, rng, n_distractors, "S11",
@@ -531,8 +528,7 @@ class S12_RandomExportChain(TutorialScenario):
             length_ft=ft, length_m=m, container_type=label,
         )
         tr = _make_train("S12_TR1", pickup_ids=[c.container_id])
-        env.trains[tr.train_id] = tr
-        env.rail.slot_train(tr, RailSlot(track_id=0, anchor_bay=ANCHOR_BAY))
+        _slot_train(env, tr)
 
         n_distractors = rng.randint(3, 8)
         _place_distractors(env, rng, n_distractors, "S12",
@@ -612,6 +608,326 @@ class S14_DeepUnbury(TutorialScenario):
 
 
 # ================================================================
+# Phase 7 — Integration: batch operations
+# ================================================================
+
+_N_DELIVERY = 3
+_DELIVERY_BAYS = [ANCHOR_BAY, ANCHOR_BAY + 8, ANCHOR_BAY + 16]
+
+
+class S15_MultiDeliveryPark(TutorialScenario):
+    """3 unparked delivery trucks with Export containers.
+
+    Agent must park all 3, then import all containers to yard.
+    Tests batch parking + batch truck-to-yard import pipeline.
+    """
+    id = 15
+    name = "multi_delivery_park"
+    description = "Park 3 delivery trucks and import all containers"
+    max_steps = 50
+
+    def setup(self, env) -> None:
+        for i in range(_N_DELIVERY):
+            c = _make_container(f"S15_C{i}", Direction.EXPORT)
+            tk = _make_truck(f"S15_TK{i}", containers=[c])
+            env.trucks[tk.truck_id] = tk
+
+    def check_success(self, env) -> bool:
+        # All 3 containers in yard, all 3 trucks departed (empty delivery)
+        in_yard = all(
+            env.yard.get_container(f"S15_C{i}") is not None
+            for i in range(_N_DELIVERY)
+        )
+        trucks_gone = all(
+            f"S15_TK{i}" not in env.trucks
+            for i in range(_N_DELIVERY)
+        )
+        return in_yard and trucks_gone
+
+
+class S16_DeliveryToTrainPipeline(TutorialScenario):
+    """2 unparked delivery trucks (Export), 1 train wanting both.
+
+    Full export pipeline: park → truck-to-yard → yard-to-train.
+    """
+    id = 16
+    name = "delivery_to_train_pipeline"
+    description = "Park 2 delivery trucks, import to yard, load train"
+    max_steps = 55
+
+    def setup(self, env) -> None:
+        cids = []
+        for i in range(2):
+            c = _make_container(f"S16_C{i}", Direction.EXPORT)
+            cids.append(c.container_id)
+            tk = _make_truck(f"S16_TK{i}", containers=[c])
+            env.trucks[tk.truck_id] = tk
+        tr = _make_train("S16_TR1", pickup_ids=cids)
+        _slot_train(env, tr)
+
+    def check_success(self, env) -> bool:
+        tr = env.trains.get("S16_TR1")
+        if tr is None:
+            return False
+        return all(tr.has_container(f"S16_C{i}") for i in range(2))
+
+
+# ================================================================
+# Phase 8 — Integration: bidirectional train (bridge)
+# ================================================================
+
+class S17_BidirectionalTrainSimple(TutorialScenario):
+    """1 train with 1 Import + wants 1 Export (already in yard).
+    1 pre-parked pickup truck for the import.
+
+    Bridge scenario: teaches concurrent import + export on the SAME
+    train at minimal scale, with no parking required.
+      - Load 1 Export from yard onto train
+      - Import 1 Import from train to yard
+      - Load import onto pre-parked pickup truck
+    """
+    id = 17
+    name = "bidirectional_train_simple"
+    description = "Export to train + import from train + deliver to truck (pre-parked)"
+    max_steps = 35
+
+    def setup(self, env) -> None:
+        # 1 Import container on the train
+        imp = _make_container("S17_IMP0", Direction.IMPORT)
+
+        # 1 Export container in the yard, train wants it
+        exp = _make_container("S17_EXP0", Direction.EXPORT)
+        env.yard.add_container(exp, _yard_placement(bay=ANCHOR_BAY + 5, row=0, tier=0))
+
+        tr = _make_train("S17_TR1", containers=[imp], pickup_ids=[exp.container_id])
+        _slot_train(env, tr)
+
+        # 1 pre-parked pickup truck (no parking step needed)
+        tk = _make_truck("S17_TK0", pickup_ids=[imp.container_id])
+        env.trucks[tk.truck_id] = tk
+        _park_truck_near(env, tk, ANCHOR_BAY)
+
+    def check_success(self, env) -> bool:
+        tr = env.trains.get("S17_TR1")
+        if tr is None:
+            return False
+        export_loaded = tr.has_container("S17_EXP0")
+        truck_served = "S17_TK0" not in env.trucks
+        return export_loaded and truck_served
+
+
+# ================================================================
+# Phase 8b — Integration: concurrent import + export (full)
+# ================================================================
+
+class S18_ConcurrentImportExport(TutorialScenario):
+    """1 train with 2 Imports. 2 Exports in yard that train wants.
+    2 unparked pickup trucks for the imports.
+
+    Tests bidirectional flow on a shared train:
+      - Load 2 Exports from yard onto train
+      - Import 2 Imports from train to yard
+      - Park 2 pickup trucks, load them
+    """
+    id = 18
+    name = "concurrent_import_export"
+    description = "Bidirectional train: export to train + import to trucks"
+    max_steps = 65
+
+    def setup(self, env) -> None:
+        # 2 Import containers on the train
+        imports = []
+        for i in range(2):
+            c = _make_container(f"S18_IMP{i}", Direction.IMPORT)
+            imports.append(c)
+
+        # 2 Export containers already in yard, train wants them
+        export_ids = []
+        for i in range(2):
+            c = _make_container(f"S18_EXP{i}", Direction.EXPORT)
+            bay = ANCHOR_BAY + 5 + i * 4
+            env.yard.add_container(c, _yard_placement(bay=bay, row=0, tier=0))
+            export_ids.append(c.container_id)
+
+        tr = _make_train("S18_TR1", containers=imports, pickup_ids=export_ids)
+        _slot_train(env, tr)
+
+        # 2 unparked pickup trucks for the imports
+        for i, imp in enumerate(imports):
+            tk = _make_truck(f"S18_TK{i}", pickup_ids=[imp.container_id])
+            env.trucks[tk.truck_id] = tk
+
+    def check_success(self, env) -> bool:
+        tr = env.trains.get("S18_TR1")
+        if tr is None:
+            return False
+        exports_loaded = all(tr.has_container(f"S18_EXP{i}") for i in range(2))
+        trucks_served = all(f"S18_TK{i}" not in env.trucks for i in range(2))
+        return exports_loaded and trucks_served
+
+
+class S19_MixedFleetDispatch(TutorialScenario):
+    """2 delivery trucks (Export, unparked) + 2 pickup trucks (unparked).
+    1 train with 2 Imports + wants 2 Exports.
+
+    All four action types needed:
+      SLOT_PARKING (4 trucks)
+      IMPORT_VEHICLE (train→yard for imports, truck→yard for exports)
+      MOVE_CONTAINER→TRAIN (exports)
+      MOVE_CONTAINER→TRUCK (imports)
+    """
+    id = 19
+    name = "mixed_fleet_dispatch"
+    description = "Park 4 trucks, import/export through yard and train"
+    max_steps = 75
+
+    def setup(self, env) -> None:
+        # 2 Import containers on train → pickup trucks will want them
+        imports = []
+        for i in range(2):
+            c = _make_container(f"S19_IMP{i}", Direction.IMPORT)
+            imports.append(c)
+
+        # 2 Export containers on delivery trucks → train wants them
+        export_cids = []
+        for i in range(2):
+            c = _make_container(f"S19_EXP{i}", Direction.EXPORT)
+            export_cids.append(c.container_id)
+            tk = _make_truck(f"S19_DTK{i}", containers=[c])
+            env.trucks[tk.truck_id] = tk
+
+        tr = _make_train("S19_TR1", containers=imports, pickup_ids=export_cids)
+        _slot_train(env, tr)
+
+        # 2 pickup trucks wanting the imports
+        for i, imp in enumerate(imports):
+            tk = _make_truck(f"S19_PTK{i}", pickup_ids=[imp.container_id])
+            env.trucks[tk.truck_id] = tk
+
+    def check_success(self, env) -> bool:
+        tr = env.trains.get("S19_TR1")
+        if tr is None:
+            return False
+        exports_loaded = all(tr.has_container(f"S19_EXP{i}") for i in range(2))
+        pickups_served = all(f"S19_PTK{i}" not in env.trucks for i in range(2))
+        deliveries_done = all(f"S19_DTK{i}" not in env.trucks for i in range(2))
+        return exports_loaded and pickups_served and deliveries_done
+
+
+# ================================================================
+# Phase 9 — Stress tests (clutter + scale)
+# ================================================================
+
+_STRESS_DISTRACTORS = 12
+
+
+class S20_CrowdedYardPickup(TutorialScenario):
+    """12 distractor containers + 3 Import targets scattered across yard.
+    3 unparked pickup trucks, each wanting a different target.
+
+    Tests finding specific containers in a cluttered yard and
+    correct vehicle-to-container matching.
+    """
+    id = 20
+    name = "crowded_yard_pickup"
+    description = "Serve 3 pickup trucks from a cluttered yard"
+    max_steps = 60
+
+    def setup(self, env) -> None:
+        rng = random.Random(2026)
+        target_bays = [3, 20, 35]
+
+        # Place 3 target Import containers
+        for i, bay in enumerate(target_bays):
+            c = _make_container(f"S20_T{i}", Direction.IMPORT)
+            env.yard.add_container(c, _yard_placement(bay=bay, row=0, tier=0))
+            tk = _make_truck(f"S20_TK{i}", pickup_ids=[c.container_id])
+            env.trucks[tk.truck_id] = tk
+
+        # 12 distractor containers to create clutter
+        _place_distractors(
+            env, rng, _STRESS_DISTRACTORS, "S20",
+            exclude_bays=set(target_bays),
+        )
+
+    def check_success(self, env) -> bool:
+        return all(f"S20_TK{i}" not in env.trucks for i in range(3))
+
+
+class S21_FullMiniDay(TutorialScenario):
+    """Maximum integration complexity.
+
+    1 train with 3 Imports + wants 3 Exports.
+    3 Export containers in yard.
+    2 unparked delivery trucks (bringing 2 more Exports — only 3 needed by train).
+    3 unparked pickup trucks (wanting the Imports).
+    8 distractor containers.
+
+    Agent must orchestrate: park 5 trucks, import from train,
+    import from delivery trucks, load exports onto train, load imports
+    onto pickup trucks. Not all delivery containers go to train (surplus).
+    """
+    id = 21
+    name = "full_mini_day"
+    description = "Complete terminal day: 5 trucks, 1 train, all action types"
+    max_steps = 100
+
+    def setup(self, env) -> None:
+        rng = random.Random(42)
+
+        # 3 Import containers on train
+        imports = []
+        for i in range(3):
+            c = _make_container(f"S21_IMP{i}", Direction.IMPORT)
+            imports.append(c)
+
+        # 3 Export containers already in yard → train wants these
+        export_ids = []
+        for i in range(3):
+            c = _make_container(f"S21_EXP{i}", Direction.EXPORT)
+            bay = ANCHOR_BAY + i * 6
+            env.yard.add_container(c, _yard_placement(bay=bay, row=0, tier=0))
+            export_ids.append(c.container_id)
+
+        tr = _make_train("S21_TR1", containers=imports, pickup_ids=export_ids,
+                         num_wagons=10)
+        _slot_train(env, tr)
+
+        # 2 delivery trucks with surplus Export containers (not in train manifest)
+        for i in range(2):
+            c = _make_container(f"S21_DEXP{i}", Direction.EXPORT,
+                                departure=TUTORIAL_TIME + timedelta(days=10))
+            tk = _make_truck(f"S21_DTK{i}", containers=[c])
+            env.trucks[tk.truck_id] = tk
+
+        # 3 pickup trucks wanting imports
+        for i, imp in enumerate(imports):
+            tk = _make_truck(f"S21_PTK{i}", pickup_ids=[imp.container_id])
+            env.trucks[tk.truck_id] = tk
+
+        # Distractors for clutter
+        _place_distractors(env, rng, 8, "S21",
+                           exclude_bays={ANCHOR_BAY + i * 6 for i in range(3)})
+
+    def check_success(self, env) -> bool:
+        tr = env.trains.get("S21_TR1")
+        if tr is None:
+            return False
+        # All 3 exports loaded on train
+        exports_loaded = all(tr.has_container(f"S21_EXP{i}") for i in range(3))
+        # All 3 pickup trucks served and departed
+        pickups_served = all(f"S21_PTK{i}" not in env.trucks for i in range(3))
+        # Delivery truck containers imported to yard
+        deliveries_in_yard = all(
+            env.yard.get_container(f"S21_DEXP{i}") is not None
+            for i in range(2)
+        )
+        # Delivery trucks departed
+        deliveries_gone = all(f"S21_DTK{i}" not in env.trucks for i in range(2))
+        return exports_loaded and pickups_served and deliveries_in_yard and deliveries_gone
+
+
+# ================================================================
 # Registry
 # ================================================================
 
@@ -622,7 +938,7 @@ ALL_SCENARIOS: List[TutorialScenario] = [
     S3_YardToTruck(),
     S4_YardToTrain(),
     # Phase 2: Two-action chains
-    S5_ImportThenExport(),
+    S5_ImportAndExport(),
     S6_ParkThenImport(),
     # Phase 3: Full chains
     S7_FullChainTruck(),
@@ -630,12 +946,22 @@ ALL_SCENARIOS: List[TutorialScenario] = [
     # Phase 4: Restack + load
     S9_UnburyForTruck(),
     S10_UnburyForTrain(),
-    # Phase 5: Randomised generalization
+    # Phase 5: Randomised generalisation
     S11_RandomImportChain(),
     S12_RandomExportChain(),
     # Phase 6: Multi-step hard
     S13_MultiTruckServing(),
     S14_DeepUnbury(),
+    # Phase 7: Integration — batch operations
+    S15_MultiDeliveryPark(),
+    S16_DeliveryToTrainPipeline(),
+    # Phase 8: Integration — bidirectional train flow
+    S17_BidirectionalTrainSimple(),
+    S18_ConcurrentImportExport(),
+    S19_MixedFleetDispatch(),
+    # Phase 9: Stress tests
+    S20_CrowdedYardPickup(),
+    S21_FullMiniDay(),
 ]
 
 SCENARIO_BY_ID: Dict[int, TutorialScenario] = {s.id: s for s in ALL_SCENARIOS}

@@ -13,6 +13,7 @@ from simulation.core.facilities.railyard import OptimizedRailYard
 from simulation.core.facilities.parking import OptimizedParkingArea, ParkingSpot
 from simulation.core.enums import MoveType
 from simulation.config.operations_config import OperationsDefaults
+from simulation.utils.direction_utils import is_import
 
 
 @dataclass(frozen=True)
@@ -202,7 +203,7 @@ class TerminalLogisticsManager:
         out: List[Move] = []
 
         for container in train.get_all_containers():
-            if getattr(container, "direction", "Import") != "Import":
+            if not is_import(container):
                 continue
 
             anchors = (

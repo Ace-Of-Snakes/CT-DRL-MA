@@ -1,12 +1,12 @@
 # simulation/training/curriculum_trainer.py
 """
-Curriculum-based training for Multi-Head DQN agent.
+Curriculum-based training for Unified Spatial DQN agent.
 
 Adapted for:
-- Unified ContainerTerminalEnv (no HierarchicalEnvWrapper)
+- UnifiedContainerTerminalEnv (2-stage spatial stepping)
 - OptimizedStorageYard / OptimizedRailYard / OptimizedParkingArea
-- 8-channel split-level state encoder (C, R, S, T)
-- MultiHeadDQNAgent with spatial masks
+- 10-channel unified state encoder (C, R_uni, S, T)
+- UnifiedDQNAgent with source/dest heads
 """
 import csv
 import json
@@ -22,10 +22,10 @@ from tqdm import tqdm
 import torch
 
 from simulation.rl.multihead_dqn.config import (
-    MultiHeadDQNConfig, YardDims, CNNConfig, HeadConfig, DQNConfig,
+    MultiHeadDQNConfig, YardDims, UnifiedDims, CNNConfig, HeadConfig, DQNConfig,
 )
-from simulation.env.state_encoder import NUM_CHANNELS
-from simulation.rl.multihead_dqn.agent import MultiHeadDQNAgent
+from simulation.env.unified_state_encoder import CH
+from simulation.rl.multihead_dqn.unified_agent import UnifiedDQNAgent
 
 
 # -- Safety limits --
@@ -52,9 +52,9 @@ class CurriculumSchedule:
         return min(self.start_imports + stage * self.increment, self.max_imports)
 
 
-# 
+#
 # -- Metrics --
-# 
+#
 
 @dataclass
 class DayMetrics:
@@ -85,9 +85,9 @@ class StageMetrics:
     final_epsilon: float
 
 
-# 
+#
 # -- Logger --
-# 
+#
 
 class MetricsLogger:
     """CSV + JSON logging for training runs."""
@@ -143,12 +143,12 @@ class MetricsLogger:
             json.dump(data, f, indent=2, default=str)
 
 
-# 
+#
 # -- Trainer --
-# 
+#
 
 class CurriculumTrainer:
-    """Trains MultiHead DQN agent through curriculum stages."""
+    """Trains Unified DQN agent through curriculum stages."""
 
     def __init__(
         self,
@@ -183,7 +183,7 @@ class CurriculumTrainer:
         self.logger = MetricsLogger(str(self.output_dir / "logs"))
 
         self.env = None
-        self.agent: Optional[MultiHeadDQNAgent] = None
+        self.agent: Optional[UnifiedDQNAgent] = None
 
     def _print(self, msg: str):
         if self.verbose:
@@ -194,43 +194,45 @@ class CurriculumTrainer:
 
     def _run_tutorial_phase(self):
         """Run tutorial scenarios before curriculum stages."""
-        from simulation.training.tutorial_runner import TutorialRunner
-        
+        from simulation.training.unified_tutorial_runner import UnifiedTutorialRunner
+
         self._print("\n" + "=" * 60)
         self._print("PHASE 0: Tutorial Scenarios")
         self._print(f"Target: {self.tutorial_mastery:.0%} pass rate on all scenarios")
         self._print(f"Max epochs: {self.tutorial_epochs}")
         self._print("=" * 60)
-        
-        runner = TutorialRunner(
+
+        runner = UnifiedTutorialRunner(
             env_factory=self.env_factory,
             agent_or_config=self.agent,
             verbose=self.verbose,
         )
-        
+
         summary = runner.train_all(
             epochs=self.tutorial_epochs,
             mastery_threshold=self.tutorial_mastery,
             window_size=20,
             min_epochs=10,
-            log_every=10,
+            log_every=5,
         )
-        
+
         # Summary output
         self._print("\n" + "-" * 40)
+        cur_tier = summary.get('current_tier', '?')
+        n_tiers = summary.get('n_tiers', '?')
         if summary.get('mastered', False):
-            self._print(f"TUTORIALS MASTERED in {summary['epochs_completed']} epochs!")
+            self._print(f"ALL TIERS MASTERED in {summary['epochs_completed']} epochs!")
         else:
             self._print(f"Tutorial phase ended after {summary['epochs_completed']} epochs")
-            self._print(f"(Mastery not achieved - continuing anyway)")
-        
+            self._print(f"(Reached tier {cur_tier}/{n_tiers} - continuing anyway)")
+
         self._print("\nFinal pass rates:")
         names = summary.get('scenario_names', {})
         for sid, rate in summary['pass_rates'].items():
             name = names.get(sid, f"scenario_{sid}")
             status = "OK" if rate >= self.tutorial_mastery else "LOW"
             self._print(f"  S{sid} {name}: {rate:.0%} [{status}]")
-        
+
         ckpt = self.ckpt_dir / "tutorial_complete.pt"
         self.agent.save(str(ckpt))
         self._print(f"\nSaved tutorial checkpoint: {ckpt}")
@@ -241,7 +243,7 @@ class CurriculumTrainer:
     def train(self, start_stage: int = 0, load_checkpoint: Optional[str] = None):
         """Run full curriculum training."""
         sched = self.schedule
-        self._print("=== Curriculum Training (MultiHead DQN) ===")
+        self._print("=== Curriculum Training (Unified Spatial DQN) ===")
         self._print(f"Stages: {sched.num_stages}  |  Days/stage: {sched.days_per_stage}")
         self._print(f"Output: {self.output_dir}  |  Device: {self.agent_cfg.device}\n")
 
@@ -255,7 +257,7 @@ class CurriculumTrainer:
 
         # -- Create agent --
         self._print("Creating agent ...")
-        self.agent = MultiHeadDQNAgent(self.agent_cfg)
+        self.agent = UnifiedDQNAgent(self.agent_cfg)
         params = sum(p.numel() for p in self.agent.q_net.parameters())
         self._print(f"  Parameters: {params:,}\n")
 
@@ -362,6 +364,10 @@ class CurriculumTrainer:
             day_reward += reward
             day_moves += len(info.get("executed", []))
 
+            # Unified env puts transitions in info — caller stores them
+            for t in info.get("transitions", []):
+                self.agent.remember(t)
+
             if self.agent.replay.is_ready(self.agent_cfg.training.batch_size):
                 loss = self.agent.optimize()
                 if loss > 0:
@@ -404,27 +410,26 @@ class CurriculumTrainer:
 
     def _print_step_debug(self, step: int, moves: int, reward: float):
         env = self.env
-        containers = env.move_gen.list_moveable_containers(
-            env.trains, env.trucks, env.current_time,
-        )
-        parkings = env.move_gen.list_parking_actions(env.trucks)
+        src_mask = env.unified_encoder.get_source_mask(env.trains, env.trucks)
+        n_sources = int(src_mask.sum())
         self._print(f"    Step {step}: time={env.current_time.strftime('%H:%M')}, "
                     f"t={len(env.trains)}, tk={len(env.trucks)}, "
                     f"yard={env.yard.container_count}, "
-                    f"pool=[{len(containers)}c,{len(parkings)}p], "
+                    f"sources={n_sources}, "
                     f"mv={moves}, R={reward:.2f}")
 
 
-# 
+#
 # -- Environment factory --
-# 
+#
 
 def create_env_factory(
     rows: int = 5, bays: int = 58, tiers: int = 5,
-    tracks: int = 7, export_ratio: float = 0.75,
+    tracks: int = 7, split_factor: int = 20,
+    export_ratio: float = 0.75,
     max_retries: int = 10, no_destination_penalty: float = -1.0,
 ):
-    """Return a callable that creates a unified ContainerTerminalEnv."""
+    """Return a callable that creates a UnifiedContainerTerminalEnv."""
     def factory():
         from simulation.core.facilities.yard import OptimizedStorageYard
         from simulation.core.facilities.railyard import OptimizedRailYard
@@ -438,14 +443,19 @@ def create_env_factory(
         from simulation.planning.driving_plan_parser import DrivingPlanParser
         from simulation.planning.train_scheduler import TrainScheduler
         from simulation.planning.train_loader import TrainLoader
-        from simulation.env.env import ContainerTerminalEnv
+        from simulation.env.unified_env import UnifiedContainerTerminalEnv
         from simulation.config.yard_config import YardZoneConfig
+
+        sf = split_factor or BAY_SPLIT_FACTOR
+        dims = UnifiedDims(
+            n_yard_rows=rows, n_bays=bays, split_factor=sf, n_tiers=tiers,
+        )
 
         coordinates = YardZoneConfig.generate_special_coordinates(n_rows=rows, n_bays=bays)
         yard = OptimizedStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers,
                                     coordinates=coordinates, validate=False)
         rail = OptimizedRailYard(n_tracks=tracks)
-        parking = OptimizedParkingArea(n_bays=bays, split_factor=BAY_SPLIT_FACTOR)
+        parking = OptimizedParkingArea(n_bays=bays, split_factor=sf)
 
         container_factory = ContainerFactory()
         truck_factory = TruckFactory()
@@ -458,16 +468,18 @@ def create_env_factory(
                                export_per_import=export_ratio, daily_train_import_cap=20)
         tlm = TerminalLogisticsManager(yard, rail, parking)
 
-        return ContainerTerminalEnv(
+        return UnifiedContainerTerminalEnv(
             yard=yard, rail=rail, parking=parking, tlm=tlm, lm=lm,
-            num_tracks=tracks, step_minutes=5, auto_park=False,
+            num_tracks=tracks, step_minutes=5,
             max_retries=max_retries, no_destination_penalty=no_destination_penalty,
+            dims=dims,
         )
     return factory
 
 
 def build_agent_config(
     rows: int = 5, bays: int = 58, tiers: int = 5, split_factor: int = 20,
+    tracks: int = 7,
 ) -> MultiHeadDQNConfig:
     """Build a MultiHeadDQNConfig for the given yard geometry."""
     yard = YardDims(
@@ -477,21 +489,29 @@ def build_agent_config(
         n_bays=bays,
         split_factor=split_factor,
     )
+    unified = UnifiedDims(
+        n_yard_rows=rows,
+        n_bays=bays,
+        split_factor=split_factor,
+        n_tiers=tiers,
+        n_tracks=tracks,
+    )
     return MultiHeadDQNConfig(
         yard=yard,
-        cnn=CNNConfig(n_state_channels=NUM_CHANNELS),
+        unified=unified,
+        cnn=CNNConfig(n_state_channels=CH.NUM_CHANNELS),
         heads=HeadConfig(),
         training=DQNConfig(),
     )
 
 
-# 
+#
 # -- CLI --
-# 
+#
 
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="Curriculum training - MultiHead DQN")
+    p = argparse.ArgumentParser(description="Curriculum training - Unified Spatial DQN")
     p.add_argument("--output-dir", type=str, default="runs/curriculum")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--start-stage", type=int, default=0)
@@ -507,7 +527,7 @@ def main():
     p.add_argument("--increment", type=int, default=20)
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--skip-tutorials", action="store_true", help="Skip tutorial phase")
-    p.add_argument("--tutorial-epochs", type=int, default=500, help="Max tutorial epochs (runs until mastery)")
+    p.add_argument("--tutorial-epochs", type=int, default=500, help="Max tutorial epochs")
     p.add_argument("--tutorial-mastery", type=float, default=0.9)
     args = p.parse_args()
 
@@ -517,10 +537,11 @@ def main():
     )
     agent_cfg = build_agent_config(
         rows=args.rows, bays=args.bays, tiers=args.tiers,
-        split_factor=args.split_factor,
+        split_factor=args.split_factor, tracks=args.tracks,
     )
     env_factory = create_env_factory(
-        rows=args.rows, bays=args.bays, tiers=args.tiers, tracks=args.tracks,
+        rows=args.rows, bays=args.bays, tiers=args.tiers,
+        tracks=args.tracks, split_factor=args.split_factor,
     )
 
     trainer = CurriculumTrainer(

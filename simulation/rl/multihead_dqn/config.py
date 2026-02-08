@@ -1,38 +1,145 @@
 # multihead_dqn/config.py
-"""Configuration for Factored-CNN Multi-Head DQN agent."""
+"""Configuration for Unified Spatial DQN agent."""
 from dataclasses import dataclass, field
 from typing import Tuple
 from enum import IntEnum
 import torch
 
 
+# ── Legacy enums (kept for backward compat during migration) ──────────────
+
 class ActionType(IntEnum):
-    """Top-level action types."""
+    """Top-level action types (DEPRECATED — unified arch uses spatial coords)."""
     MOVE_CONTAINER = 0
     SLOT_PARKING = 1
     IMPORT_VEHICLE = 2
 
 
 class DestinationType(IntEnum):
-    """Destination types for container moves."""
+    """Destination types (DEPRECATED — unified arch infers from region)."""
     YARD = 0
     TRAIN = 1
     TRUCK = 2
 
 
+# ── Unified spatial dimensions ────────────────────────────────────────────
+
+@dataclass
+class UnifiedDims:
+    """Dimensions for the unified spatial state matrix.
+
+    Layout (row order):
+        Rail tracks  → Parking row → Yard rows → Queue rows
+
+    The CNN (3,1,3) kernel bridges adjacent regions:
+        Rail ↔ Parking ↔ Yard ↔ Queue
+    """
+    n_tracks: int = 7
+    n_parking_rows: int = 1
+    n_yard_rows: int = 5
+    n_queue_rows: int = 2
+    n_bays: int = 58
+    split_factor: int = 20
+    n_tiers: int = 5
+
+    # ── Derived dimensions ────────────────────────────────────────────
+
+    @property
+    def R_unified(self) -> int:
+        """Total rows in unified state matrix."""
+        return self.n_tracks + self.n_parking_rows + self.n_yard_rows + self.n_queue_rows
+
+    @property
+    def n_splits(self) -> int:
+        """Total split positions along bay axis."""
+        return self.n_bays * self.split_factor
+
+    @property
+    def spatial_shape(self) -> Tuple[int, int, int]:
+        """(R, S, T) shape of the unified state matrix."""
+        return (self.R_unified, self.n_splits, self.n_tiers)
+
+    # ── Region row ranges ─────────────────────────────────────────────
+
+    @property
+    def rail_row_start(self) -> int:
+        return 0
+
+    @property
+    def rail_row_end(self) -> int:
+        """Exclusive end of rail rows."""
+        return self.n_tracks
+
+    @property
+    def parking_row_start(self) -> int:
+        return self.n_tracks
+
+    @property
+    def parking_row_end(self) -> int:
+        """Exclusive end of parking rows."""
+        return self.n_tracks + self.n_parking_rows
+
+    @property
+    def yard_row_start(self) -> int:
+        return self.n_tracks + self.n_parking_rows
+
+    @property
+    def yard_row_end(self) -> int:
+        """Exclusive end of yard rows."""
+        return self.n_tracks + self.n_parking_rows + self.n_yard_rows
+
+    @property
+    def queue_row_start(self) -> int:
+        return self.n_tracks + self.n_parking_rows + self.n_yard_rows
+
+    @property
+    def queue_row_end(self) -> int:
+        """Exclusive end of queue rows."""
+        return self.R_unified
+
+    # ── Convenience ranges ────────────────────────────────────────────
+
+    @property
+    def rail_rows(self) -> range:
+        return range(self.rail_row_start, self.rail_row_end)
+
+    @property
+    def parking_rows(self) -> range:
+        return range(self.parking_row_start, self.parking_row_end)
+
+    @property
+    def yard_rows(self) -> range:
+        return range(self.yard_row_start, self.yard_row_end)
+
+    @property
+    def queue_rows(self) -> range:
+        return range(self.queue_row_start, self.queue_row_end)
+
+    def region_of(self, row: int) -> str:
+        """Return region name for a given row index."""
+        if row < self.rail_row_end:
+            return "RAIL"
+        if row < self.parking_row_end:
+            return "PARKING"
+        if row < self.yard_row_end:
+            return "YARD"
+        return "QUEUE"
+
+
+# ── Legacy YardDims (kept for backward compat) ───────────────────────────
+
 @dataclass
 class YardDims:
-    """Yard dimensions."""
+    """Yard dimensions (DEPRECATED — use UnifiedDims)."""
     n_rows: int
     n_splits: int
     n_tiers: int
     n_bays: int
-    split_factor: int  # splits per bay (typically 20)
-    n_parking_rows: int = 1  # extra rows appended for parking encoding
+    split_factor: int
+    n_parking_rows: int = 1
 
     @property
     def n_state_rows(self) -> int:
-        """Total rows in state tensor (yard + parking)."""
         return self.n_rows + self.n_parking_rows
 
     @property
@@ -44,53 +151,51 @@ class YardDims:
         return self.n_rows * self.n_splits * self.n_tiers
 
 
+# ── CNN backbone config ──────────────────────────────────────────────────
+
 @dataclass
 class CNNConfig:
     """Factored CNN backbone configuration.
 
     Kernel design:
-      (1, container_kernel, 1) along S Ã¢â‚¬â€ matches container shape
-      (cross_kernel, 1, cross_kernel) across RÃƒâ€”T Ã¢â‚¬â€ stacking context
-      (1, refine_kernel, 1) along S Ã¢â‚¬â€ neighborhood awareness
-
-    Total receptive field:
-      S Ã¢â€°Ë† 57 splits (~3 bays),  R = 3 rows,  T = 3 tiers
+      (1, container_kernel, 1) along S → container profile extraction
+      (cross_kernel, 1, cross_kernel) across R×T → stacking + cross-region
+      (1, refine_kernel, 1) along S → neighbourhood refinement
     """
-    n_state_channels: int = 12
-    stage1_channels: int = 32        # first conv output channels
-    feat_channels: int = 64          # backbone output channels
-    global_dim: int = 128            # after occupied-only pooling
-    s_stride: int = 4                # downsample factor along splits
-    gn_groups: int = 8               # GroupNorm groups
-    # Factored kernel sizes
-    container_kernel: int = 21       # (1, k, 1) Ã¢â‚¬â€ 20ft container = 20 splits
-    cross_kernel: int = 3            # (r, 1, t) Ã¢â‚¬â€ stacking / cross-row
-    refine_kernel: int = 5           # (1, k, 1) Ã¢â‚¬â€ neighborhood
+    n_state_channels: int = 10   # Unified: 10 channels (down from 12)
+    stage1_channels: int = 32
+    feat_channels: int = 64
+    global_dim: int = 128
+    s_stride: int = 4
+    gn_groups: int = 8
+    container_kernel: int = 21   # (1, k, 1) — 20ft = 20 splits
+    cross_kernel: int = 3        # (r, 1, t) — stacking / cross-row
+    refine_kernel: int = 5       # (1, k, 1) — neighbourhood
 
     @property
     def container_pad(self) -> int:
-        """Symmetric padding for container-axis kernels."""
         return self.container_kernel // 2
 
     @property
     def cross_pad(self) -> int:
-        """Symmetric padding for cross-row/tier kernels."""
         return self.cross_kernel // 2
 
     @property
     def refine_pad(self) -> int:
-        """Symmetric padding for refinement kernel."""
         return self.refine_kernel // 2
 
+
+# ── Head config ──────────────────────────────────────────────────────────
 
 @dataclass
 class HeadConfig:
     """Configuration for decision heads."""
-    hidden: int = 64                 # hidden size for MLP heads
-    vehicle_feat_dim: int = 8        # external vehicle feature dim
-    dueling: bool = True             # dueling V+A for fixed-size heads
-    proximity_bays: int = 3          # OperationsDefaults.PROXIMITY_SEARCH_BAYS
+    hidden: int = 64
+    dueling: bool = True
+    proximity_bays: int = 3
 
+
+# ── Training config ──────────────────────────────────────────────────────
 
 @dataclass
 class DQNConfig:
@@ -98,16 +203,14 @@ class DQNConfig:
     gamma: float = 0.99
     lr: float = 3e-4
     batch_size: int = 32
-    replay_size: int = 2_000  # ~3.3GB at 1.67MB/transition
+    replay_size: int = 2_000
     target_tau: float = 0.005
     grad_clip: float = 1.0
 
-    # Epsilon (curriculum stages, step-based)
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 50_000
 
-    # Tutorial epsilon (epoch-based, fast decay)
     tutorial_epsilon_start: float = 0.9
     tutorial_epsilon_end: float = 0.05
     tutorial_epsilon_epochs: int = 80
@@ -115,10 +218,7 @@ class DQNConfig:
     double_dqn: bool = True
     n_step: int = 3
 
-    # Dest-type exploration floor (extra robustness for rare vehicle destinations)
-    dest_epsilon_floor: float = 0.15
-
-    # Auxiliary dest_type loss weight
+    # Dest head auxiliary loss weight (reward prediction, no bootstrap)
     dest_aux_weight: float = 0.5
 
     # Prioritized replay
@@ -128,10 +228,13 @@ class DQNConfig:
     per_beta_frames: int = 100_000
 
 
+# ── Top-level agent config ───────────────────────────────────────────────
+
 @dataclass
 class MultiHeadDQNConfig:
-    """Complete agent configuration."""
+    """Complete agent configuration (unified spatial version)."""
     yard: YardDims = None
+    unified: UnifiedDims = field(default_factory=UnifiedDims)
     cnn: CNNConfig = field(default_factory=CNNConfig)
     heads: HeadConfig = field(default_factory=HeadConfig)
     training: DQNConfig = field(default_factory=DQNConfig)
@@ -140,13 +243,14 @@ class MultiHeadDQNConfig:
     def __post_init__(self):
         if self.yard is None:
             raise ValueError("YardDims must be provided")
-        if self.yard.n_splits % self.cnn.s_stride != 0:
+        n_splits = self.unified.n_splits
+        if n_splits % self.cnn.s_stride != 0:
             raise ValueError(
-                f"n_splits ({self.yard.n_splits}) must be divisible by "
+                f"n_splits ({n_splits}) must be divisible by "
                 f"s_stride ({self.cnn.s_stride})"
             )
 
     @property
     def s_down(self) -> int:
         """Downsampled split count after CNN stride."""
-        return self.yard.n_splits // self.cnn.s_stride
+        return self.unified.n_splits // self.cnn.s_stride
