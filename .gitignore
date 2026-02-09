@@ -202,3 +202,20 @@ precomputed/
 data/
 deprecated_components/
 runs/
+
+# latex
+latex/*
+
+# keep relevant files type
+!latex/*.tex
+!latex/*.pdf
+
+# except the directory from exclude
+!latex/chapters/
+# !latex/figures/
+
+# include directory files in exclude
+latex/chapters/*
+
+# excuse some file endings
+!latex/chapters/*.tex
