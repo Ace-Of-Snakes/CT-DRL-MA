@@ -371,33 +371,39 @@ class TestResolveDestSplit:
 
 
 class TestSourceCodeStructure:
-    """Verify agent file structure."""
+    """Verify agent file structure (unified_agent.py + base_agent.py)."""
+
+    def _read_agent_sources(self):
+        """Read both unified_agent.py and base_agent.py source code."""
+        agent_dir = os.path.dirname(__file__)
+        base_dir = os.path.dirname(agent_dir)  # simulation/rl/
+        with open(os.path.join(agent_dir, "unified_agent.py")) as f:
+            unified_code = f.read()
+        with open(os.path.join(base_dir, "base_agent.py")) as f:
+            base_code = f.read()
+        return unified_code + "\n" + base_code
 
     def test_no_old_action_types(self):
-        with open(os.path.join(os.path.dirname(__file__), "unified_agent.py")) as f:
-            code = f.read()
+        code = self._read_agent_sources()
         # Should not DEFINE or USE old head classes / action types
         assert "class ActionTypeHead" not in code
         assert "AgentActionType.SLOT_PARKING" not in code
         assert "AgentActionType.IMPORT_VEHICLE" not in code
 
     def test_has_key_components(self):
-        with open(os.path.join(os.path.dirname(__file__), "unified_agent.py")) as f:
-            code = f.read()
+        code = self._read_agent_sources()
         assert "class UnifiedDQNAgent" in code
         assert "class UnifiedActionResult" in code
         assert "resolve_move_type" in code
         assert "DestMaskFn" in code
 
     def test_two_stage_selection(self):
-        with open(os.path.join(os.path.dirname(__file__), "unified_agent.py")) as f:
-            code = f.read()
+        code = self._read_agent_sources()
         assert "Stage 1: Source selection" in code
         assert "Stage 2: Destination selection" in code
 
     def test_td_plus_aux_training(self):
-        with open(os.path.join(os.path.dirname(__file__), "unified_agent.py")) as f:
-            code = f.read()
+        code = self._read_agent_sources()
         assert "Source Q-values at taken positions" in code
         assert "Auxiliary dest loss: reward prediction" in code
 

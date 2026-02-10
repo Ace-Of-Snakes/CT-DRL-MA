@@ -15,7 +15,11 @@ pandas = "^3.0.0"
 scipy = "^1.17.0"
 scikit-learn = "^1.8.0"
 numba = "^0.63.1"
+jupyter = "^1.1.1"
 
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^7.2.0"
 
 [build-system]
 requires = ["poetry-core"]

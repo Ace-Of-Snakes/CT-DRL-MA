@@ -227,6 +227,27 @@ class DQNConfig:
     per_beta_start: float = 0.4
     per_beta_frames: int = 100_000
 
+    # ── Variant-specific hyperparameters ─────────────────────────
+    # Munchausen DQN
+    munchausen_alpha: float = 0.9
+    munchausen_tau: float = 0.03
+    munchausen_clip: float = -1.0
+
+    # QR-DQN
+    n_quantiles: int = 32
+
+    # IQN
+    iqn_n_quantiles_train: int = 32
+    iqn_n_quantiles_eval: int = 32
+    iqn_embedding_dim: int = 64
+
+    # NoisyNet
+    noisy_sigma0: float = 0.5
+
+    # Spectral / Layer norm
+    use_spectral_norm: bool = False
+    use_layer_norm: bool = False
+
 
 # ── Top-level agent config ───────────────────────────────────────────────
 

@@ -249,17 +249,28 @@ class UnifiedQNetwork(nn.Module):
 
     Pipeline:
       State (C, R_uni, S, T)
-        → FactoredCNNBackbone → feat_map (F, R_uni, S_down, T)
-        → OccupiedPooling    → global_feat (G)
-        → SourceHead          → Q(source)  [masked by source_mask]
-        → extract source_feat → (F,)
-        → UnifiedDestHead     → Q(dest)    [masked by dest_mask]
+        → CNN Backbone (swappable) → feat_map (F, R_uni, S_down, T)
+        → OccupiedPooling          → global_feat (G)
+        → Source Head (swappable)   → Q(source)  [masked by source_mask]
+        → extract source_feat      → (F,)
+        → Dest Head (swappable)    → Q(dest)    [masked by dest_mask]
+
+    All three components (backbone, source_head, dest_head) are swappable
+    via constructor injection. Defaults to standard components if not provided.
 
     Two Q-values per transition: Q_source and Q_dest.
     Move type inferred from coordinates, not predicted.
     """
 
-    def __init__(self, dims: UnifiedDims, cnn_cfg: CNNConfig, head_cfg: HeadConfig):
+    def __init__(
+        self,
+        dims: UnifiedDims,
+        cnn_cfg: CNNConfig,
+        head_cfg: HeadConfig,
+        backbone: nn.Module = None,
+        source_head: nn.Module = None,
+        dest_head: nn.Module = None,
+    ):
         super().__init__()
         self.dims = dims
         self.cnn_cfg = cnn_cfg
@@ -267,13 +278,11 @@ class UnifiedQNetwork(nn.Module):
         Fc = cnn_cfg.feat_channels
         G = cnn_cfg.global_dim
 
-        # Backbone + pooling
-        self.backbone = FactoredCNNBackbone(cnn_cfg)
+        # Swappable components (defaults = baseline)
+        self.backbone = backbone if backbone is not None else FactoredCNNBackbone(cnn_cfg)
         self.pool = OccupiedPooling(Fc, G)
-
-        # 2-head decision architecture
-        self.source_head = SourceHead(Fc)
-        self.dest_head = UnifiedDestHead(Fc, G)
+        self.source_head = source_head if source_head is not None else SourceHead(Fc)
+        self.dest_head = dest_head if dest_head is not None else UnifiedDestHead(Fc, G)
 
     # ── Encoding ──────────────────────────────────────────────────────
 
@@ -310,8 +319,16 @@ class UnifiedQNetwork(nn.Module):
 
     def q_source(
         self, feat_map: torch.Tensor, source_mask: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
-        """Q-values for source selection."""
+        """Q-values for source selection.  (B, N_actions).
+
+        Distributional heads (QR-DQN, IQN) expose a ``q_mean`` method that
+        returns the expected Q-values.  If the head has one we call it;
+        otherwise the head's ``forward`` already returns the right shape.
+        """
+        if hasattr(self.source_head, "q_mean"):
+            return self.source_head.q_mean(feat_map, source_mask, **kwargs)
         return self.source_head(feat_map, source_mask)
 
     def q_dest(
@@ -320,8 +337,13 @@ class UnifiedQNetwork(nn.Module):
         global_feat: torch.Tensor,
         source_feat: torch.Tensor,
         dest_mask: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
-        """Q-values for destination selection."""
+        """Q-values for destination selection.  (B, N_actions)."""
+        if hasattr(self.dest_head, "q_mean"):
+            return self.dest_head.q_mean(
+                feat_map, global_feat, source_feat, dest_mask, **kwargs,
+            )
         return self.dest_head(feat_map, global_feat, source_feat, dest_mask)
 
     # ── Param counting ────────────────────────────────────────────────

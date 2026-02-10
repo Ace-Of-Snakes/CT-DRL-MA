@@ -24,12 +24,14 @@ EPSILON_TOLERANCE: Final[float] = 1e-3  # For floating point comparisons
 DEFAULT_BUFFER_TIME_HOURS: Final[int] = 4
 
 # === TERMINAL LAYOUT ===
+import os
 import pandas as pd
 import numpy as np
 # this is going to be a funcitonal draft which is to be replaced by a more sophisticated
 # implementation in the future
 
-df = pd.read_csv("simulation/data/container_data.csv")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
+df = pd.read_csv(os.path.join(_DATA_DIR, "container_data.csv"))
 
 BAY_LENGTH_FT = 40
 '''A bay is the basic unit of storage in a block. It is 40 feet long.'''

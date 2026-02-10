@@ -1,7 +1,10 @@
 """Configuration for yard storage and container placement."""
+import os
 from typing import Final, Dict, List, Tuple
 import numpy as np
 import pandas as pd
+
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
 class YardPhysicalConfig:
@@ -19,11 +22,12 @@ class ContainerLengthConfig:
     _length_to_subbays: Dict[int, int] = None
     
     @classmethod
-    def load_from_csv(cls, csv_path: str = "simulation/data/container_data.csv"):
+    def load_from_csv(cls, csv_path: str = None):
         """Load container length data."""
         if cls._lengths_ft is not None:
             return
-        
+        if csv_path is None:
+            csv_path = os.path.join(_DATA_DIR, "container_data.csv")
         df = pd.read_csv(csv_path)
         cls._lengths_ft = sorted(df["LENGTH_IN_FEET"].unique().tolist())
         cls._length_to_subbays = {

@@ -2,12 +2,15 @@
 from pathlib import Path
 from typing import Final
 
+# Resolve relative to this file → simulation/config/../data = simulation/data
+_SIMULATION_DIR = Path(__file__).resolve().parent.parent
+
 
 class DataPaths:
     """Paths to input data files."""
-    
+
     # Base directories
-    BASE_DIR: Final[Path] = Path("simulation/data")
+    BASE_DIR: Final[Path] = _SIMULATION_DIR / "data"
     MODELS_DIR: Final[Path] = BASE_DIR / "models"
     
     # Container data
