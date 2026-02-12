@@ -40,14 +40,15 @@ class NoisyLinear(nn.Module):
         self.bias_sigma.data.fill_(self.sigma0 / math.sqrt(self.in_features))
 
     def reset_noise(self):
-        eps_in = self._scale_noise(self.in_features)
-        eps_out = self._scale_noise(self.out_features)
+        device = self.weight_epsilon.device
+        eps_in = self._scale_noise(self.in_features, device)
+        eps_out = self._scale_noise(self.out_features, device)
         self.weight_epsilon.copy_(eps_out.outer(eps_in))
         self.bias_epsilon.copy_(eps_out)
 
     @staticmethod
-    def _scale_noise(size: int) -> torch.Tensor:
-        x = torch.randn(size)
+    def _scale_noise(size: int, device: torch.device = None) -> torch.Tensor:
+        x = torch.randn(size, device=device)
         return x.sign() * x.abs().sqrt()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

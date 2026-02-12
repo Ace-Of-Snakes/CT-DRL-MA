@@ -99,7 +99,7 @@ class IQNSourceHead(nn.Module):
         return q_flat, tau
 
     def q_mean(
-        self, feat_map: torch.Tensor, source_mask: torch.Tensor, n_tau: int = 8,
+        self, feat_map: torch.Tensor, source_mask: torch.Tensor, n_tau: int = 32,
     ) -> torch.Tensor:
         """Mean over quantiles for action selection. (B, N_actions)."""
         q_all, _ = self.forward(feat_map, source_mask, n_tau=n_tau)
@@ -166,7 +166,7 @@ class IQNDestHead(nn.Module):
         global_feat: torch.Tensor,
         source_feat: torch.Tensor,
         dest_mask: torch.Tensor,
-        n_tau: int = 8,
+        n_tau: int = 32,
     ) -> torch.Tensor:
         q_all, _ = self.forward(
             feat_map, global_feat, source_feat, dest_mask, n_tau=n_tau,

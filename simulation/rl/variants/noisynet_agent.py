@@ -105,7 +105,14 @@ class NoisyNetDQNAgent(BaseSpatialDQNAgent):
             return int(random.choice(valid))
         return int(q_flat.argmax().item())
 
+    def _pre_act_hook(self):
+        """Re-sample noise before each action for fresh exploration."""
+        for m in self.q_net.modules():
+            if isinstance(m, NoisyLinear):
+                m.reset_noise()
+
     def _post_optimize_hook(self):
+        """Re-sample noise on both networks after each optimization step."""
         for m in self.q_net.modules():
             if isinstance(m, NoisyLinear):
                 m.reset_noise()

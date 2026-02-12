@@ -140,8 +140,6 @@ class QRDQNAgent(BaseSpatialDQNAgent):
 
             # Action selection from mean Q-values (Double DQN)
             if cfg.double_dqn:
-                # q_source() calls q_mean() automatically for quantile heads
-                q_mean_online = self.q_net.q_source(encoded.feat_map, src_mask_batch)
                 online_next_enc = self.q_net.encode_state(next_states_t)
                 q_mean_next = self.q_net.q_source(
                     online_next_enc.feat_map, next_src_mask,

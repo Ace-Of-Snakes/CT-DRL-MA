@@ -162,6 +162,10 @@ class BaseSpatialDQNAgent(ABC):
             return int(random.choice(valid))
         return int(q_flat.argmax().item())
 
+    def _pre_act_hook(self):
+        """Called at the start of each act() step. Override for noise reset etc."""
+        pass
+
     def _post_optimize_hook(self):
         """Called after each optimize() step. Override for noise reset etc."""
         pass
@@ -175,6 +179,13 @@ class BaseSpatialDQNAgent(ABC):
         tau = self.cfg.training.target_tau
         for tp, op in zip(self.target_net.parameters(), self.q_net.parameters()):
             tp.data.mul_(1 - tau).add_(op.data, alpha=tau)
+        # Sync non-parameter buffers (e.g. spectral norm weight_u/weight_v)
+        # so the target network's spectral norm estimates stay current.
+        for (name_t, buf_t), (name_o, buf_o) in zip(
+            self.target_net.named_buffers(),
+            self.q_net.named_buffers(),
+        ):
+            buf_t.data.copy_(buf_o.data)
 
     # ── Epsilon ─────────────────────────────────────────────────────
 
@@ -260,6 +271,7 @@ class BaseSpatialDQNAgent(ABC):
     ) -> UnifiedActionResult:
         self.step_count += 1
         eps = epsilon if epsilon is not None else self._get_epsilon()
+        self._pre_act_hook()
 
         if not source_mask.any():
             return UnifiedActionResult()
