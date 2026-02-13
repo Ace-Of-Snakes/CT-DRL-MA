@@ -12,6 +12,7 @@ from simulation.rl.variants.noisynet_agent import NoisyNetDQNAgent
 from simulation.rl.variants.dueling_agent import DuelingDQNAgent
 from simulation.rl.variants.qrdqn_agent import QRDQNAgent
 from simulation.rl.variants.iqn_agent import IQNAgent
+from simulation.rl.variants.kitchen_sink_agent import KitchenSinkDQNAgent
 
 __all__ = [
     "MunchausenDQNAgent",
@@ -20,4 +21,5 @@ __all__ = [
     "DuelingDQNAgent",
     "QRDQNAgent",
     "IQNAgent",
+    "KitchenSinkDQNAgent",
 ]

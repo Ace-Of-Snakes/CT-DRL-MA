@@ -27,7 +27,7 @@ from simulation.rl.multihead_dqn.config import CNNConfig
 
 # ── Backbone class registry (lazy to avoid circular imports) ────────────
 
-BACKBONE_VARIANTS = ["baseline", "wider", "deeper", "residual", "narrow_deep"]
+BACKBONE_VARIANTS = ["baseline", "wider", "deeper", "residual", "narrow_deep", "kitchen_sink"]
 
 _BACKBONE_CLASSES = None
 
@@ -41,6 +41,7 @@ def _get_backbone_classes():
         from simulation.rl.variants.backbones.deeper_backbone import DeeperCNNBackbone
         from simulation.rl.variants.backbones.residual_backbone import ResidualCNNBackbone
         from simulation.rl.variants.backbones.narrow_deep_backbone import NarrowDeepCNNBackbone
+        from simulation.rl.variants.backbones.kitchen_sink_backbone import KitchenSinkCNNBackbone
 
         _BACKBONE_CLASSES = {
             "baseline": FactoredCNNBackbone,
@@ -48,6 +49,7 @@ def _get_backbone_classes():
             "deeper": DeeperCNNBackbone,
             "residual": ResidualCNNBackbone,
             "narrow_deep": NarrowDeepCNNBackbone,
+            "kitchen_sink": KitchenSinkCNNBackbone,
         }
     return _BACKBONE_CLASSES
 
@@ -108,11 +110,12 @@ def build_backbone(
     Args:
         cnn_cfg: CNNConfig (use get_cnn_config() to adjust channels first).
         variant: Architecture variant — one of:
-            'baseline'    — 4-layer factored CNN (default)
-            'wider'       — same 4 layers, 2× channel width
-            'deeper'      — 5th conv layer (2nd cross-region pass)
-            'residual'    — skip connections around conv2+conv3
-            'narrow_deep' — half channels, 6 layers
+            'baseline'      — 4-layer factored CNN (default)
+            'wider'         — same 4 layers, 2× channel width
+            'deeper'        — 5th conv layer (2nd cross-region pass)
+            'residual'      — skip connections around conv2+conv3
+            'narrow_deep'   — half channels, 6 layers
+            'kitchen_sink'  — deeper + residual (5 layers with skips)
         spectral_norm: If True, wrap all Conv3d layers with spectral norm.
 
     Returns:

@@ -33,6 +33,7 @@ DQN_ALGORITHMS = [
     "dueling",
     "qrdqn",
     "iqn",
+    "kitchen_sink",
 ]
 
 
@@ -46,6 +47,7 @@ def _lazy_registry() -> Dict[str, Type[BaseSpatialDQNAgent]]:
         DuelingDQNAgent,
         QRDQNAgent,
         IQNAgent,
+        KitchenSinkDQNAgent,
     )
     return {
         "baseline": UnifiedDQNAgent,
@@ -55,6 +57,7 @@ def _lazy_registry() -> Dict[str, Type[BaseSpatialDQNAgent]]:
         "dueling": DuelingDQNAgent,
         "qrdqn": QRDQNAgent,
         "iqn": IQNAgent,
+        "kitchen_sink": KitchenSinkDQNAgent,
     }
 
 
@@ -120,7 +123,8 @@ def create_agent(
 
     Args:
         variant: DQN algorithm — one of 'baseline', 'munchausen',
-                 'spectral_norm', 'noisynet', 'dueling', 'qrdqn', 'iqn'.
+                 'spectral_norm', 'noisynet', 'dueling', 'qrdqn', 'iqn',
+                 'kitchen_sink'.
         cfg: MultiHeadDQNConfig instance.
         backbone_variant: CNN backbone architecture — one of 'baseline',
                           'wider', 'deeper', 'residual', 'narrow_deep'.
