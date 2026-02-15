@@ -219,3 +219,5 @@ latex/chapters/*
 
 # excuse some file endings
 !latex/chapters/*.tex
+
+.claude/
