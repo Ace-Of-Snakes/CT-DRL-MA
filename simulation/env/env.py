@@ -32,9 +32,8 @@ from simulation.env.reward_engine import RewardEngine
 from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
 from simulation.operations.crane_movements import TerminalRMGC
 
-# -- Planning & analytics -----------------------------------
+# -- Planning -----------------------------------------------
 from simulation.planning.logistics_manager import LogisticsManager, DayPlan
-from simulation.analytics.stats_tracker import StatsTracker
 
 # -- Config & enums -----------------------------------------
 from simulation.core.enums import MoveType, TruckStatus
@@ -86,7 +85,6 @@ class ContainerTerminalEnv:
         step_minutes: int = DEFAULT_STEP_MINUTES,
         overflow_penalty: float = -500.0,
         num_cranes: int = CraneDefaults.NUM_CRANES,
-        stats: Optional[StatsTracker] = None,
         auto_park: bool = False,
         max_retries: int = 1,
         no_destination_penalty: float = -1.0,
@@ -101,7 +99,6 @@ class ContainerTerminalEnv:
         self.step_minutes = step_minutes
         self.overflow_penalty = overflow_penalty
         self.auto_park = bool(auto_park)
-        self.stats = stats
 
         # -- Stepping config ----------------------------------------
         self.max_retries = max_retries
@@ -248,8 +245,6 @@ class ContainerTerminalEnv:
                 st.train.arrival_time = arr_dt
                 st.train.departure_time = dep_dt
                 self.trains[train_id] = st.train
-                if self.stats:
-                    self.stats.on_train_arrival(st.train)
 
             still.append(st)
         self._scheduled_trains = still
@@ -264,8 +259,6 @@ class ContainerTerminalEnv:
                 truck.status = TruckStatus.WAITING
                 self.trucks[truck.truck_id] = truck
                 self._admitted_truck_ids.add(truck.truck_id)
-                if self.stats:
-                    self.stats.on_truck_arrival(truck)
 
     def _admit_arrivals_and_departures(self) -> List[Tuple[str, int]]:
         """Handle arrivals and train departures. Returns [(train_id, leftover_count)]."""
@@ -294,8 +287,6 @@ class ContainerTerminalEnv:
             train = self._departed_cache.pop(train_id, None)
             if train:
                 reward += self.reward_engine.on_train_departure(train)
-                if self.stats:
-                    self.stats.on_train_departure(train_id, _leftover)
         self._update_train_heat()
         return reward
 
@@ -316,8 +307,6 @@ class ContainerTerminalEnv:
                 if truck.arrival_time:
                     wait_min = (truck.departure_time - truck.arrival_time).total_seconds() / 60.0
                 events.append({"truck_id": truck_id, "wait_min": wait_min})
-                if self.stats:
-                    self.stats.on_truck_departure(truck=truck, wait_minutes=wait_min)
                 if self.parking:
                     self.parking.release(truck)
                 to_remove.append(truck_id)
