@@ -40,7 +40,7 @@ class CurriculumSchedule:
     start_imports: int = 20
     increment: int = 20
     max_imports: int = 220
-    days_per_stage: int = 365
+    days_per_stage: int = 7
     epsilon_reset_per_stage: bool = True
     log_interval_days: int = 10
 
@@ -161,6 +161,7 @@ class CurriculumTrainer:
         skip_tutorials: bool = False,
         tutorial_epochs: int = 500,
         tutorial_mastery: float = 0.9,
+        agent=None,
     ):
         self.env_factory = env_factory
         self.schedule = schedule
@@ -183,7 +184,7 @@ class CurriculumTrainer:
         self.logger = MetricsLogger(str(self.output_dir / "logs"))
 
         self.env = None
-        self.agent: Optional[UnifiedDQNAgent] = None
+        self.agent = agent
 
     def _print(self, msg: str):
         if self.verbose:
@@ -255,9 +256,12 @@ class CurriculumTrainer:
                      f"(sf={yard.split_factor}, splits={yard.total_splits})")
         self._print(f"  Cranes: {self.env.num_cranes}")
 
-        # -- Create agent --
-        self._print("Creating agent ...")
-        self.agent = UnifiedDQNAgent(self.agent_cfg)
+        # -- Create agent (or use pre-built one) --
+        if self.agent is None:
+            self._print("Creating agent ...")
+            self.agent = UnifiedDQNAgent(self.agent_cfg)
+        else:
+            self._print("Using pre-built agent ...")
         params = sum(p.numel() for p in self.agent.q_net.parameters())
         self._print(f"  Parameters: {params:,}\n")
 
@@ -428,6 +432,7 @@ def create_env_factory(
     tracks: int = 7, split_factor: int = 20,
     export_ratio: float = 0.75,
     max_retries: int = 10, no_destination_penalty: float = -1.0,
+    log_dir: str = None,
 ):
     """Return a callable that creates a UnifiedContainerTerminalEnv."""
     def factory():
@@ -473,6 +478,7 @@ def create_env_factory(
             num_tracks=tracks, step_minutes=5,
             max_retries=max_retries, no_destination_penalty=no_destination_penalty,
             dims=dims,
+            log_dir=log_dir,
         )
     return factory
 

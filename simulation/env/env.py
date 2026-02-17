@@ -171,6 +171,12 @@ class ContainerTerminalEnv:
         self._departed_cache.clear()
         self.reward_engine.reset_train_tracking()
 
+        # Clear parking (prevents ghost spots from previous day's terminal trucks)
+        if self.parking is not None:
+            self.parking.occupied[:] = False
+            self.parking.truck_ids.fill(None)
+            self.parking._truck_spots.clear()
+
         # Sync RMGC layout
         self.rmgc.set_layout(yard=self.yard, rail=self.rail, num_tracks=self.num_tracks)
 
@@ -294,10 +300,15 @@ class ContainerTerminalEnv:
         return reward
 
     def _collect_truck_departures(self) -> List[Dict[str, Any]]:
-        """Remove departed trucks, return event dicts."""
+        """Remove departed trucks, return event dicts.
+
+        Terminal trucks are excluded — they never depart.
+        """
         events = []
         to_remove = []
         for truck_id, truck in self.trucks.items():
+            if getattr(truck, "is_terminal_truck", False):
+                continue  # terminal trucks never depart
             if truck.is_ready_to_depart():
                 if truck.departure_time is None:
                     truck.departure_time = self.current_time
@@ -371,21 +382,32 @@ class ContainerTerminalEnv:
     # ================================================================
 
     def _init_terminal_trucks(self) -> None:
-        """Initialise terminal trucks for the day."""
+        """Initialise terminal trucks for the day.
+
+        Terminal trucks are added to both ``self.terminal_trucks`` (for TLM
+        dispatch) and ``self.trucks`` (so the unified state encoder sees them
+        in the queue / parking rows).  Their status is set to
+        ``TruckStatus.WAITING`` so that ``_is_queued()`` treats them as
+        unparked trucks waiting to be placed by the agent.
+        """
         self.terminal_trucks.clear()
         for i in range(TERMINAL_TRUCK_COUNT):
-            tt = TerminalTruck()
+            tt = TerminalTruck(arrival_time=self.current_time)
             if not getattr(tt, "truck_id", None):
                 setattr(tt, "truck_id", IDGenerator.generate_terminal_truck_id(i))
+            # Use regular TruckStatus so the encoder's _is_queued() picks it up
+            tt.status = TruckStatus.WAITING
             self.terminal_trucks[tt.truck_id] = tt
+            # Also register in the main trucks dict for encoder visibility
+            self.trucks[tt.truck_id] = tt
 
     def _complete_terminal_truck_jobs(self) -> None:
         """Complete terminal truck jobs that have finished."""
         for tt_id, busy_until in list(self._tt_busy_until.items()):
             if busy_until and busy_until <= self.current_time:
                 tt = self.terminal_trucks.get(tt_id)
-                if tt and hasattr(tt, "complete_job"):
-                    tt.complete_job()
+                if tt:
+                    tt.complete_task(self.current_time)
                 self._tt_busy_until[tt_id] = None
 
     # ================================================================
@@ -423,6 +445,7 @@ class ContainerTerminalEnv:
         self._carryover_trucks = {
             tid: t for tid, t in self.trucks.items()
             if t and t.departure_time is None
+            and not getattr(t, "is_terminal_truck", False)
         }
 
     # ================================================================

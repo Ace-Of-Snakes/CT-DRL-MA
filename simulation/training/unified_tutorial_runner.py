@@ -6,16 +6,17 @@ Previously mastered tiers are replayed every `maintenance_interval`
 epochs to prevent catastrophic forgetting.
 
 Tier layout (auto-built, with fallback for unknown scenario IDs):
-  Tier 0 — Primitives:        S1-S4   (single actions)
-  Tier 1 — Two-action chains: S5-S6
-  Tier 2 — Full chains:       S7-S8   (3 actions)
-  Tier 3 — Restack + load:    S9-S10  (with distractors)
-  Tier 4 — Random generalize: S11-S12
-  Tier 5 — Multi-step hard:   S13-S14
-  Tier 6 — Multi-vehicle:     S15-S16
-  Tier 7 — Concurrent ops:    S17-S18
-  Tier 8 — Full complexity:   S19-S20
-  Tier 9 — Advanced:          S21+    (auto-detected)
+  Tier 0  — Primitives:           S1-S4   (single actions)
+  Tier 1  — Two-action chains:    S5-S6
+  Tier 2  — Full chains:          S7-S8   (3 actions)
+  Tier 3  — Restack + load:       S9-S10  (with distractors)
+  Tier 4  — Random generalize:    S11-S12
+  Tier 5  — Multi-step hard:      S13-S14
+  Tier 6  — Multi-vehicle:        S15-S16
+  Tier 7  — Bidirectional train:  S17
+  Tier 8  — Concurrent ops:       S18-S19
+  Tier 9  — Full complexity:      S20-S21
+  Tier 10 — Terminal truck:       S22-S25
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ _TIER_BOUNDARIES: List[Tuple[str, List[int]]] = [
     ("Restack + load",     [9, 10]),
     ("Random generalize",  [11, 12]),
     ("Multi-step hard",    [13, 14]),
+    ("Terminal truck",     [25, 22, 23, 24]),
     ("Multi-vehicle",      [15, 16]),
     ("Bidirectional train", [17]),
     ("Concurrent ops",     [18, 19]),

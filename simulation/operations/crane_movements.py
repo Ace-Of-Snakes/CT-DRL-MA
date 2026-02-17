@@ -161,6 +161,7 @@ class TerminalRMGC:
             MoveType.YARD_TO_TRUCK: self._ep_yard_to_truck,
             MoveType.TRAIN_TO_TRUCK: self._ep_train_to_truck,
             MoveType.TRUCK_TO_TRAIN: self._ep_truck_to_train,
+            MoveType.YARD_TO_TERMINAL_TRUCK: self._ep_yard_to_terminal_truck,
         }
 
     def _ep_yard_to_yard(self, args, trains, trucks, yard):
@@ -204,6 +205,13 @@ class TerminalRMGC:
         train = trains.get(args.get("train_id"))
         if truck and truck.parking_spot and train:
             return (self._truck_xyz(truck), self._train_xyz(train))
+        return None
+
+    def _ep_yard_to_terminal_truck(self, args, trains, trucks, yard):
+        """Yard swap body → terminal truck side storage (virtual stack area)."""
+        src = yard.get_placement(args.get("container_id"))
+        if src:
+            return (self._yard_xyz(src), self._stack_xyz())
         return None
 
     # ----- Public API -----

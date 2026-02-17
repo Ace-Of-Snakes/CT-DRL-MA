@@ -22,8 +22,9 @@ from simulation.core.facilities.parking import OptimizedParkingArea
 from simulation.core.facilities.railyard import OptimizedRailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
-from simulation.core.enums import MoveType, TruckStatus
+from simulation.core.enums import MoveType, TruckStatus, TerminalTruckStatus
 from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
+from simulation.analytics.move_csv_logger import MoveCSVLogger
 
 # Parent env — inherits all simulation infrastructure
 from simulation.env.env import ContainerTerminalEnv
@@ -77,7 +78,13 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     the 2-head unified agent.
     """
 
-    def __init__(self, *args, dims: Optional[UnifiedDims] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        dims: Optional[UnifiedDims] = None,
+        log_dir: Optional[str] = None,
+        **kwargs,
+    ):
         # Force auto_park off — agent handles parking explicitly
         kwargs["auto_park"] = False
         super().__init__(*args, **kwargs)
@@ -93,6 +100,21 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         )
         self._s_stride: int = 4  # must match CNNConfig.s_stride
         self._s_down: int = self.dims.n_splits // self._s_stride
+
+        # Optional CSV move logger (activated when log_dir is provided)
+        self._log_dir = log_dir
+        self.move_logger: Optional[MoveCSVLogger] = None
+
+    def reset(self, *args, **kwargs):
+        """Override reset to (re-)initialise the CSV move logger per day."""
+        state = super().reset(*args, **kwargs)
+        # Create a fresh logger for this day if logging is enabled
+        if self._log_dir:
+            if self.move_logger is not None:
+                self.move_logger.close()
+            label = f"day{self.day_index}"
+            self.move_logger = MoveCSVLogger(self._log_dir, label=label)
+        return state
 
     # ── State encoding override ───────────────────────────────────────
 
@@ -141,8 +163,12 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 advance_min = (next_time - now).total_seconds() / 60.0
                 self.current_time = next_time
                 self._complete_terminal_truck_jobs()
+                n_waiting = sum(
+                    1 for t in self.trucks.values()
+                    if not getattr(t, "is_terminal_truck", False)
+                )
                 total_reward += self.reward_engine.waiting_penalty(
-                    len(self.trucks), advance_min,
+                    n_waiting, advance_min,
                 )
             else:
                 self._advance_time()
@@ -322,6 +348,13 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                             mask, container, d, S_down, stride,
                         )
 
+                    # Swap body / trailer → parked terminal truck
+                    if (getattr(container, "is_swap_body", False)
+                            or getattr(container, "is_trailer", False)):
+                        self._add_terminal_truck_dest_mask(
+                            mask, d, S_down, stride,
+                        )
+
             return mask
 
         return dest_mask_fn
@@ -417,6 +450,93 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             if 0 <= s_down < S_down:
                 mask[d.parking_row_start, s_down, 0] = True
 
+    def _add_terminal_truck_dest_mask(
+        self,
+        mask: np.ndarray,
+        d: UnifiedDims,
+        S_down: int,
+        stride: int,
+    ) -> None:
+        """Mark parking positions of available terminal trucks.
+
+        Called when the source container is a swap body or trailer. Lights up
+        the parking-row positions of all parked, idle terminal trucks so the
+        agent can dispatch swap bodies to them.
+        """
+        sf = d.split_factor
+        for tt in self.terminal_trucks.values():
+            if not tt.is_available():
+                continue
+            spot = getattr(tt, "parking_spot", None)
+            if spot is None:
+                continue
+            s = spot.bay * sf + (spot.split or 0)
+            s_down = s // stride
+            if 0 <= s_down < S_down:
+                mask[d.parking_row_start, s_down, 0] = True
+
+    # ══════════════════════════════════════════════════════════════════
+    # CSV logging helper
+    # ══════════════════════════════════════════════════════════════════
+
+    def _log_container_move(
+        self,
+        move: Move,
+        action: UnifiedActionResult,
+        container_id: str,
+        crane_id: int,
+        distance_m: float,
+        time_s: float,
+    ) -> None:
+        """Write one row to the moves CSV (if logger active)."""
+        d = self.dims
+
+        # Look up container metadata
+        container = None
+        for rec in self.yard.iter_records():
+            if rec.container.container_id == container_id:
+                container = rec.container
+                break
+        # Also check trains if not found in yard (e.g. TRAIN_TO_YARD after move)
+        if container is None:
+            for train in self.trains.values():
+                c = train.find_container(container_id) if hasattr(train, "find_container") else None
+                if c:
+                    container = c
+                    break
+
+        length_ft = getattr(container, "length_ft", 0) if container else 0
+        goods_type = getattr(container, "goods_type", "") if container else ""
+        is_sb = getattr(container, "is_swap_body", False) if container else False
+        is_tr = getattr(container, "is_trailer", False) if container else False
+
+        src = action.source_pos or (-1, -1, -1)
+        dst = action.dest_pos or (-1, -1, -1)
+        sf = d.split_factor
+
+        self.move_logger.log_move(
+            timestamp=self.current_time,
+            move_type=move.type.value,
+            container_id=container_id,
+            length_ft=length_ft,
+            goods_type=str(goods_type),
+            is_swap_body=is_sb,
+            is_trailer=is_tr,
+            src_region=action.source_region or "",
+            src_row=src[0],
+            src_bay=src[1] // sf if src[1] >= 0 else -1,
+            src_split=src[1],
+            src_tier=src[2],
+            dst_region=action.dest_region or "",
+            dst_row=dst[0],
+            dst_bay=dst[1] // sf if dst[1] >= 0 else -1,
+            dst_split=dst[1],
+            dst_tier=dst[2],
+            crane_id=crane_id,
+            crane_time_s=time_s,
+            crane_distance_m=distance_m,
+        )
+
     # ══════════════════════════════════════════════════════════════════
     # Execution: PARK_TRUCK (queue → parking)
     # ══════════════════════════════════════════════════════════════════
@@ -451,6 +571,10 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         if not success:
             return self._idle_result(info)
 
+        # Terminal trucks become IDLE once parked so they can accept dispatches
+        if getattr(truck, "is_terminal_truck", False):
+            truck.status = TerminalTruckStatus.IDLE
+
         # Proximity reward: bonus for parking near goods anchor
         preferred = self.unified_encoder._preferred_bay_for_truck(truck)
         if preferred is not None:
@@ -469,6 +593,20 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             "bay": dst_bay,
             "proximity_bonus": round(proximity_bonus, 4),
         })
+
+        # CSV event logging
+        if self.move_logger is not None:
+            is_tt = getattr(truck, "is_terminal_truck", False)
+            vtype = "terminal_truck" if is_tt else (
+                "pickup" if getattr(truck, "is_pickup_truck", False) else "delivery"
+            )
+            self.move_logger.log_vehicle_event(
+                timestamp=self.current_time,
+                event_type="PARK_TRUCK",
+                vehicle_id=truck.truck_id,
+                vehicle_type=vtype,
+                track_or_bay=str(dst_bay),
+            )
 
         # No crane cost for parking — just advance time
         self._advance_time()
@@ -522,6 +660,16 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         if not success:
             return None
 
+        # Terminal truck busy timer — TT carries the container offsite
+        if move.type == MoveType.YARD_TO_TERMINAL_TRUCK:
+            from simulation.core.constants import TERMINAL_TRUCK_TASK_DURATION_S
+            tt_id = move.args.get("terminal_truck_id")
+            if tt_id:
+                self._tt_busy_until[tt_id] = (
+                    self.current_time
+                    + timedelta(seconds=TERMINAL_TRUCK_TASK_DURATION_S)
+                )
+
         # Crane timing
         time_s = cost.time_s if cost else 0.0
         if crane_id < len(self.cranes) and cost:
@@ -541,6 +689,12 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             "distance_m": round(distance_m, 2),
             "time_s": round(time_s, 2),
         })
+
+        # CSV move logging
+        if self.move_logger is not None:
+            self._log_container_move(
+                move, action, container_id, crane_id, distance_m, time_s,
+            )
 
         # Prevent other cranes from reversing this move in the same step
         blacklist = getattr(self, "_step_blacklist", None)
@@ -666,18 +820,39 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         )
 
     def _resolve_yard_to_truck(self, action: UnifiedActionResult) -> Optional[Move]:
-        """Import: yard container → pickup truck at parking."""
+        """Import: yard container → pickup truck at parking.
+
+        Also handles terminal truck dispatch: if the destination truck is a
+        terminal truck and the source container is a swap body or trailer,
+        the move is resolved as YARD_TO_TERMINAL_TRUCK instead.
+        """
         record = self._yard_container_at_unified(*action.source_pos)
         if record is None:
             return None
 
         container = record.container
-        if not _is_import(container):
-            return None
 
         # Find truck at dest parking position
         truck = self._find_truck_at_parking_split(action.dest_pos[1])
         if truck is None:
+            return None
+
+        # Terminal truck dispatch: swap body/trailer → parked terminal truck
+        if getattr(truck, "is_terminal_truck", False):
+            is_sb = getattr(container, "is_swap_body", False)
+            is_tr = getattr(container, "is_trailer", False)
+            if is_sb or is_tr:
+                return Move(
+                    type=MoveType.YARD_TO_TERMINAL_TRUCK,
+                    args={
+                        "terminal_truck_id": truck.truck_id,
+                        "container_id": container.container_id,
+                    },
+                )
+            return None  # terminal truck cannot carry non-swap-body containers
+
+        # Regular pickup truck: must be an import container
+        if not _is_import(container):
             return None
 
         if container.container_id not in getattr(truck, "pickup_container_ids", set()):
@@ -804,7 +979,12 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     def _find_rail_container(
         self, track_row: int, split: int,
     ) -> Tuple[Optional[Any], Optional[Train]]:
-        """Find container on train at (track_row, split)."""
+        """Find container on train at (track_row, split).
+
+        Uses the same split_cursor logic as the source mask builder to
+        resolve which container within a multi-container wagon the
+        selected split position corresponds to.
+        """
         d = self.dims
         sf = d.split_factor
 
@@ -812,6 +992,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             return None, None
 
         target_bay = split // sf
+        split_offset = split % sf          # position within the bay
 
         for train_id, train in self.trains.items():
             slot = self.rail.get_slot(train_id)
@@ -823,8 +1004,19 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 continue
 
             wagon = train.wagons[wagon_idx]
+            # Walk containers with split_cursor to find the one at the
+            # selected split offset (mirrors _build_source_mask logic).
+            cursor = 0
             for container in wagon.containers.values():
-                return container, train
+                n_splits = max(1, int(np.ceil(
+                    getattr(container, "length_ft", 20) / (40.0 / sf)
+                )))
+                if cursor <= split_offset < cursor + n_splits:
+                    return container, train
+                cursor += n_splits
+
+            # Split is beyond all containers on the wagon (empty space)
+            return None, None
 
         return None, None
 

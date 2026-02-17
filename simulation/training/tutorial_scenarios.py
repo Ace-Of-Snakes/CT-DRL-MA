@@ -1,10 +1,11 @@
 # simulation/training/tutorial_scenarios.py
 """Tutorial scenarios for curriculum training.
 
-21 progressive scenarios teaching individual skills before combining them.
+25 progressive scenarios teaching individual skills before combining them.
 Direction semantics enforced throughout:
   Import containers: arrive on TRAIN, leave on TRUCK (pickup)
   Export containers: arrive on TRUCK (delivery), leave on TRAIN
+  Terminal trucks: internal-only, carry swap bodies / trailers
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from simulation.core.facilities.railyard import RailSlot
 from simulation.core.facilities.yard import PlacementResult
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
+from simulation.core.vehicles.terminal_truck import TerminalTruck
 
 
 # ================================================================
@@ -928,38 +930,197 @@ class S21_FullMiniDay(TutorialScenario):
 
 
 # ================================================================
+# Phase 10 — Terminal truck scenarios
+# ================================================================
+
+def _make_swap_body(prefix: str, idx: int) -> Container:
+    """Create a swap body container for terminal truck tutorials."""
+    return Container(
+        container_id=f"{prefix}_SB{idx}",
+        direction=Direction.IMPORT,
+        container_type="Swap Body",
+        arrival_date=TUTORIAL_TIME,
+        departure_date=DEFAULT_DEPARTURE,
+        goods_type=GoodsType.REGULAR,
+        length_ft=40,
+        length_m=12.2,
+        is_swap_body=True,
+    )
+
+
+def _add_terminal_truck(env, prefix: str, idx: int) -> TerminalTruck:
+    """Create a terminal truck and register it in env.terminal_trucks + env.trucks.
+
+    Sets TruckStatus.WAITING so _is_queued() detects it correctly.
+    """
+    tt = TerminalTruck(arrival_time=TUTORIAL_TIME)
+    tt.truck_id = f"{prefix}_TT{idx}"
+    tt.status = TruckStatus.WAITING
+    env.terminal_trucks[tt.truck_id] = tt
+    env.trucks[tt.truck_id] = tt
+    return tt
+
+
+class S22_TTCantCarryRegular(TutorialScenario):
+    """Terminal truck + regular pickup truck in queue.  Regular Import in yard.
+
+    The agent must learn that TTs cannot carry regular containers and
+    use the regular pickup truck instead.
+
+    Success: regular truck departs with the container.
+    """
+    id = 22
+    name = "terminal_truck_dispatch"
+    description = "Park TT, dispatch swap body via terminal truck"
+    max_steps = 15
+
+    def setup(self, env) -> None:
+        # A regular Import container in the yard
+        c = _make_container("S22_C1", Direction.IMPORT)
+        env.yard.add_container(c, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+
+        # Regular pickup truck wanting that container
+        tk = _make_truck("S22_TK1", pickup_ids=[c.container_id])
+        env.trucks[tk.truck_id] = tk
+
+        # Terminal truck (cannot carry regular containers)
+        _add_terminal_truck(env, "S22", 0)
+
+    def check_success(self, env) -> bool:
+        # Regular truck departed with the container
+        return (env.yard.get_container("S22_C1") is None
+                and "S22_TK1" not in env.trucks)
+
+
+class S23_RegularTruckPreferred(TutorialScenario):
+    """Swap body in yard.  Both a regular pickup truck (assigned to it)
+    and a terminal truck are in the queue.
+
+    Regular truck gives +3.0 reward vs TT's +2.0.  Agent should learn
+    to prefer the regular truck when it is an option.
+
+    Success: regular truck departs with the swap body.
+    """
+    id = 23
+    name = "regular_truck_preferred"
+    description = "Prefer regular truck over TT for swap body (higher reward)"
+    max_steps = 20
+
+    def setup(self, env) -> None:
+        sb = _make_swap_body("S23", 0)
+        env.yard.add_container(sb, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+
+        # Regular pickup truck that wants the swap body
+        tk = _make_truck("S23_TK1", pickup_ids=[sb.container_id])
+        env.trucks[tk.truck_id] = tk
+
+        # Terminal truck (also could carry it, but less reward)
+        _add_terminal_truck(env, "S23", 0)
+
+    def check_success(self, env) -> bool:
+        # Regular truck departed with the swap body
+        return (env.yard.get_container("S23_SB0") is None
+                and "S23_TK1" not in env.trucks)
+
+
+class S24_TTOnlyOption(TutorialScenario):
+    """Swap body in yard + regular Import in yard.
+    Regular pickup truck is assigned to the regular container (not the swap body).
+    Terminal truck is the only vehicle that can remove the swap body.
+
+    Agent must use TT for swap body AND regular truck for its container.
+
+    Success: swap body removed from yard AND regular truck departs.
+    """
+    id = 24
+    name = "tt_only_option"
+    description = "TT is only option for swap body; regular truck takes its own container"
+    max_steps = 30
+
+    def setup(self, env) -> None:
+        # Swap body — only TT can carry it (no regular truck assigned to it)
+        sb = _make_swap_body("S24", 0)
+        env.yard.add_container(sb, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+
+        # Regular Import — regular truck is assigned to it
+        c = _make_container("S24_C1", Direction.IMPORT)
+        env.yard.add_container(c, _yard_placement(bay=ANCHOR_BAY + 5, row=0, tier=0))
+
+        # Regular pickup truck wants the regular container (NOT the swap body)
+        tk = _make_truck("S24_TK1", pickup_ids=[c.container_id])
+        env.trucks[tk.truck_id] = tk
+
+        # Terminal truck — only vehicle that can remove the swap body
+        _add_terminal_truck(env, "S24", 0)
+
+    def check_success(self, env) -> bool:
+        sb_gone = env.yard.get_container("S24_SB0") is None
+        truck_served = "S24_TK1" not in env.trucks
+        return sb_gone and truck_served
+
+
+class S25_BasicTTDispatch(TutorialScenario):
+    """Simplest terminal truck scenario: swap body in yard, only a TT available.
+
+    No competing trucks, no regular containers.  Agent just needs to
+    park the TT and dispatch the swap body to it.
+
+    Success: swap body removed from yard.
+    """
+    id = 25
+    name = "basic_tt_dispatch"
+    description = "Park TT and dispatch swap body (simplest TT case)"
+    max_steps = 15
+
+    def setup(self, env) -> None:
+        sb = _make_swap_body("S25", 0)
+        env.yard.add_container(sb, _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
+
+        # Only a terminal truck — no regular trucks
+        _add_terminal_truck(env, "S25", 0)
+
+    def check_success(self, env) -> bool:
+        return env.yard.get_container("S25_SB0") is None
+
+
+# ================================================================
 # Registry
 # ================================================================
 
 ALL_SCENARIOS: List[TutorialScenario] = [
-    # Phase 1: Primitives
+    # Tier 0: Primitives
     S1_ParkTruck(),
     S2_TrainImport(),
     S3_YardToTruck(),
     S4_YardToTrain(),
-    # Phase 2: Two-action chains
+    # Tier 1: Two-action chains
     S5_ImportAndExport(),
     S6_ParkThenImport(),
-    # Phase 3: Full chains
+    # Tier 2: Full chains
     S7_FullChainTruck(),
     S8_DeliveryToTrain(),
-    # Phase 4: Restack + load
+    # Tier 3: Restack + load
     S9_UnburyForTruck(),
     S10_UnburyForTrain(),
-    # Phase 5: Randomised generalisation
+    # Tier 4: Randomised generalisation
     S11_RandomImportChain(),
     S12_RandomExportChain(),
-    # Phase 6: Multi-step hard
+    # Tier 5: Multi-step hard
     S13_MultiTruckServing(),
     S14_DeepUnbury(),
-    # Phase 7: Integration — batch operations
+    # Tier 6: Terminal truck (park TT, dispatch swap bodies)
+    S25_BasicTTDispatch(),
+    S22_TTCantCarryRegular(),
+    S23_RegularTruckPreferred(),
+    S24_TTOnlyOption(),
+    # Tier 7: Integration — batch operations
     S15_MultiDeliveryPark(),
     S16_DeliveryToTrainPipeline(),
-    # Phase 8: Integration — bidirectional train flow
+    # Tier 8: Integration — bidirectional train flow
     S17_BidirectionalTrainSimple(),
     S18_ConcurrentImportExport(),
     S19_MixedFleetDispatch(),
-    # Phase 9: Stress tests
+    # Tier 9: Stress tests
     S20_CrowdedYardPickup(),
     S21_FullMiniDay(),
 ]

@@ -28,7 +28,7 @@ class RewardWeights:
     reward_truck_to_train: float = 4.0   # Skip yard = efficient
     
     # Other moves
-    reward_terminal_truck: float = 0.5
+    reward_terminal_truck: float = 2.0
     
     # RESTACK penalty (agent should minimize these)
     penalty_yard_to_yard: float = -0.2   # Discourage restacking

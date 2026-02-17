@@ -54,6 +54,11 @@ TYPE_REEFER: float = 0.50
 TYPE_DANGEROUS: float = 0.75
 TYPE_SWAP: float = 1.00
 
+# ── Terminal truck direction sentinel ────────────────────────────────────
+# Terminal trucks use a DIRECTION value of 0.5 in queue/parking rows,
+# distinguishing them from pickup trucks (0.0) and delivery trucks (1.0).
+DIRECTION_TERMINAL_TRUCK: float = 0.5
+
 # ── Normalisation constants ──────────────────────────────────────────────
 
 MAX_DEPARTURE_DAYS: float = 30.0
@@ -212,6 +217,7 @@ class UnifiedStateEncoder:
             if s < 0 or s >= d.n_splits:
                 continue
 
+            is_tt = getattr(tk, "is_terminal_truck", False)
             has_pickup = bool(getattr(tk, "pickup_container_ids", None))
             has_delivery = bool(getattr(tk, "containers", None))
 
@@ -219,18 +225,20 @@ class UnifiedStateEncoder:
             tensor[CH.CONTAINER_START, pr, s, 0] = 1.0
             tensor[CH.ACCESSIBLE, pr, s, 0] = 1.0
 
-            # Direction: use actual container direction if available,
-            # else fall back to pickup/delivery heuristic.
-            if has_delivery:
+            # Direction: 0.5 for terminal trucks, else container direction or heuristic
+            if is_tt:
+                tensor[CH.DIRECTION, pr, s, 0] = DIRECTION_TERMINAL_TRUCK
+            elif has_delivery:
                 tensor[CH.DIRECTION, pr, s, 0] = _direction_value(tk.containers[0])
             else:
                 tensor[CH.DIRECTION, pr, s, 0] = 0.0  # pickup truck (Import)
 
-            # Wait urgency
-            arr = getattr(tk, "arrival_time", None)
-            if arr and now and arr < now:
-                wait_h = (now - arr).total_seconds() / 3600.0
-                tensor[CH.DEPARTURE_URGENCY, pr, s, 0] = min(1.0, wait_h / MAX_TRUCK_WAIT_HOURS)
+            # Wait urgency (terminal trucks never depart — no urgency)
+            if not is_tt:
+                arr = getattr(tk, "arrival_time", None)
+                if arr and now and arr < now:
+                    wait_h = (now - arr).total_seconds() / 3600.0
+                    tensor[CH.DEPARTURE_URGENCY, pr, s, 0] = min(1.0, wait_h / MAX_TRUCK_WAIT_HOURS)
 
             # Demand flags
             if has_pickup:
@@ -363,6 +371,7 @@ class UnifiedStateEncoder:
             if not placed:
                 continue  # very rare: queue totally full at this bay
 
+            is_tt = getattr(tk, "is_terminal_truck", False)
             has_pickup = bool(getattr(tk, "pickup_container_ids", None))
             has_delivery = bool(getattr(tk, "containers", None))
 
@@ -370,14 +379,18 @@ class UnifiedStateEncoder:
             tensor[CH.CONTAINER_START, row, s, 0] = 1.0
             tensor[CH.ACCESSIBLE, row, s, 0] = 1.0
 
-            # Direction
-            tensor[CH.DIRECTION, row, s, 0] = 1.0 if (has_delivery and not has_pickup) else 0.0
+            # Direction: 0.5 for terminal trucks, 1.0 for delivery, 0.0 for pickup
+            if is_tt:
+                tensor[CH.DIRECTION, row, s, 0] = DIRECTION_TERMINAL_TRUCK
+            else:
+                tensor[CH.DIRECTION, row, s, 0] = 1.0 if (has_delivery and not has_pickup) else 0.0
 
-            # Wait urgency (time since arrival)
-            arr = getattr(tk, "arrival_time", None)
-            if arr and now and arr < now:
-                wait_h = (now - arr).total_seconds() / 3600.0
-                tensor[CH.DEPARTURE_URGENCY, row, s, 0] = min(1.0, wait_h / MAX_TRUCK_WAIT_HOURS)
+            # Wait urgency (terminal trucks never depart — no urgency)
+            if not is_tt:
+                arr = getattr(tk, "arrival_time", None)
+                if arr and now and arr < now:
+                    wait_h = (now - arr).total_seconds() / 3600.0
+                    tensor[CH.DEPARTURE_URGENCY, row, s, 0] = min(1.0, wait_h / MAX_TRUCK_WAIT_HOURS)
 
             # Demand
             if has_pickup:
@@ -559,9 +572,14 @@ class UnifiedStateEncoder:
     def _preferred_bay_for_truck(self, truck: Truck) -> Optional[int]:
         """Compute preferred bay for queue positioning.
 
+        Terminal trucks → right edge (near swap body storage zone).
         Pickup trucks → median bay of their wanted containers in yard.
         Delivery trucks → goods zone anchor of their container.
         """
+        # Terminal truck: park near swap body zone (right edge)
+        if getattr(truck, "is_terminal_truck", False):
+            return self.dims.n_bays - 1
+
         # Pickup: find container locations in yard
         pickup_ids = getattr(truck, "pickup_container_ids", None)
         if pickup_ids:
@@ -696,15 +714,23 @@ def _fill_blocking(
 
 
 def _collect_truck_demand(trucks: Dict[str, Truck]) -> Dict[str, float]:
-    """Map container_id → 1.0 if any parked truck wants it."""
+    """Map container_id → demand value for any truck that wants it.
+
+    Parked trucks get demand 1.0 (immediate pickup needed).
+    Queued (unparked) trucks get demand 0.5, giving the agent an early
+    signal to prepare containers before the truck is parked.
+    """
     demand: Dict[str, float] = {}
     for tk in trucks.values():
-        if getattr(tk, "parking_spot", None) is None:
-            continue
         pickup_ids = getattr(tk, "pickup_container_ids", None)
-        if pickup_ids:
-            for cid in pickup_ids:
-                demand[cid] = 1.0
+        if not pickup_ids:
+            continue
+        is_parked = getattr(tk, "parking_spot", None) is not None
+        val = 1.0 if is_parked else 0.5
+        for cid in pickup_ids:
+            # Keep highest demand if multiple trucks want same container
+            if cid not in demand or val > demand[cid]:
+                demand[cid] = val
     return demand
 
 
@@ -713,13 +739,21 @@ def _collect_train_demand(
     rail: OptimizedRailYard,
     n_bays: int,
 ) -> Dict[str, float]:
-    """Map container_id → normalised train anchor bay."""
+    """Map container_id → normalised train anchor bay.
+
+    The value encodes which train the container is destined for as a
+    normalised position in [0.2, 1.0].  The 0.2 floor ensures that even
+    low-anchor trains (bay 0–5) produce a clearly non-zero signal the CNN
+    can distinguish from empty positions (0.0).
+    """
     demand: Dict[str, float] = {}
     for tid, train in trains.items():
         anchor = rail.get_anchor_bay(tid)
         if anchor is None:
             continue
-        val = max(0.1, anchor / max(n_bays - 1, 1))
+        # Map anchor ∈ [0, n_bays-1] → value ∈ [0.2, 1.0]
+        raw = anchor / max(n_bays - 1, 1)        # 0.0 – 1.0
+        val = 0.2 + 0.8 * raw                     # 0.2 – 1.0
         for cid in train.get_all_pickup_container_ids():
             demand[cid] = val
     return demand
