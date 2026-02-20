@@ -268,6 +268,7 @@ class UnifiedQNetwork(nn.Module):
         cnn_cfg: CNNConfig,
         head_cfg: HeadConfig,
         backbone: nn.Module = None,
+        pool: nn.Module = None,
         source_head: nn.Module = None,
         dest_head: nn.Module = None,
     ):
@@ -280,7 +281,7 @@ class UnifiedQNetwork(nn.Module):
 
         # Swappable components (defaults = baseline)
         self.backbone = backbone if backbone is not None else FactoredCNNBackbone(cnn_cfg)
-        self.pool = OccupiedPooling(Fc, G)
+        self.pool = pool if pool is not None else OccupiedPooling(Fc, G)
         self.source_head = source_head if source_head is not None else SourceHead(Fc)
         self.dest_head = dest_head if dest_head is not None else UnifiedDestHead(Fc, G)
 

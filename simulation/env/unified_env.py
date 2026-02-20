@@ -122,6 +122,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         """Unified state: (C, R_uni, S, T)."""
         return self.unified_encoder.encode(
             self.trains, self.trucks, self.current_time,
+            crane_states=self.cranes,
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -232,7 +233,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             info["retries"] = retry
 
             source_mask = self.unified_encoder.get_source_mask(
-                self.trains, self.trucks,
+                self.trains, self.trucks, self.current_time,
             )
             # Exclude containers moved by earlier cranes this step
             blacklist = getattr(self, "_step_blacklist", set())
@@ -676,6 +677,11 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             self.cranes[crane_id].busy_until = (
                 self.current_time + timedelta(seconds=time_s)
             )
+            # Track destination bay for crane proximity channel
+            if action.dest_pos is not None:
+                self.cranes[crane_id].last_bay = (
+                    action.dest_pos[1] // self.dims.split_factor
+                )
 
         distance_m = cost.distance_m if cost else 0.0
         reward = self.reward_engine.immediate_reward(
@@ -947,34 +953,18 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     ) -> Optional[Truck]:
         """Find the truck encoded at (queue_row, split).
 
-        Rebuilds queue layout (same algo as encoder) to find truck identity.
+        Delegates to the canonical ``_compute_queue_layout()`` so the
+        mapping is identical to the tensor encoding and source mask.
         """
         d = self.dims
-        qi = queue_row - d.queue_row_start
-        if qi < 0 or qi >= d.n_queue_rows:
+        if queue_row < d.queue_row_start or queue_row >= d.queue_row_end:
             return None
 
-        sf = d.split_factor
-
-        # Rebuild queue layout: {queue_idx: {split_pos: Truck}}
-        occupied: Dict[int, Dict[int, Truck]] = {
-            i: {} for i in range(d.n_queue_rows)
-        }
-        for tk in self.trucks.values():
-            if not self.unified_encoder._is_queued(tk):
-                continue
-            preferred = self.unified_encoder._preferred_bay_for_truck(tk)
-            if preferred is None:
-                preferred = d.n_bays // 2
-            preferred = max(0, min(preferred, d.n_bays - 1))
-            s = preferred * sf
-
-            for q_idx in range(d.n_queue_rows):
-                if s not in occupied[q_idx]:
-                    occupied[q_idx][s] = tk
-                    break
-
-        return occupied.get(qi, {}).get(split)
+        layout = self.unified_encoder._compute_queue_layout(
+            self.trucks, self.current_time,
+        )
+        lookup = {(r, s): tk for tk, r, s in layout}
+        return lookup.get((queue_row, split))
 
     def _find_rail_container(
         self, track_row: int, split: int,

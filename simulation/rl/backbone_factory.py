@@ -22,12 +22,12 @@ from dataclasses import replace
 import torch.nn as nn
 from torch.nn.utils import spectral_norm
 
-from simulation.rl.multihead_dqn.config import CNNConfig
+from simulation.rl.multihead_dqn.config import CNNConfig, UnifiedDims
 
 
 # ── Backbone class registry (lazy to avoid circular imports) ────────────
 
-BACKBONE_VARIANTS = ["baseline", "wider", "deeper", "residual", "narrow_deep", "kitchen_sink"]
+BACKBONE_VARIANTS = ["baseline", "wider", "deeper", "residual", "narrow_deep", "kitchen_sink", "region_aware"]
 
 _BACKBONE_CLASSES = None
 
@@ -42,6 +42,7 @@ def _get_backbone_classes():
         from simulation.rl.variants.backbones.residual_backbone import ResidualCNNBackbone
         from simulation.rl.variants.backbones.narrow_deep_backbone import NarrowDeepCNNBackbone
         from simulation.rl.variants.backbones.kitchen_sink_backbone import KitchenSinkCNNBackbone
+        from simulation.rl.variants.backbones.region_aware_backbone import RegionAwareCNNBackbone
 
         _BACKBONE_CLASSES = {
             "baseline": FactoredCNNBackbone,
@@ -50,6 +51,7 @@ def _get_backbone_classes():
             "residual": ResidualCNNBackbone,
             "narrow_deep": NarrowDeepCNNBackbone,
             "kitchen_sink": KitchenSinkCNNBackbone,
+            "region_aware": RegionAwareCNNBackbone,
         }
     return _BACKBONE_CLASSES
 
@@ -104,6 +106,7 @@ def build_backbone(
     cnn_cfg: CNNConfig,
     variant: str = "baseline",
     spectral_norm: bool = False,
+    dims: UnifiedDims = None,
 ) -> nn.Module:
     """Build a CNN backbone from config and variant flags.
 
@@ -116,7 +119,9 @@ def build_backbone(
             'residual'      — skip connections around conv2+conv3
             'narrow_deep'   — half channels, 6 layers
             'kitchen_sink'  — deeper + residual (5 layers with skips)
+            'region_aware'  — per-region branches + deeper cross-region
         spectral_norm: If True, wrap all Conv3d layers with spectral norm.
+        dims: UnifiedDims (required for 'region_aware', ignored otherwise).
 
     Returns:
         nn.Module with forward: (B, C_in, R, S, T) → (B, feat_ch, R, S_down, T)
@@ -126,9 +131,42 @@ def build_backbone(
         available = ", ".join(sorted(classes.keys()))
         raise ValueError(f"Unknown backbone variant {variant!r}. Available: {available}")
 
-    backbone = classes[variant](cnn_cfg)
+    if variant == "region_aware":
+        if dims is None:
+            dims = UnifiedDims()
+        backbone = classes[variant](cnn_cfg, dims)
+    else:
+        backbone = classes[variant](cnn_cfg)
 
     if spectral_norm:
         backbone = _apply_spectral_norm(backbone)
 
     return backbone
+
+
+# ── Pool factory (region-aware variant needs a custom pool) ─────────────
+
+def build_pool(
+    cnn_cfg: CNNConfig,
+    variant: str = "baseline",
+    dims: UnifiedDims = None,
+) -> nn.Module | None:
+    """Build the matching pooling module for a backbone variant.
+
+    Returns None for variants that use the default OccupiedPooling.
+    Only 'region_aware' currently provides a custom pool.
+
+    Args:
+        cnn_cfg: CNNConfig with feat_channels and global_dim.
+        variant: Backbone variant name.
+        dims: UnifiedDims (required for 'region_aware').
+
+    Returns:
+        nn.Module or None.
+    """
+    if variant == "region_aware":
+        from simulation.rl.variants.backbones.region_aware_backbone import RegionAwarePooling
+        if dims is None:
+            dims = UnifiedDims()
+        return RegionAwarePooling(cnn_cfg.feat_channels, cnn_cfg.global_dim, dims)
+    return None

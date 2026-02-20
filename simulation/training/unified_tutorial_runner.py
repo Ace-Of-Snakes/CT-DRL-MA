@@ -198,8 +198,14 @@ class UnifiedTutorialRunner:
         min_epochs: int = 10,
         log_every: int = 5,
         maintenance_interval: int = DEFAULT_MAINTENANCE_INTERVAL,
+        early_stop_check: Optional[Callable[[int, int], bool]] = None,
     ) -> Dict[str, object]:
-        """Train with tiered progression — master each tier before advancing."""
+        """Train with tiered progression — master each tier before advancing.
+
+        Args:
+            early_stop_check: Optional callback ``(epoch, current_tier) -> bool``.
+                If it returns ``True``, training is aborted early.
+        """
         tiers = TUTORIAL_TIERS
         n_tiers = len(tiers)
         all_sids = [sc.id for sc in ALL_SCENARIOS]
@@ -269,6 +275,14 @@ class UnifiedTutorialRunner:
                               f"({len(tiers[current_tier].scenarios)} scenarios)",
                               flush=True)
 
+            # ── Early stopping callback ────────────────────────────
+            if early_stop_check and early_stop_check(epoch + 1, current_tier):
+                if self.verbose:
+                    print(f"\n  EARLY STOPPED at epoch {epoch + 1} "
+                          f"(stuck at tier {current_tier}: "
+                          f"{tiers[current_tier].name})", flush=True)
+                break
+
         final_rates = self._get_pass_rates(history)
         self.agent.clear_epsilon_override()
 
@@ -281,9 +295,16 @@ class UnifiedTutorialRunner:
                 log_every=1, force=True,
             )
 
+        early_stopped = (
+            not mastered
+            and early_stop_check is not None
+            and early_stop_check(epoch + 1, current_tier)
+        )
+
         return {
             "epochs_completed": epoch + 1,
             "mastered": mastered,
+            "early_stopped": early_stopped,
             "current_tier": current_tier,
             "n_tiers": n_tiers,
             "pass_rates": {sid: final_rates.get(sid, 0) for sid in all_sids},

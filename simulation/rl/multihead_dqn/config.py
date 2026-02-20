@@ -162,7 +162,7 @@ class CNNConfig:
       (cross_kernel, 1, cross_kernel) across R×T → stacking + cross-region
       (1, refine_kernel, 1) along S → neighbourhood refinement
     """
-    n_state_channels: int = 10   # Unified: 10 channels (down from 12)
+    n_state_channels: int = 13   # Unified: 13 channels (10 base + crane, train urgency, time)
     stage1_channels: int = 32
     feat_channels: int = 64
     global_dim: int = 128
@@ -171,6 +171,10 @@ class CNNConfig:
     container_kernel: int = 21   # (1, k, 1) — 20ft = 20 splits
     cross_kernel: int = 3        # (r, 1, t) — stacking / cross-row
     refine_kernel: int = 5       # (1, k, 1) — neighbourhood
+
+    # Region-aware backbone kernel sizes
+    container_region_kernel: int = 11  # (1, k, 1) — smallest container = 10 splits + 1
+    bay_region_kernel: int = 21        # (1, k, 1) — one bay = 20 splits + 1
 
     @property
     def container_pad(self) -> int:
@@ -183,6 +187,14 @@ class CNNConfig:
     @property
     def refine_pad(self) -> int:
         return self.refine_kernel // 2
+
+    @property
+    def container_region_pad(self) -> int:
+        return self.container_region_kernel // 2
+
+    @property
+    def bay_region_pad(self) -> int:
+        return self.bay_region_kernel // 2
 
 
 # ── Head config ──────────────────────────────────────────────────────────

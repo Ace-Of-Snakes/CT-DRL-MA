@@ -161,7 +161,7 @@ def create_agent(
 
     if needs_swap:
         import torch
-        from simulation.rl.backbone_factory import build_backbone
+        from simulation.rl.backbone_factory import build_backbone, build_pool
 
         # For spectral_norm DQN variant + non-baseline backbone, SN is needed
         apply_sn = spectral_norm or (variant == "spectral_norm")
@@ -169,11 +169,20 @@ def create_agent(
         def _make_bb():
             return build_backbone(
                 cfg.cnn, variant=backbone_variant, spectral_norm=apply_sn,
+                dims=cfg.unified,
             )
 
         # Swap backbone modules in both Q-net and target-net
         agent.q_net.backbone = _make_bb()
         agent.target_net.backbone = _make_bb()
+
+        # Swap pool if the backbone variant provides a custom one
+        pool = build_pool(cfg.cnn, variant=backbone_variant, dims=cfg.unified)
+        if pool is not None:
+            agent.q_net.pool = pool
+            agent.target_net.pool = build_pool(
+                cfg.cnn, variant=backbone_variant, dims=cfg.unified,
+            )
 
         # Move everything to the correct device
         agent.q_net.to(agent.device)

@@ -1,11 +1,16 @@
 # simulation/env/unified_state_encoder.py
-"""10-channel unified state encoder for Spatial DQN.
+"""13-channel unified state encoder for Spatial DQN.
 
 Output shape: (C, R_uni, S, T) where
-  C     = 10 channels
+  C     = 13 channels
   R_uni = n_tracks + n_parking + n_yard + n_queue (default 15)
   S     = n_bays * split_factor (default 1160)
   T     = n_tiers (default 5)
+
+Channels 0-9:  per-entity features (occupancy, type, urgency, demand, …)
+Channel  10:   crane proximity (triangular decay from each crane's last bay)
+Channel  11:   train departure urgency (per-train countdown on rail rows)
+Channel  12:   time progress (uniform seconds_since_midnight / 86400)
 
 Layout:
   Rows 0..6   Rail tracks    — containers on train wagons
@@ -16,7 +21,7 @@ Layout:
 import numpy as np
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from simulation.core.facilities.yard import OptimizedStorageYard
 from simulation.core.facilities.railyard import OptimizedRailYard
@@ -41,8 +46,11 @@ class UnifiedChannelSpec:
     CONTAINER_HASH: int = 7
     TRUCK_DEMAND: int = 8
     TRAIN_DEMAND: int = 9
+    CRANE_PROXIMITY: int = 10
+    TRAIN_DEPARTURE_URGENCY: int = 11
+    TIME_PROGRESS: int = 12
 
-    NUM_CHANNELS: int = 10
+    NUM_CHANNELS: int = 13
 
 
 CH = UnifiedChannelSpec()
@@ -65,6 +73,8 @@ MAX_DEPARTURE_DAYS: float = 30.0
 SECONDS_PER_DAY: float = 86_400.0
 DEFAULT_URGENCY: float = 1.0
 MAX_TRUCK_WAIT_HOURS: float = 4.0
+MAX_TRAIN_DEPARTURE_HOURS: float = 12.0
+CRANE_DECAY_BAYS: int = 10
 
 # ── Hash constants ───────────────────────────────────────────────────────
 
@@ -110,6 +120,7 @@ class UnifiedStateEncoder:
         trains: Dict[str, Train],
         trucks: Dict[str, Truck],
         now: datetime,
+        crane_states: Optional[List] = None,
     ) -> np.ndarray:
         """Build unified state tensor (C, R_uni, S, T)."""
         d = self.dims
@@ -121,11 +132,17 @@ class UnifiedStateEncoder:
         truck_demand = _collect_truck_demand(trucks)
         train_demand = _collect_train_demand(trains, self.rail, d.n_bays)
 
-        # Fill each region
+        # Fill per-entity channels (0-9)
         self._fill_rail_rows(tensor, trains, now)
         self._fill_parking_row(tensor, trucks, now)
         self._fill_yard_rows(tensor, truck_demand, train_demand, now)
         self._fill_queue_rows(tensor, trucks, now)
+
+        # Fill global / cross-entity channels (10-12)
+        if crane_states is not None:
+            self._fill_crane_proximity(tensor, crane_states)
+        self._fill_train_departure_urgency(tensor, trains, now)
+        self._fill_time_progress(tensor, now)
 
         return tensor
 
@@ -315,62 +332,13 @@ class UnifiedStateEncoder:
         trucks: Dict[str, Truck],
         now: datetime,
     ) -> None:
-        """Encode queued (not-yet-parked) trucks at their preferred bay.
+        """Encode queued (not-yet-parked) trucks at urgency-sorted positions.
 
-        Each queued truck is placed at its target bay position so the CNN
-        can see WHERE demand is concentrating. Multiple trucks targeting the
-        same bay stack across queue rows (row 0, row 1, ...).
+        Trucks are placed sequentially sorted by urgency (most urgent first,
+        terminal trucks last).  Position is stride-spaced for clean 1-to-1
+        mapping with the CNN's downsampled feature map.
         """
-        d = self.dims
-        sf = self._sf
-        q0 = d.queue_row_start
-        n_queue = d.n_queue_rows
-
-        # Track occupied splits per queue row for stacking
-        occupied: Dict[int, set] = {i: set() for i in range(n_queue)}
-
-        for tk in trucks.values():
-            if not self._is_queued(tk):
-                continue
-
-            preferred_bay = self._preferred_bay_for_truck(tk)
-            if preferred_bay is None:
-                preferred_bay = d.n_bays // 2  # center fallback
-            preferred_bay = max(0, min(preferred_bay, d.n_bays - 1))
-
-            s = preferred_bay * sf  # anchor at start of bay
-
-            # Find first queue row with space at this split
-            placed = False
-            for qi in range(n_queue):
-                if s not in occupied[qi]:
-                    occupied[qi].add(s)
-                    row = q0 + qi
-                    placed = True
-                    break
-
-            if not placed:
-                # Overflow: jitter ±1 split
-                for offset in range(1, sf):
-                    for sign in (1, -1):
-                        s_jitter = s + sign * offset
-                        if s_jitter < 0 or s_jitter >= d.n_splits:
-                            continue
-                        for qi in range(n_queue):
-                            if s_jitter not in occupied[qi]:
-                                occupied[qi].add(s_jitter)
-                                row = q0 + qi
-                                s = s_jitter
-                                placed = True
-                                break
-                        if placed:
-                            break
-                    if placed:
-                        break
-
-            if not placed:
-                continue  # very rare: queue totally full at this bay
-
+        for tk, row, s in self._compute_queue_layout(trucks, now):
             is_tt = getattr(tk, "is_terminal_truck", False)
             has_pickup = bool(getattr(tk, "pickup_container_ids", None))
             has_delivery = bool(getattr(tk, "containers", None))
@@ -408,6 +376,7 @@ class UnifiedStateEncoder:
         self,
         trains: Dict[str, Train],
         trucks: Dict[str, Truck],
+        now: Optional[datetime] = None,
     ) -> np.ndarray:
         """Unified source mask (R_uni, S, T): True where an actionable entity starts.
 
@@ -479,21 +448,9 @@ class UnifiedStateEncoder:
                 mask[d.parking_row_start, s, 0] = True
 
         # Queue: waiting trucks (ready to park)
-        # Re-compute positions (same logic as _fill_queue_rows but only need starts)
-        occupied: Dict[int, set] = {i: set() for i in range(d.n_queue_rows)}
-        for tk in trucks.values():
-            if not self._is_queued(tk):
-                continue
-            preferred_bay = self._preferred_bay_for_truck(tk)
-            if preferred_bay is None:
-                preferred_bay = d.n_bays // 2
-            preferred_bay = max(0, min(preferred_bay, d.n_bays - 1))
-            s = preferred_bay * self._sf
-            for qi in range(d.n_queue_rows):
-                if s not in occupied[qi]:
-                    occupied[qi].add(s)
-                    mask[d.queue_row_start + qi, s, 0] = True
-                    break
+        # Uses canonical layout — identical to _fill_queue_rows()
+        for _tk, row, s in self._compute_queue_layout(trucks, now):
+            mask[row, s, 0] = True
 
         return mask
 
@@ -568,6 +525,139 @@ class UnifiedStateEncoder:
             getattr(truck, "parking_spot", None) is None
             and getattr(truck, "status", None) == TruckStatus.WAITING
         )
+
+    def _compute_queue_layout(
+        self,
+        trucks: Dict[str, Truck],
+        now: Optional[datetime] = None,
+    ) -> List[Tuple[Truck, int, int]]:
+        """Canonical queue layout: urgency-sorted sequential placement.
+
+        Returns list of ``(truck, unified_row, split)`` tuples assigning
+        each queued truck a deterministic position in the queue rows.
+
+        Trucks are placed at stride-spaced splits (0, 4, 8, …) for a
+        clean 1-to-1 mapping with the CNN's downsampled feature map.
+
+        Sort order (index 0 = most urgent):
+          1. Terminal trucks LAST  (``tt_flag`` 0 vs 1)
+          2. ``DEPARTURE_URGENCY`` descending (longer wait → lower index)
+          3. ``truck_id`` ascending for deterministic tiebreak
+        """
+        d = self.dims
+        stride = 4  # must match CNNConfig.s_stride
+        trucks_per_row = d.n_splits // stride  # 1160 // 4 = 290
+
+        queued: List[Tuple[int, float, str, Truck]] = []
+        for tk in trucks.values():
+            if not self._is_queued(tk):
+                continue
+            is_tt = getattr(tk, "is_terminal_truck", False)
+            tt_flag = 1 if is_tt else 0
+            if is_tt:
+                urgency = 0.0
+            else:
+                arr = getattr(tk, "arrival_time", None)
+                if arr and now and arr < now:
+                    wait_h = (now - arr).total_seconds() / 3600.0
+                    urgency = min(1.0, wait_h / MAX_TRUCK_WAIT_HOURS)
+                else:
+                    urgency = 0.0
+            truck_id = getattr(tk, "truck_id", str(id(tk)))
+            queued.append((tt_flag, -urgency, truck_id, tk))
+
+        # tt_flag ASC → -urgency ASC (= urgency DESC) → truck_id ASC
+        queued.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        result: List[Tuple[Truck, int, int]] = []
+        for i, (_, _, _, tk) in enumerate(queued):
+            row_idx = i // trucks_per_row
+            if row_idx >= d.n_queue_rows:
+                break  # queue rows exhausted (580+ trucks)
+            unified_row = d.queue_row_start + row_idx
+            split = (i % trucks_per_row) * stride
+            result.append((tk, unified_row, split))
+        return result
+
+    # ── Global / cross-entity channels (10-12) ─────────────────────────
+
+    def _fill_crane_proximity(
+        self,
+        tensor: np.ndarray,
+        crane_states: List,
+    ) -> None:
+        """Paint triangular proximity signal for each crane along S.
+
+        1.0 at the crane's last bay, linearly decaying to 0.0 at
+        ±CRANE_DECAY_BAYS distance. Broadcast across all rows and tiers.
+        """
+        d = self.dims
+        sf = self._sf
+        S = d.n_splits
+        half_width = CRANE_DECAY_BAYS * sf
+
+        splits = np.arange(S, dtype=np.float32)
+        for crane in crane_states:
+            bay = getattr(crane, "last_bay", None)
+            if bay is None:
+                continue
+            center = float(bay * sf + sf // 2)
+            dist = np.abs(splits - center)
+            signal = np.maximum(0.0, 1.0 - dist / half_width)  # (S,)
+            # Broadcast to (R_uni, S, T) — take element-wise max
+            np.maximum(
+                tensor[CH.CRANE_PROXIMITY],
+                signal[np.newaxis, :, np.newaxis],
+                out=tensor[CH.CRANE_PROXIMITY],
+            )
+
+    def _fill_train_departure_urgency(
+        self,
+        tensor: np.ndarray,
+        trains: Dict[str, Train],
+        now: datetime,
+    ) -> None:
+        """Fill per-train departure urgency on rail rows.
+
+        urgency = 1.0 when train departs NOW, 0.0 when departure is
+        MAX_TRAIN_DEPARTURE_HOURS away or more.
+        """
+        d = self.dims
+        sf = self._sf
+
+        for train_id, train in trains.items():
+            dep = getattr(train, "departure_time", None)
+            if dep is None:
+                continue
+
+            slot = self.rail.get_slot(train_id)
+            if slot is None:
+                continue
+            track_row = self._track_id_to_row(slot.track_id)
+            if track_row is None or track_row >= d.rail_row_end:
+                continue
+
+            hours_until = max(0.0, (dep - now).total_seconds() / 3600.0)
+            urgency = 1.0 - min(1.0, hours_until / MAX_TRAIN_DEPARTURE_HOURS)
+
+            # Fill the train's footprint on its track row
+            anchor = slot.anchor_bay
+            n_wagons = len(train.wagons)
+            s_start = anchor * sf
+            s_end = min((anchor + n_wagons) * sf, d.n_splits)
+            if s_start < s_end:
+                tensor[CH.TRAIN_DEPARTURE_URGENCY, track_row, s_start:s_end, 0] = urgency
+
+    def _fill_time_progress(
+        self,
+        tensor: np.ndarray,
+        now: datetime,
+    ) -> None:
+        """Fill uniform time-of-day progress: seconds_since_midnight / 86400."""
+        if now is None:
+            return
+        seconds = now.hour * 3600 + now.minute * 60 + now.second
+        tensor[CH.TIME_PROGRESS, :, :, :] = seconds / SECONDS_PER_DAY
 
     def _preferred_bay_for_truck(self, truck: Truck) -> Optional[int]:
         """Compute preferred bay for queue positioning.

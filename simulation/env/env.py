@@ -58,6 +58,7 @@ class CraneState:
     """State tracking for a single RMGC crane."""
     id: int
     busy_until: Optional[datetime] = None
+    last_bay: Optional[int] = None
 
 
 # ============================================================

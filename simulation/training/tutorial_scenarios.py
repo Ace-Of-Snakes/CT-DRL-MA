@@ -34,15 +34,74 @@ DEFAULT_DEPARTURE = TUTORIAL_TIME + timedelta(days=5)
 ANCHOR_BAY = 5
 TRAIN_NUM_WAGONS = 5
 
-# Default container specs
+# Default container specs (kept for backward compat / explicit-size callers)
 CONTAINER_TYPE_40HC = "40' HC"
 DEFAULT_LENGTH_FT = 40
 DEFAULT_LENGTH_M = 12.2
 
-# Container sizes for randomized tutorials (length_ft, length_m, label)
+# ── Full container type specs from container_data.csv ────────────────────
+# Regular containers only (no swap bodies, no trailers).
+# Format: (length_ft, length_m, container_type, width_m, height_m, is_high_cube)
+
+CONTAINER_SPECS: List[Tuple[int, float, str, float, float, bool]] = [
+    # 20ft
+    (20, 6.1,  "20DC", 2.44, 2.44, False),
+    (20, 6.1,  "20HC", 2.44, 2.89, True),
+    (20, 6.1,  "20G",  2.44, 2.44, False),
+    (20, 6.1,  "20T",  2.44, 2.59, False),
+    # 22ft
+    (22, 6.71, "22T",  2.44, 2.59, False),
+    # 24ft
+    (24, 7.3,  "24T",  2.44, 2.59, False),
+    (24, 7.3,  "24OT", 2.44, 2.59, False),
+    # 30ft
+    (30, 9.14, "30G",  2.44, 2.44, False),
+    (30, 9.14, "30O",  2.44, 2.44, False),
+    (30, 9.14, "30T",  2.44, 2.59, False),
+    # 40ft
+    (40, 12.2, "40HC", 2.44, 2.89, True),
+    (40, 12.2, "40DC", 2.44, 2.44, False),
+    (40, 12.2, "40G",  2.44, 2.44, False),
+    (40, 12.2, "40RH", 2.44, 2.59, False),
+    # 45ft
+    (45, 13.7, "45G",  2.44, 2.44, False),
+    (45, 13.7, "45HC", 2.44, 2.89, True),
+    (45, 13.7, "45GH", 2.44, 2.44, False),
+]
+
+# Per-entry weights approximating real-world distribution (excludes swap bodies).
+# Real: 40ft ~56%, 20ft ~17%, 30ft ~7%, 24ft ~4%, 22ft ~1%, 45ft ~1%.
+# 23ft excluded (swap-body only). Renormalised to sum=1.
+_LENGTH_WEIGHTS = {20: 0.20, 22: 0.01, 24: 0.05, 30: 0.08, 40: 0.65, 45: 0.01}
+_SPEC_WEIGHTS: List[float] = [
+    _LENGTH_WEIGHTS[spec[0]] / sum(1 for s in CONTAINER_SPECS if s[0] == spec[0])
+    for spec in CONTAINER_SPECS
+]
+# Normalise
+_SPEC_WEIGHT_SUM = sum(_SPEC_WEIGHTS)
+_SPEC_WEIGHTS = [w / _SPEC_WEIGHT_SUM for w in _SPEC_WEIGHTS]
+
+
+def _random_container_spec(
+    rng: random.Random,
+) -> Tuple[int, float, str, float, float, bool]:
+    """Sample a random container spec with real-world frequency weights."""
+    return rng.choices(CONTAINER_SPECS, weights=_SPEC_WEIGHTS, k=1)[0]
+
+
+# Swap body types from container_data.csv
+# Format: (length_ft, length_m, container_type, width_m)
+SWAP_BODY_SPECS: List[Tuple[int, float, str, float]] = [
+    (22, 6.71, "22WB", 2.55),
+    (23, 7.01, "23WB", 2.55),
+    (24, 7.3,  "24WB", 2.55),
+    (30, 9.14, "30WB", 2.55),
+    (45, 13.7, "45WB", 2.55),
+]
+
+# Legacy alias — used by _place_distractors() and S11/S12
 CONTAINER_SIZES: List[Tuple[int, float, str]] = [
-    (20, 6.1, "20' DC"),
-    (40, 12.2, "40' HC"),
+    (ft, m, ctype) for ft, m, ctype, _, _, _ in CONTAINER_SPECS
 ]
 
 # Yard geometry loaded once at runtime
@@ -87,11 +146,27 @@ def _make_container(
     cid: str,
     direction: Direction = Direction.IMPORT,
     departure: Optional[datetime] = None,
-    length_ft: int = DEFAULT_LENGTH_FT,
-    length_m: float = DEFAULT_LENGTH_M,
-    container_type: str = CONTAINER_TYPE_40HC,
+    length_ft: int = None,
+    length_m: float = None,
+    container_type: str = None,
+    rng: random.Random = None,
 ) -> Container:
-    """Create a container for tutorials."""
+    """Create a container for tutorials.
+
+    When *length_ft* is ``None`` (the default), a random container type is
+    sampled from the real-world distribution so the agent sees diverse sizes
+    from the very first tutorial tier.
+    """
+    if length_ft is None:
+        _rng = rng or random.Random()
+        ft, m, ctype, _w, _h, _hc = _random_container_spec(_rng)
+        length_ft, length_m, container_type = ft, m, ctype
+    else:
+        # Explicit size provided (e.g. S11/S12 or stacking scenarios)
+        if length_m is None:
+            length_m = DEFAULT_LENGTH_M
+        if container_type is None:
+            container_type = CONTAINER_TYPE_40HC
     return Container(
         container_id=cid,
         direction=direction,
@@ -160,21 +235,21 @@ def _place_distractors(
     count: int,
     prefix: str,
     exclude_bays: Set[int],
-    sizes: Optional[List[Tuple[int, float, str]]] = None,
 ) -> int:
     """Place *count* random distractor containers avoiding *exclude_bays*.
 
-    Returns number actually placed.
+    Each distractor gets a randomly sampled type from the full real-world
+    container distribution.  Returns number actually placed.
     """
-    sizes = sizes or CONTAINER_SIZES
     placed = 0
     for i in range(count):
-        ft, m, label = rng.choice(sizes)
+        ft, m, ctype, _w, _h, _hc = _random_container_spec(rng)
         c = _make_container(
             f"{prefix}_D{i}",
             direction=Direction.IMPORT,
             departure=TUTORIAL_TIME + timedelta(days=15),
-            length_ft=ft, length_m=m, container_type=label,
+            length_ft=ft, length_m=m, container_type=ctype,
+            rng=rng,
         )
         for _ in range(30):
             bay = rng.randint(0, env.yard.n_bays - 1)
@@ -429,9 +504,13 @@ class S9_UnburyForTruck(TutorialScenario):
 
     def setup(self, env) -> None:
         rng = random.Random(42)
-        target = _make_container("S9_TARGET", Direction.IMPORT)
+        # All stacked containers must share the same size
+        ft, m, ctype, _w, _h, _hc = _random_container_spec(rng)
+        target = _make_container("S9_TARGET", Direction.IMPORT,
+                                  length_ft=ft, length_m=m, container_type=ctype)
         blocker = _make_container("S9_BLK1", Direction.IMPORT,
-                                   departure=TUTORIAL_TIME + timedelta(days=10))
+                                   departure=TUTORIAL_TIME + timedelta(days=10),
+                                   length_ft=ft, length_m=m, container_type=ctype)
         env.yard.add_container(target,  _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         env.yard.add_container(blocker, _yard_placement(bay=ANCHOR_BAY, row=0, tier=1))
 
@@ -458,9 +537,13 @@ class S10_UnburyForTrain(TutorialScenario):
 
     def setup(self, env) -> None:
         rng = random.Random(99)
-        target = _make_container("S10_TARGET", Direction.EXPORT)
+        # All stacked containers must share the same size
+        ft, m, ctype, _w, _h, _hc = _random_container_spec(rng)
+        target = _make_container("S10_TARGET", Direction.EXPORT,
+                                  length_ft=ft, length_m=m, container_type=ctype)
         blocker = _make_container("S10_BLK1", Direction.EXPORT,
-                                   departure=TUTORIAL_TIME + timedelta(days=10))
+                                   departure=TUTORIAL_TIME + timedelta(days=10),
+                                   length_ft=ft, length_m=m, container_type=ctype)
         env.yard.add_container(target,  _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         env.yard.add_container(blocker, _yard_placement(bay=ANCHOR_BAY, row=0, tier=1))
 
@@ -585,14 +668,19 @@ class S14_DeepUnbury(TutorialScenario):
 
     def setup(self, env) -> None:
         rng = random.Random(7)
-        target = _make_container("S14_TARGET", Direction.IMPORT)
+        # All stacked containers must share the same size
+        ft, m, ctype, _w, _h, _hc = _random_container_spec(rng)
+        target = _make_container("S14_TARGET", Direction.IMPORT,
+                                  length_ft=ft, length_m=m, container_type=ctype)
         blocker1 = _make_container(
             "S14_BLK1", Direction.IMPORT,
             departure=TUTORIAL_TIME + timedelta(days=10),
+            length_ft=ft, length_m=m, container_type=ctype,
         )
         blocker2 = _make_container(
             "S14_BLK2", Direction.IMPORT,
             departure=TUTORIAL_TIME + timedelta(days=10),
+            length_ft=ft, length_m=m, container_type=ctype,
         )
         env.yard.add_container(target,   _yard_placement(bay=ANCHOR_BAY, row=0, tier=0))
         env.yard.add_container(blocker1, _yard_placement(bay=ANCHOR_BAY, row=0, tier=1))
@@ -933,17 +1021,25 @@ class S21_FullMiniDay(TutorialScenario):
 # Phase 10 — Terminal truck scenarios
 # ================================================================
 
-def _make_swap_body(prefix: str, idx: int) -> Container:
-    """Create a swap body container for terminal truck tutorials."""
+def _make_swap_body(prefix: str, idx: int,
+                    rng: random.Random = None) -> Container:
+    """Create a swap body container for terminal truck tutorials.
+
+    Randomly samples from the 5 real swap body types (22WB–45WB) so the
+    agent sees diverse swap body sizes from the start.
+    """
+    _rng = rng or random.Random()
+    ft, m, ctype, w = _rng.choice(SWAP_BODY_SPECS)
     return Container(
         container_id=f"{prefix}_SB{idx}",
         direction=Direction.IMPORT,
-        container_type="Swap Body",
+        container_type=ctype,
         arrival_date=TUTORIAL_TIME,
         departure_date=DEFAULT_DEPARTURE,
         goods_type=GoodsType.REGULAR,
-        length_ft=40,
-        length_m=12.2,
+        length_ft=ft,
+        length_m=m,
+        width_m=w,
         is_swap_body=True,
     )
 
