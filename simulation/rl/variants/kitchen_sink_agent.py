@@ -144,7 +144,10 @@ class KitchenSinkDQNAgent(BaseSpatialDQNAgent):
         # ── Munchausen reward augmentation ──────────────────────────
         with torch.no_grad():
             q_for_policy = q_src_all.clone()
-            q_for_policy[~src_mask_batch.reshape(B, -1)] = -1e8
+            mask_with_idle = self._source_mask_with_idle(
+                src_mask_batch.reshape(B, -1),
+            )
+            q_for_policy[~mask_with_idle] = -1e8
 
             v_tau = m_tau * torch.logsumexp(q_for_policy / m_tau, dim=1)
             log_pi = (q_for_policy - v_tau.unsqueeze(1)) / m_tau

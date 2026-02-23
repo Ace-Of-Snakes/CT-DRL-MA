@@ -64,7 +64,10 @@ class MunchausenDQNAgent(BaseSpatialDQNAgent):
         with torch.no_grad():
             # Replace -inf with very negative value for stable logsumexp
             q_for_policy = q_src_all.clone()
-            q_for_policy[~src_mask_batch.reshape(B, -1)] = -1e8
+            mask_with_idle = self._source_mask_with_idle(
+                src_mask_batch.reshape(B, -1),
+            )
+            q_for_policy[~mask_with_idle] = -1e8
 
             # log pi(a|s) = Q(s,a)/tau - logsumexp(Q(s,.)/tau)
             v_tau = m_tau * torch.logsumexp(q_for_policy / m_tau, dim=1)

@@ -59,6 +59,7 @@ class MoveType(str, Enum):
     YARD_TO_TERMINAL_TRUCK = "YARD_TO_TERMINAL_TRUCK"
     SLOT_TRUCK_PARKING = "SLOT_TRUCK_PARKING"
     PARK_TRUCK = "PARK_TRUCK"
+    IDLE = "IDLE"
 
 
 class PositionType(str, Enum):

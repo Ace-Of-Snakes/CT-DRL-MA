@@ -50,6 +50,8 @@ _MOVE_TYPE_MAP: Dict[Tuple[str, str], str] = {
     ("YARD", "YARD"):      "YARD_TO_YARD",
     ("YARD", "RAIL"):      "YARD_TO_TRAIN",
     ("YARD", "PARKING"):   "YARD_TO_TRUCK",
+    ("RAIL", "PARKING"):   "TRAIN_TO_TRUCK",
+    ("PARKING", "RAIL"):   "TRUCK_TO_TRAIN",
 }
 
 
@@ -227,15 +229,51 @@ class BaseSpatialDQNAgent(ABC):
                 return s
         return s_start
 
+    def _source_n_splits(
+        self, state: np.ndarray, row: int, split: int, tier: int,
+    ) -> int:
+        """Measure the source container's extent from the occupancy channel."""
+        S = self.dims.n_splits
+        n = 0
+        for s in range(split, min(split + 25, S)):  # 25 = max for 45ft
+            if state[_CH_OCCUPANCY, row, s, tier] > 0.5:
+                n += 1
+            else:
+                break
+        return max(n, 1)
+
     def _resolve_dest_split(
         self, row: int, s_down: int, tier: int, state: np.ndarray,
+        n_splits: int = 1,
     ) -> int:
+        """Map a downsampled dest cell back to a full-resolution split.
+
+        For YARD destinations the resolved split must be the start of
+        *n_splits* contiguous free sub-bays (with support from the tier
+        below when tier > 0) so the position the agent commits to is
+        genuinely placeable.
+        """
         region = self.dims.region_of(row)
         s_start = s_down * self._s_stride
         s_end = min(s_start + self._s_stride, self.dims.n_splits)
+
         if region == "YARD":
+            occ = state[_CH_OCCUPANCY]  # (R, S, T)
             for s in range(s_start, s_end):
-                if state[_CH_OCCUPANCY, row, s, tier] < 0.5:
+                if s + n_splits > self.dims.n_splits:
+                    continue
+                # All destination splits must be free
+                if occ[row, s:s + n_splits, tier].max() > 0.5:
+                    continue
+                # Upper tiers need solid support from below
+                if tier > 0:
+                    if occ[row, s:s + n_splits, tier - 1].min() < 0.5:
+                        continue
+                return s
+            # Fallback: first free single split (may still be rejected by
+            # the resolver, but avoids an obviously occupied position).
+            for s in range(s_start, s_end):
+                if occ[row, s, tier] < 0.5:
                     return s
             return s_start
         else:
@@ -249,9 +287,25 @@ class BaseSpatialDQNAgent(ABC):
         row = flat_idx // (S_d * T)
         return row, s_down, tier
 
+    # Sentinel for IDLE source action in transitions.
+    IDLE_POS_DOWN = (-1, -1, -1)
+
+    @property
+    def _idle_source_index(self) -> int:
+        """Flat index of the IDLE action (last position after all spatial)."""
+        return self._R * self._s_down * self._T
+
     def _flatten_down(self, pos_down: Tuple[int, int, int]) -> int:
+        if pos_down == self.IDLE_POS_DOWN:
+            return self._idle_source_index
         row, s_d, tier = pos_down
         return (row * self._s_down + s_d) * self._T + tier
+
+    def _source_mask_with_idle(self, mask_flat: torch.Tensor) -> torch.Tensor:
+        """Append IDLE=True to a flattened source mask. (B, N) → (B, N+1)."""
+        B = mask_flat.size(0)
+        idle_flag = torch.ones(B, 1, dtype=torch.bool, device=mask_flat.device)
+        return torch.cat([mask_flat, idle_flag], dim=-1)
 
     def _batch_source_mask(self, states: torch.Tensor) -> torch.Tensor:
         starts = states[:, _CH_CONTAINER_START:_CH_CONTAINER_START + 1]
@@ -287,7 +341,13 @@ class BaseSpatialDQNAgent(ABC):
 
         src_mask_t = self._to_bool_tensor(src_down).unsqueeze(0)
         q_src = self.q_net.q_source(encoded.feat_map, src_mask_t)[0]
-        src_flat = self._select_source_action(q_src, src_down.flatten(), eps)
+        # q_src is (N_spatial + 1,) — last element is IDLE
+        valid_with_idle = np.append(src_down.flatten(), True)
+        src_flat = self._select_source_action(q_src, valid_with_idle, eps)
+
+        # Check for IDLE selection
+        if src_flat == self._idle_source_index:
+            return UnifiedActionResult(move_type="IDLE")
 
         src_row, src_s_down, src_tier = self._unflatten(src_flat)
         src_s_orig = self._find_start_in_window(src_row, src_s_down, src_tier, state)
@@ -315,7 +375,10 @@ class BaseSpatialDQNAgent(ABC):
         dst_flat = self._select_dest_action(q_dst, dest_mask_down.flatten(), eps)
 
         dst_row, dst_s_down, dst_tier = self._unflatten(dst_flat)
-        dst_s_orig = self._resolve_dest_split(dst_row, dst_s_down, dst_tier, state)
+        src_n_splits = self._source_n_splits(state, *source_pos)
+        dst_s_orig = self._resolve_dest_split(
+            dst_row, dst_s_down, dst_tier, state, n_splits=src_n_splits,
+        )
         dest_pos = (dst_row, dst_s_orig, dst_tier)
         dest_region = self.dims.region_of(dst_row)
         move_type = resolve_move_type(source_region, dest_region)

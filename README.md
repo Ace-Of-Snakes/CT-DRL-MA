@@ -6,17 +6,17 @@ Master's thesis project by **Franko Jolić** — training DQN-based agents to co
 
 This project implements a full-stack simulation of a container terminal storage yard and trains a Deep RL agent to schedule crane operations — deciding **which container to move** and **where to place it** — to maximize throughput while minimizing truck wait times, stacking inversions, and missed train deadlines.
 
-The agent observes the terminal as a 10-channel spatial tensor (occupancy, urgency, demand, etc.) and outputs two-stage spatial actions: first selecting a **source** position (container to pick up), then a **destination** position (where to place it). Training uses a progressive curriculum that scales from 20 to 220 daily import containers across 11 stages, preceded by a structured tutorial phase with 25 mastery-gated scenarios.
+The agent observes the terminal as a 13-channel spatial tensor (occupancy, urgency, demand, crane proximity, etc.) and outputs two-stage spatial actions: first selecting a **source** position (container to pick up) or **IDLE** (do nothing), then a **destination** position (where to place it). Training uses a progressive curriculum that scales from 20 to 220 daily import containers across 11 stages, preceded by a structured tutorial phase with 27 mastery-gated scenarios.
 
 ### Key Features
 
 - **Realistic terminal simulation** with trains, trucks, terminal trucks, rail yards, parking areas, and a multi-tier storage yard
-- **10-channel CNN state encoding** capturing occupancy, container type, departure urgency, stacking inversions, truck/train demand, and more
-- **2-stage spatial action selection** (source then destination) with dynamic masking for valid moves
+- **13-channel CNN state encoding** capturing occupancy, container type, departure urgency, stacking inversions, truck/train demand, crane proximity, train departure urgency, and time progress
+- **2-stage spatial action selection** (source then destination) with dynamic masking for valid moves and a learnable IDLE action
 - **7 DQN variants** (Baseline, Munchausen, Spectral Norm, NoisyNet, Dueling, QR-DQN, IQN) + a Kitchen Sink combination
 - **6 CNN backbone variants** (Baseline, Wider, Deeper, Residual, Narrow-Deep, Kitchen Sink)
 - **Curriculum learning** with 11 progressive difficulty stages
-- **25 tutorial scenarios** organized in 11 mastery-gated tiers
+- **27 tutorial scenarios** organized in 11 mastery-gated tiers
 - **Multi-crane support** with anti-reversal blacklisting
 - **Realistic crane physics** using trapezoidal motion profiles (gantry, trolley, hoist)
 - **Comprehensive logging** with CSV move tracking, NDJSON step logs, and daily/stage metrics
@@ -34,7 +34,7 @@ Row 13-14: Queue (waiting trucks before parking assignment)
 
 ### State Representation
 
-The terminal state is encoded as a `(10, 15, 1160, 5)` float32 tensor:
+The terminal state is encoded as a `(13, 15, 1160, 5)` float32 tensor:
 
 | Channel | Name | Range | Description |
 |---------|------|-------|-------------|
@@ -48,34 +48,44 @@ The terminal state is encoded as a `(10, 15, 1160, 5)` float32 tensor:
 | 7 | Container Hash | [0.1, 1.0] | Deterministic container ID hash |
 | 8 | Truck Demand | [0, 1] | Parked truck waiting for this container |
 | 9 | Train Demand | [0.1, 1.0] | Train wanting this container |
+| 10 | Crane Proximity | [0, 1] | Normalized distance to nearest crane |
+| 11 | Train Departure Urgency | [0, 1] | Urgency of the train a container is assigned to |
+| 12 | Time Progress | [0, 1] | Normalized time-of-day progress |
 
-Dimensions: **C**=10 channels, **R**=15 unified rows, **S**=1160 splits (58 bays x 20), **T**=5 tiers.
+Dimensions: **C**=13 channels, **R**=15 unified rows, **S**=1160 splits (58 bays x 20), **T**=5 tiers.
 
 ### Decision Flow
 
 ```
-1. Encode state -> (10, 15, 1160, 5) tensor
+1. Encode state -> (13, 15, 1160, 5) tensor
 2. CNN backbone -> feature map (64, 15, 290, 5) [stride=4 downsampling]
 3. OccupiedPooling -> global feature (128-dim)
-4. Source Head: Q(source positions) with source mask
-5. Select source (epsilon-greedy or NoisyNet)
-6. Extract source feature from feature map
-7. Destination Head: Q(dest positions) conditioned on source
-8. Select destination with dynamic destination mask
-9. Infer move type from source/dest regions
-10. Execute crane operation in simulation
+4. Source Head: Q(source positions) + Q(IDLE) with source mask
+5. Select source (epsilon-greedy or NoisyNet) — may select IDLE
+6. If IDLE: advance time, return zero reward
+7. Extract source feature from feature map
+8. Destination Head: Q(dest positions) conditioned on source
+9. Select destination with dynamic destination mask
+10. Resolve downsampled position to full-resolution split
+11. Infer move type from source/dest regions
+12. Execute crane operation in simulation
 ```
+
+The IDLE action is produced by a small MLP (mean-pooled features -> 2 Linear layers -> 1 scalar) appended to the spatial source Q-values via `IdleSourceWrapper`. Its bias is initialized pessimistically (-5.0) so the agent must learn that idling is valuable before choosing it over spatial actions.
 
 ### Move Types
 
 | Move | Direction | Description |
 |------|-----------|-------------|
+| IDLE | — | Crane voluntarily does nothing this step |
 | PARK_TRUCK | Queue -> Parking | Assign waiting truck to parking spot |
 | TRAIN_TO_YARD | Rail -> Yard | Unload import container from train |
 | TRUCK_TO_YARD | Parking -> Yard | Unload delivery container from truck |
 | YARD_TO_TRAIN | Yard -> Rail | Load export container onto train |
 | YARD_TO_TRUCK | Yard -> Parking | Load pickup container onto truck |
 | YARD_TO_YARD | Yard -> Yard | Restack for better accessibility |
+| TRAIN_TO_TRUCK | Rail -> Parking | Direct transfer from train to pickup truck |
+| TRUCK_TO_TRAIN | Parking -> Rail | Direct transfer from delivery truck to train |
 | YARD_TO_TERMINAL_TRUCK | Yard -> Parking | Dispatch swap body via terminal truck |
 
 ### Reward Structure
@@ -123,23 +133,23 @@ All backbones use factored 1D CNN design: container profile extraction (1x21x1),
 
 ## Training Pipeline
 
-### Phase 0: Tutorial Learning (25 Scenarios, 11 Tiers)
+### Phase 0: Tutorial Learning (27 Scenarios, 11 Tiers)
 
 Structured skill-building before curriculum training:
 
 | Tier | Scenarios | Skill |
 |------|-----------|-------|
-| 0 | S1-S4 | Primitives: park, import, export, load |
-| 1 | S5-S6 | Two-action chains |
+| 0 | S1-S4 | Primitives: park, import, yard-to-truck, yard-to-train |
+| 1 | S5-S6, S26-S27 | Two-action chains + direct transfers (train-to-truck, truck-to-train) |
 | 2 | S7-S8 | Full three-action chains |
 | 3 | S9-S10 | Restack + load (with distractors) |
 | 4 | S11-S12 | Random container sizes |
 | 5 | S13-S14 | Multi-truck serving, deep unbury |
-| 6 | S15-S16 | Multi-vehicle batch parking |
-| 7 | S17 | Bidirectional train ops |
-| 8 | S18-S19 | Concurrent import/export |
-| 9 | S20-S21 | Full complexity (crowded yard, mini day) |
-| 10 | S22-S25 | Terminal truck specialization |
+| 6 | S25, S22-S24 | Terminal truck specialization |
+| 7 | S15-S16 | Multi-vehicle batch parking |
+| 8 | S17 | Bidirectional train ops |
+| 9 | S18-S19 | Concurrent import/export |
+| 10 | S20-S21 | Full complexity (crowded yard, mini day) |
 
 Mastery gate: 90% pass rate on all scenarios in a tier before advancing. Periodic maintenance replays of mastered tiers to prevent catastrophic forgetting.
 
@@ -186,7 +196,7 @@ CT-DRL-MA/
 |   |-- env/
 |   |   |-- env.py                   # Base ContainerTerminalEnv
 |   |   |-- unified_env.py           # UnifiedContainerTerminalEnv (2-stage spatial)
-|   |   |-- unified_state_encoder.py # 10-channel state encoder
+|   |   |-- unified_state_encoder.py # 13-channel state encoder
 |   |   +-- reward_engine.py         # Reward calculation
 |   |-- operations/
 |   |   |-- crane_movements.py       # TerminalRMGC (3D crane physics)
@@ -223,7 +233,18 @@ CT-DRL-MA/
 |   |-- training/
 |   |   |-- unified_curriculum_trainer.py  # Main training loop
 |   |   |-- unified_tutorial_runner.py     # Tutorial tier runner
-|   |   +-- tutorial_scenarios.py          # 25 tutorial scenario definitions
+|   |   +-- scenarios/                         # 27 tutorial scenarios (modular, per-tier)
+|   |       |-- _base.py                       # Base class & helpers
+|   |       |-- _registry.py                   # Scenario registry & tier definitions
+|   |       |-- 0_primitives/                  # S1-S4: park, import, yard-to-truck/train
+|   |       |-- 1_chains/                      # S5-S8, S26-S27: action chains & direct transfers
+|   |       |-- 2_restack/                     # S9-S10: unbury + load with distractors
+|   |       |-- 3_generalization/              # S11-S12: random container sizes
+|   |       |-- 4_multi_step/                  # S13-S14: multi-truck, deep unbury
+|   |       |-- 5_terminal_truck/              # S22-S25: terminal truck dispatch
+|   |       |-- 6_multi_vehicle/               # S15-S16: multi-vehicle batch parking
+|   |       |-- 7_bidirectional/               # S17: simultaneous import/export on train
+|   |       +-- 8_stress/                      # S18-S21: concurrent ops & full complexity
 |   |-- analytics/
 |   |   |-- async_logger.py          # Thread-safe NDJSON logger
 |   |   |-- move_csv_logger.py       # Per-move CSV logging
@@ -234,6 +255,7 @@ CT-DRL-MA/
 |       +-- serialization.py         # Object serialization
 |-- tests/                           # Unit tests & stress tests (19 files)
 |-- notebooks/                       # Jupyter analysis notebooks
+|   |-- tutorial_debug.ipynb         # Per-tier training & greedy move-by-move debug
 |   |-- cnn_comparison.ipynb         # CNN backbone benchmarks
 |   |-- variant_comparison.ipynb     # DQN variant benchmarks
 |   |-- kitchen_sink_tutorial.ipynb  # Kitchen sink analysis
@@ -266,7 +288,7 @@ The terminal simulates a realistic storage yard with:
 
 ### Container Types
 
-- **Regular**: Standard 20ft/40ft containers
+- **Regular**: 7 real-world sizes (20ft, 22ft, 23ft, 24ft, 30ft, 40ft, 45ft) occupying 10-23 sub-bay splits
 - **Reefer**: Refrigerated, stored at yard edges
 - **Dangerous Goods**: Stored in center rows
 - **Swap Body / Trailer**: Handled by terminal trucks, stored in designated row

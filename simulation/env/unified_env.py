@@ -250,6 +250,29 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 dest_mask_fn=dest_mask_fn,
             )
 
+            if action.move_type == "IDLE":
+                # Deliberate idle — create transition for learning
+                self._advance_time()
+                next_state = self._encode_state()
+                done = self._check_day_end()
+                transition = UnifiedTransition(
+                    state=state_np,
+                    source_pos_down=(-1, -1, -1),
+                    dest_pos_down=None,
+                    reward=0.0,
+                    next_state=next_state,
+                    done=done,
+                )
+                info["idle"] = True
+                return UnifiedStepResult(
+                    next_state=next_state,
+                    reward=total_penalty,
+                    done=done,
+                    info=info,
+                    transition=transition,
+                    was_valid_move=True,
+                )
+
             if action.move_type is None or action.dest_pos is None:
                 break  # no valid action — idle
 
@@ -290,19 +313,31 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     ) -> Callable[[int, int, int], np.ndarray]:
         """Build closure returning (R_uni, S_down, T) dest mask per source.
 
-        Pre-computes yard validity and parking free masks (expensive)
-        once, then filters per-source via region logic.
+        Computes yard validity per source container's actual n_splits so the
+        mask accurately reflects whether that container fits.  A lightweight
+        cache avoids recomputing the same validity mask for same-size
+        containers within a single step.
         """
         d = self.dims
         stride = self._s_stride
         S_down = self._s_down
+        length_map = self.yard.container_length_map
+        sf = d.split_factor
 
-        # Pre-compute shared masks
-        yard_valid_full = self.unified_encoder.get_yard_validity_mask(
-            MIN_CONTAINER_SPLITS,
-        )
-        yard_valid_down = _downsample_mask(yard_valid_full, stride)
         parking_free_down = self._parking_free_mask_down()
+
+        # Lazy cache: n_splits → downsampled yard validity (populated on demand)
+        _yard_cache: Dict[int, np.ndarray] = {}
+
+        def _yard_valid_for(n_splits: int) -> np.ndarray:
+            """Get (or compute) downsampled yard validity mask for *n_splits*."""
+            cached = _yard_cache.get(n_splits)
+            if cached is not None:
+                return cached
+            full = self.unified_encoder.get_yard_validity_mask(n_splits)
+            down = _downsample_mask(full, stride)
+            _yard_cache[n_splits] = down
+            return down
 
         def dest_mask_fn(
             src_row: int, src_split: int, src_tier: int,
@@ -313,17 +348,41 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             if region == "QUEUE":
                 # Queue → Parking: free parking spots
                 mask[d.parking_row_start, :, 0] = parking_free_down
+                return mask
 
-            elif region in ("RAIL", "PARKING"):
-                # Rail/Parking → Yard: valid yard placements
+            # Look up actual container to get correct n_splits
+            container = self._source_container_object(
+                region, src_row, src_split, src_tier,
+            )
+            n_splits = _container_n_splits(container, length_map, sf)
+            yard_down = _yard_valid_for(n_splits)
+
+            if region in ("RAIL", "PARKING"):
+                # Rail/Parking → Yard: valid yard placements for this size
                 mask[d.yard_row_start:d.yard_row_end] = (
-                    yard_valid_down[d.yard_row_start:d.yard_row_end]
+                    yard_down[d.yard_row_start:d.yard_row_end]
                 )
+                # Also allow direct transfers:
+                #   RAIL → PARKING (TRAIN_TO_TRUCK)
+                #   PARKING → RAIL (TRUCK_TO_TRAIN)
+                if container is not None:
+                    if region == "RAIL":
+                        # Train container → matching pickup truck
+                        if _is_import(container):
+                            self._add_truck_dest_mask(
+                                mask, container, d, S_down, stride,
+                            )
+                    else:
+                        # Truck container → matching train
+                        if _is_export(container):
+                            self._add_rail_dest_mask(
+                                mask, container, d, S_down, stride,
+                            )
 
             elif region == "YARD":
-                # Yard → Yard: restack targets
+                # Yard → Yard: restack targets for this container size
                 mask[d.yard_row_start:d.yard_row_end] = (
-                    yard_valid_down[d.yard_row_start:d.yard_row_end]
+                    yard_down[d.yard_row_start:d.yard_row_end]
                 )
                 # Exclude source position
                 src_s_down = src_split // stride
@@ -332,12 +391,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
                 # Direction-dependent vehicle targets
                 direction = state[_CH_DIRECTION, src_row, src_split, src_tier]
-                container_rec = self._yard_container_at_unified(
-                    src_row, src_split, src_tier,
-                )
-
-                if container_rec is not None:
-                    container = container_rec.container
+                if container is not None:
                     if direction > _DIRECTION_EXPORT_THRESHOLD:
                         # Export → matching train wagons
                         self._add_rail_dest_mask(
@@ -359,6 +413,23 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             return mask
 
         return dest_mask_fn
+
+    def _source_container_object(
+        self, region: str, row: int, split: int, tier: int,
+    ):
+        """Return the container object at the given source position, or None."""
+        if region == "RAIL":
+            container, _train = self._find_rail_container(row, split)
+            return container
+        elif region == "PARKING":
+            truck = self._find_truck_at_parking_split(split)
+            if truck is not None:
+                containers = getattr(truck, "containers", [])
+                return containers[0] if containers else None
+        elif region == "YARD":
+            rec = self._yard_container_at_unified(row, split, tier)
+            return rec.container if rec is not None else None
+        return None
 
     def _parking_free_mask_down(self) -> np.ndarray:
         """(S_down,) bool: True where a free parking spot exists in stride window."""
@@ -588,11 +659,19 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
         reward = PARKING_REWARD_BASE + proximity_bonus
 
+        src_park = action.source_pos or (-1, -1, -1)
+        dst_park = action.dest_pos or (-1, -1, -1)
+        sf_park = self.dims.split_factor
         info["executed"].append({
             "move_type": "PARK_TRUCK",
             "truck_id": truck.truck_id,
             "bay": dst_bay,
             "proximity_bonus": round(proximity_bonus, 4),
+            # Spatial data for visualization
+            "src_row": src_park[0],
+            "src_bay": src_park[1] // sf_park if src_park[1] >= 0 else -1,
+            "dst_row": dst_park[0],
+            "dst_bay": dst_park[1] // sf_park if dst_park[1] >= 0 else -1,
         })
 
         # CSV event logging
@@ -689,11 +768,19 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         )
 
         container_id = move.args.get("container_id", "")
+        src = action.source_pos or (-1, -1, -1)
+        dst = action.dest_pos or (-1, -1, -1)
+        sf = self.dims.split_factor
         info["executed"].append({
             "move_type": move.type.value,
             "container_id": container_id,
             "distance_m": round(distance_m, 2),
             "time_s": round(time_s, 2),
+            # Spatial data for visualization
+            "src_row": src[0],
+            "src_bay": src[1] // sf if src[1] >= 0 else -1,
+            "dst_row": dst[0],
+            "dst_bay": dst[1] // sf if dst[1] >= 0 else -1,
         })
 
         # CSV move logging
@@ -735,6 +822,8 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         "YARD_TO_TRUCK":  "_resolve_yard_to_truck",
         "TRAIN_TO_YARD":  "_resolve_rail_to_yard",
         "TRUCK_TO_YARD":  "_resolve_parking_to_yard",
+        "TRAIN_TO_TRUCK": "_resolve_rail_to_parking",
+        "TRUCK_TO_TRAIN": "_resolve_parking_to_rail",
     }
 
     def _resolve_move(self, action: UnifiedActionResult) -> Optional[Move]:
@@ -934,6 +1023,70 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
+    def _resolve_rail_to_parking(self, action: UnifiedActionResult) -> Optional[Move]:
+        """Direct transfer: train container → pickup truck at parking."""
+        container, train = self._find_rail_container(
+            action.source_pos[0], action.source_pos[1],
+        )
+        if container is None or train is None:
+            return None
+
+        if not _is_import(container):
+            return None
+
+        truck = self._find_truck_at_parking_split(action.dest_pos[1])
+        if truck is None:
+            return None
+
+        if getattr(truck, "is_terminal_truck", False):
+            return None  # terminal trucks use YARD_TO_TERMINAL_TRUCK
+
+        if container.container_id not in getattr(truck, "pickup_container_ids", set()):
+            return None
+        if not truck.can_accommodate_container(container):
+            return None
+
+        return Move(
+            type=MoveType.TRAIN_TO_TRUCK,
+            args={
+                "train_id": train.train_id,
+                "truck_id": truck.truck_id,
+                "container_id": container.container_id,
+            },
+        )
+
+    def _resolve_parking_to_rail(self, action: UnifiedActionResult) -> Optional[Move]:
+        """Direct transfer: truck container → train."""
+        truck = self._find_truck_at_parking_split(action.source_pos[1])
+        if truck is None or not getattr(truck, "containers", None):
+            return None
+
+        container = truck.containers[0]
+        if not _is_export(container):
+            return None
+
+        dst_row = action.dest_pos[0]
+        if dst_row >= self.dims.rail_row_end:
+            return None
+
+        train = self._find_train_on_track(dst_row)
+        if train is None:
+            return None
+
+        if container.container_id not in train.get_all_pickup_container_ids():
+            return None
+        if not train.has_space_for_container(container):
+            return None
+
+        return Move(
+            type=MoveType.TRUCK_TO_TRAIN,
+            args={
+                "train_id": train.train_id,
+                "truck_id": truck.truck_id,
+                "container_id": container.container_id,
+            },
+        )
+
     # ══════════════════════════════════════════════════════════════════
     # Entity resolution helpers
     # ══════════════════════════════════════════════════════════════════
@@ -1122,6 +1275,24 @@ def _wagon_has_space(wagon) -> bool:
     capacity = getattr(wagon, "capacity", 2)
     current = len(getattr(wagon, "containers", {}))
     return current < capacity
+
+
+def _container_n_splits(container, length_map, split_factor: int) -> int:
+    """Calculate the number of sub-bay splits a container occupies.
+
+    Derives it directly from the container's ``length_ft`` and the yard's
+    ``split_factor`` (sub-bays per bay).  Falls back to the yard's
+    ``container_length_map`` when the attribute is missing, and to 20 ft
+    (the minimum) as a last resort.
+    """
+    if container is None:
+        return max(1, split_factor // 2)  # conservative: half a bay (20 ft)
+    length_ft = getattr(container, "length_ft", None)
+    if length_ft is None:
+        cid = getattr(container, "container_id", None)
+        length_ft = length_map.get(cid, 20) if cid and length_map else 20
+    ft_per_split = 40.0 / split_factor
+    return max(1, int(np.ceil(length_ft / ft_per_split)))
 
 
 def _is_export(container) -> bool:

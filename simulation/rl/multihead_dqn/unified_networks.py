@@ -173,6 +173,79 @@ class SourceHead(nn.Module):
         return q_flat.masked_fill(~mask_flat, float("-inf"))
 
 
+class IdleSourceWrapper(nn.Module):
+    """Wraps any source head, appending a learnable IDLE Q-value.
+
+    The IDLE action lets a crane voluntarily do nothing when no productive
+    move is available.  The idle Q-value is derived from mean-pooled spatial
+    features, independent of the inner head's architecture.
+
+    Output shape: inner output with +1 on the last (action) dimension.
+    Works with standard (B, N), distributional (B, N_q, N), and
+    IQN tuple ((B, N_tau, N), tau) outputs.
+    """
+
+    def __init__(self, inner: nn.Module, feat_channels: int):
+        super().__init__()
+        self.inner = inner
+        mid = max(feat_channels // 4, 8)
+        self.idle_mlp = nn.Sequential(
+            nn.Linear(feat_channels, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, 1),
+        )
+        # Pessimistic init: IDLE must *earn* its way up from a negative
+        # Q-value so it doesn't compete with spatial actions from the start.
+        # This is critical for NoisyNet where the spatial head carries
+        # exploration noise but the IDLE MLP uses plain nn.Linear — when
+        # noise is zeroed (greedy eval) IDLE would otherwise dominate.
+        nn.init.constant_(self.idle_mlp[-1].bias, -5.0)
+
+    def _idle_q(self, feat_map: torch.Tensor) -> torch.Tensor:
+        """Compute IDLE Q-value from mean-pooled spatial features. (B, 1)."""
+        pooled = feat_map.mean(dim=(2, 3, 4))  # (B, C)
+        return self.idle_mlp(pooled)            # (B, 1)
+
+    def forward(
+        self, feat_map: torch.Tensor, source_mask: torch.Tensor, **kwargs,
+    ) -> torch.Tensor:
+        result = self.inner(feat_map, source_mask, **kwargs)
+        q_idle = self._idle_q(feat_map)  # (B, 1)
+
+        # IQN returns a tuple (q_quantiles, tau)
+        if isinstance(result, tuple):
+            q_spatial, tau = result
+            # (B, N_tau, N) → (B, N_tau, N+1)
+            q_idle_exp = q_idle.unsqueeze(1).expand(-1, q_spatial.size(1), -1)
+            return torch.cat([q_spatial, q_idle_exp], dim=-1), tau
+
+        # Distributional: (B, N_q, N) → (B, N_q, N+1)
+        if result.dim() == 3:
+            q_idle_exp = q_idle.unsqueeze(1).expand(-1, result.size(1), -1)
+            return torch.cat([result, q_idle_exp], dim=-1)
+
+        # Standard: (B, N) → (B, N+1)
+        return torch.cat([result, q_idle], dim=-1)
+
+    def q_mean(
+        self, feat_map: torch.Tensor, source_mask: torch.Tensor, **kwargs,
+    ) -> torch.Tensor:
+        """Mean Q-values with IDLE appended. (B, N+1)."""
+        if hasattr(self.inner, "q_mean"):
+            q_spatial = self.inner.q_mean(feat_map, source_mask, **kwargs)
+        else:
+            q_spatial = self.inner(feat_map, source_mask, **kwargs)
+        q_idle = self._idle_q(feat_map)
+        return torch.cat([q_spatial, q_idle], dim=-1)
+
+    # ── Proxy methods for NoisyNet compatibility ──────────────────
+
+    def reset_noise(self):
+        """Forward reset_noise to inner head if it supports it."""
+        if hasattr(self.inner, "reset_noise"):
+            self.inner.reset_noise()
+
+
 class UnifiedDestHead(nn.Module):
     """Source-conditioned destination scoring via additive feat_map fusion.
 
@@ -282,7 +355,8 @@ class UnifiedQNetwork(nn.Module):
         # Swappable components (defaults = baseline)
         self.backbone = backbone if backbone is not None else FactoredCNNBackbone(cnn_cfg)
         self.pool = pool if pool is not None else OccupiedPooling(Fc, G)
-        self.source_head = source_head if source_head is not None else SourceHead(Fc)
+        inner_src = source_head if source_head is not None else SourceHead(Fc)
+        self.source_head = IdleSourceWrapper(inner_src, Fc)
         self.dest_head = dest_head if dest_head is not None else UnifiedDestHead(Fc, G)
 
     # ── Encoding ──────────────────────────────────────────────────────

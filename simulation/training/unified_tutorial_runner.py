@@ -2,34 +2,31 @@
 """Tiered tutorial runner for the unified spatial agent.
 
 The agent must master each tier before advancing to the next.
-Previously mastered tiers are replayed every `maintenance_interval`
+Previously mastered tiers are replayed every ``maintenance_interval``
 epochs to prevent catastrophic forgetting.
 
-Tier layout (auto-built, with fallback for unknown scenario IDs):
-  Tier 0  — Primitives:           S1-S4   (single actions)
-  Tier 1  — Two-action chains:    S5-S6
-  Tier 2  — Full chains:          S7-S8   (3 actions)
-  Tier 3  — Restack + load:       S9-S10  (with distractors)
-  Tier 4  — Random generalize:    S11-S12
-  Tier 5  — Multi-step hard:      S13-S14
-  Tier 6  — Multi-vehicle:        S15-S16
-  Tier 7  — Bidirectional train:  S17
-  Tier 8  — Concurrent ops:       S18-S19
-  Tier 9  — Full complexity:      S20-S21
-  Tier 10 — Terminal truck:       S22-S25
+**One-shot graduation**: scenarios marked ``repeatable=False`` (the
+deterministic primitives and chains S1–S8, S25) are dropped from
+maintenance replays once their tier is mastered.  Only ``repeatable``
+scenarios continue to be replayed, saving significant training time.
+
+Tier definitions live in ``simulation.training.scenarios._registry.TIER_DEFS``.
 """
 from __future__ import annotations
 
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig
 from simulation.rl.multihead_dqn.unified_agent import UnifiedDQNAgent
 from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
-from simulation.training.tutorial_scenarios import (
+from simulation.training.scenarios import (
     ALL_SCENARIOS,
+    MoveRecord,
+    StepEvent,
+    TIER_DEFS,
     TUTORIAL_TIME,
     TutorialResult,
     TutorialScenario,
@@ -41,22 +38,6 @@ logger = logging.getLogger(__name__)
 
 TUTORIAL_REWARD_TIMEOUT: float = -5.0
 TUTORIAL_REWARD_SUCCESS: float = 5.0
-
-# Tier boundaries: (name, scenario_ids).
-# Unlisted scenarios are auto-grouped into a final "Advanced" tier.
-_TIER_BOUNDARIES: List[Tuple[str, List[int]]] = [
-    ("Primitives",         [1, 2, 3, 4]),
-    ("Two-action chains",  [5, 6]),
-    ("Full chains",        [7, 8]),
-    ("Restack + load",     [9, 10]),
-    ("Random generalize",  [11, 12]),
-    ("Multi-step hard",    [13, 14]),
-    ("Terminal truck",     [25, 22, 23, 24]),
-    ("Multi-vehicle",      [15, 16]),
-    ("Bidirectional train", [17]),
-    ("Concurrent ops",     [18, 19]),
-    ("Full complexity",    [20, 21]),
-]
 
 DEFAULT_MAINTENANCE_INTERVAL: int = 3
 
@@ -76,12 +57,12 @@ class TutorialTier:
 
 
 def _build_tiers() -> List[TutorialTier]:
-    """Build tiers from ALL_SCENARIOS using _TIER_BOUNDARIES."""
+    """Build tiers from ALL_SCENARIOS using TIER_DEFS (from _registry)."""
     by_id = {sc.id: sc for sc in ALL_SCENARIOS}
     assigned: set = set()
     tiers: List[TutorialTier] = []
 
-    for idx, (name, ids) in enumerate(_TIER_BOUNDARIES):
+    for idx, (name, ids) in enumerate(TIER_DEFS):
         scenarios = [by_id[sid] for sid in ids if sid in by_id]
         if scenarios:
             tiers.append(TutorialTier(index=idx, name=name, scenarios=scenarios))
@@ -125,7 +106,7 @@ class UnifiedTutorialRunner:
     # ── Public API ────────────────────────────────────────────────────
 
     def run_scenario(self, scenario: TutorialScenario) -> TutorialResult:
-        """Run one scenario, return result."""
+        """Run one scenario, return a rich TutorialResult with structured logs."""
         env = self.env
         self._reset_tutorial(env)
         scenario.setup(env)
@@ -137,23 +118,72 @@ class UnifiedTutorialRunner:
 
         total_reward = 0.0
         agent_moves = 0
-        move_log: List[Dict] = []
+        move_records: List[MoveRecord] = []
+        step_events: List[StepEvent] = []
+        move_log_raw: List[Dict] = []
         last_transition: Optional[UnifiedTransition] = None
 
         for step in range(scenario.max_steps):
             state, reward, done, info = env.step_all_cranes(self.agent)
+
+            executed = info.get("executed", [])
+            transitions = info.get("transitions", [])
+
+            # ── Build MoveRecords from executed + transitions ─────────
+            for i, ex in enumerate(executed):
+                agent_moves += 1
+                move_log_raw.append(ex)
+
+                # Match executed[i] with transitions[i] for per-move reward
+                move_reward = 0.0
+                if i < len(transitions):
+                    move_reward = transitions[i].reward
+
+                move_records.append(MoveRecord(
+                    step=step,
+                    move_num=agent_moves,
+                    move_type=ex.get("move_type", ""),
+                    container_id=ex.get("container_id", ex.get("truck_id", "")),
+                    distance_m=ex.get("distance_m", 0.0),
+                    time_s=ex.get("time_s", 0.0),
+                    reward=move_reward,
+                    proximity_bonus=ex.get("proximity_bonus"),
+                    # Spatial fields (populated when env provides them — Phase D)
+                    src_row=ex.get("src_row"),
+                    src_bay=ex.get("src_bay"),
+                    dst_row=ex.get("dst_row"),
+                    dst_bay=ex.get("dst_bay"),
+                ))
+
+            # ── Accumulate step reward ────────────────────────────────
             total_reward += reward
 
-            for ex in info.get("executed", []):
-                move_log.append(ex)
-                agent_moves += 1
+            # ── Track non-move reward (reward that doesn't come from moves)
+            move_reward_sum = sum(
+                t.reward for t in transitions
+            )
+            non_move_reward = reward - move_reward_sum
+            if abs(non_move_reward) > 1e-6:
+                step_events.append(StepEvent(
+                    step=step,
+                    event_type="non_move",
+                    reward=non_move_reward,
+                    detail=f"step {step}: non-move reward component",
+                ))
 
-            for t in info.get("transitions", []):
+            # ── Remember transitions for agent learning ───────────────
+            for t in transitions:
                 self.agent.remember(t)
                 last_transition = t
 
             if scenario.check_success(env):
                 total_reward += TUTORIAL_REWARD_SUCCESS
+                step_events.append(StepEvent(
+                    step=step,
+                    event_type="SUCCESS_BONUS",
+                    reward=TUTORIAL_REWARD_SUCCESS,
+                    detail=f"Scenario completed at step {step + 1}",
+                ))
                 if last_transition is not None:
                     last_transition.done = True
                     last_transition.reward += TUTORIAL_REWARD_SUCCESS
@@ -165,13 +195,21 @@ class UnifiedTutorialRunner:
                     steps=step + 1,
                     agent_moves=agent_moves,
                     total_reward=total_reward,
-                    move_log=move_log,
+                    move_log=move_records,
+                    step_events=step_events,
+                    move_log_raw=move_log_raw,
                 )
 
             if done:
                 break
 
         total_reward += TUTORIAL_REWARD_TIMEOUT
+        step_events.append(StepEvent(
+            step=scenario.max_steps - 1,
+            event_type="TIMEOUT_PENALTY",
+            reward=TUTORIAL_REWARD_TIMEOUT,
+            detail=f"Scenario timed out after {scenario.max_steps} steps",
+        ))
         if last_transition is not None:
             last_transition.done = True
             last_transition.reward += TUTORIAL_REWARD_TIMEOUT
@@ -182,7 +220,9 @@ class UnifiedTutorialRunner:
             steps=scenario.max_steps,
             agent_moves=agent_moves,
             total_reward=total_reward,
-            move_log=move_log,
+            move_log=move_records,
+            step_events=step_events,
+            move_log_raw=move_log_raw,
         )
 
     def run_all(self) -> List[TutorialResult]:
@@ -202,6 +242,12 @@ class UnifiedTutorialRunner:
     ) -> Dict[str, object]:
         """Train with tiered progression — master each tier before advancing.
 
+        One-shot graduation: when a tier is mastered, any scenario in that
+        tier with ``repeatable=False`` is permanently graduated and skipped
+        during future maintenance replays.  This saves training time on
+        deterministic primitives (S1–S8, S25) that don't benefit from
+        ongoing practice.
+
         Args:
             early_stop_check: Optional callback ``(epoch, current_tier) -> bool``.
                 If it returns ``True``, training is aborted early.
@@ -219,6 +265,10 @@ class UnifiedTutorialRunner:
         tier_start_epoch: Dict[int, int] = {0: 0}
         mastered = False
 
+        # One-shot graduation: track which scenario IDs have graduated.
+        # A one-shot scenario graduates when its tier is first mastered.
+        graduated: Set[int] = set()
+
         if self.verbose:
             self._print_tier_plan(tiers)
 
@@ -232,10 +282,11 @@ class UnifiedTutorialRunner:
             )
 
             # ── Maintenance: replay mastered tiers periodically ──────
+            # Uses _run_tier_maintenance which skips graduated one-shots.
             if current_tier > 0 and epoch % maintenance_interval == 0:
                 for ti in range(current_tier):
-                    steps_this_epoch += self._run_tier(
-                        tiers[ti], history, learn_every,
+                    steps_this_epoch += self._run_tier_maintenance(
+                        tiers[ti], history, learn_every, graduated,
                     )
 
             # Extra optimization passes
@@ -245,15 +296,24 @@ class UnifiedTutorialRunner:
             # ── Check tier mastery ───────────────────────────────────
             rates = self._get_pass_rates(history)
             self._log_progress(epoch + 1, epochs, rates, tiers, current_tier,
-                               mastery_threshold, log_every)
+                               mastery_threshold, log_every,
+                               graduated=graduated)
 
             epochs_in_tier = epoch - tier_start_epoch.get(current_tier, 0)
             if epochs_in_tier >= min_epochs and epochs_in_tier >= window_size:
                 if self._tier_mastered(tiers[current_tier], rates, mastery_threshold):
+                    # Graduate one-shot scenarios in the mastered tier
+                    newly_graduated = self._graduate_one_shots(
+                        tiers[current_tier], graduated,
+                    )
+
                     if self.verbose:
                         print(f"\n  ✓ TIER {current_tier} MASTERED "
                               f"({tiers[current_tier].name}) at epoch {epoch + 1}",
                               flush=True)
+                        if newly_graduated:
+                            grad_ids = ", ".join(f"S{sid}" for sid in sorted(newly_graduated))
+                            print(f"    → Graduated one-shots: {grad_ids}", flush=True)
 
                     current_tier += 1
                     if current_tier >= n_tiers:
@@ -265,6 +325,7 @@ class UnifiedTutorialRunner:
                                 epoch + 1, epochs, rates, tiers,
                                 n_tiers - 1, mastery_threshold,
                                 log_every=1, force=True,
+                                graduated=graduated,
                             )
                         break
 
@@ -293,6 +354,7 @@ class UnifiedTutorialRunner:
                 epoch + 1, epochs, final_rates, tiers,
                 current_tier, mastery_threshold,
                 log_every=1, force=True,
+                graduated=graduated,
             )
 
         early_stopped = (
@@ -309,6 +371,7 @@ class UnifiedTutorialRunner:
             "n_tiers": n_tiers,
             "pass_rates": {sid: final_rates.get(sid, 0) for sid in all_sids},
             "scenario_names": scenario_names,
+            "graduated": sorted(graduated),
         }
 
     # ── Training helpers ──────────────────────────────────────────────
@@ -328,6 +391,46 @@ class UnifiedTutorialRunner:
             if total_steps % learn_every == 0:
                 self.agent.optimize()
         return total_steps
+
+    def _run_tier_maintenance(
+        self,
+        tier: TutorialTier,
+        history: Dict[int, deque],
+        learn_every: int,
+        graduated: Set[int],
+    ) -> int:
+        """Run a tier for maintenance, **skipping** graduated one-shot scenarios.
+
+        Repeatable scenarios always run.  One-shot scenarios that have
+        been graduated (mastered and no longer need practice) are skipped.
+        If all scenarios in the tier are graduated, returns 0.
+        """
+        total_steps = 0
+        for sc in tier.scenarios:
+            if sc.id in graduated:
+                continue
+            result = self.run_scenario(sc)
+            history[sc.id].append(1 if result.passed else 0)
+            total_steps += result.steps
+            if total_steps % learn_every == 0:
+                self.agent.optimize()
+        return total_steps
+
+    @staticmethod
+    def _graduate_one_shots(
+        tier: TutorialTier,
+        graduated: Set[int],
+    ) -> Set[int]:
+        """Graduate non-repeatable scenarios in a mastered tier.
+
+        Returns the set of newly graduated scenario IDs.
+        """
+        newly = set()
+        for sc in tier.scenarios:
+            if not sc.repeatable and sc.id not in graduated:
+                graduated.add(sc.id)
+                newly.add(sc.id)
+        return newly
 
     @staticmethod
     def _get_pass_rates(history: Dict[int, deque]) -> Dict[int, float]:
@@ -363,10 +466,12 @@ class UnifiedTutorialRunner:
         threshold: float,
         log_every: int,
         force: bool = False,
+        graduated: Optional[Set[int]] = None,
     ) -> None:
         if not self.verbose or (not force and epoch % log_every != 0):
             return
 
+        graduated = graduated or set()
         tier_label = tiers[min(current_tier, len(tiers) - 1)].name
         print(f"\n  Epoch {epoch}/{max_epochs} — "
               f"Tier {current_tier}: {tier_label}", flush=True)
@@ -394,7 +499,12 @@ class UnifiedTutorialRunner:
                 rate = rates.get(sc.id, 0.0)
                 filled = int(rate * 20)
                 bar = "=" * filled + "-" * (20 - filled)
-                tag = "OK" if rate >= threshold else "  "
+                if sc.id in graduated:
+                    tag = "🎓"  # graduated one-shot
+                elif rate >= threshold:
+                    tag = "OK"
+                else:
+                    tag = "  "
                 print(f"      [{bar}] {rate:5.1%} {tag} "
                       f"S{sc.id}: {sc.name}", flush=True)
 
@@ -402,10 +512,12 @@ class UnifiedTutorialRunner:
         active_rates = [rates.get(sc.id, 0.0) for sc in active_scs]
         avg = sum(active_rates) / max(len(active_rates), 1)
         n_ok = sum(1 for r in rates.values() if r >= threshold)
+        n_grad = len(graduated)
         eps = (f"{self.agent._get_epsilon():.3f}"
                if hasattr(self.agent, "_get_epsilon") else "?")
         print(f"    Average (active): {avg:.1%} | "
-              f"Mastered: {n_ok}/{len(ALL_SCENARIOS)} | ε={eps}", flush=True)
+              f"Mastered: {n_ok}/{len(ALL_SCENARIOS)} | "
+              f"Graduated: {n_grad} | ε={eps}", flush=True)
 
     # ── Environment reset ─────────────────────────────────────────────
 
