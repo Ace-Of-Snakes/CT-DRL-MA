@@ -97,16 +97,8 @@ class Train:
                     return True
             return False
         
-        # Auto-placement
-        # if container.container_type in EXCLUSIVE_CONTAINER_TYPES:
-        #     # Try empty wagons only - O(1) average
-        #     for idx in self.empty_wagons:
-        #         if self._add_to_wagon(idx, container):
-        #             return True
-        # else:
-        # Try wagons with space - O(1) average
+        # Auto-placement: try wagons with space - O(1) average
         for idx in self.wagons_with_space:
-            # wagon = self.wagons[idx]
             if self._add_to_wagon(idx, container):
                 return True
         

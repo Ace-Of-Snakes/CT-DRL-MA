@@ -4,6 +4,10 @@
 Replaces nn.Linear with a layer that adds learned parametric noise
 to weights and biases, enabling state-dependent exploration without
 epsilon-greedy.
+
+Supports an external ``noise_scale`` multiplier (default 1.0) that
+uniformly attenuates the noise contribution.  Set to 0.0 for a fully
+deterministic (greedy) forward pass.
 """
 import math
 
@@ -13,13 +17,20 @@ import torch.nn.functional as F
 
 
 class NoisyLinear(nn.Module):
-    """Linear layer with factorized Gaussian noise."""
+    """Linear layer with factorized Gaussian noise.
+
+    The ``noise_scale`` attribute (default 1.0) multiplies the noise
+    contribution at forward time.  External callers (e.g. the agent's
+    ``set_noise_scale``) can anneal it from 1.0 → 0.0 over training to
+    smoothly transition from exploration to exploitation.
+    """
 
     def __init__(self, in_features: int, out_features: int, sigma0: float = 0.5):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.sigma0 = sigma0
+        self.noise_scale: float = 1.0
 
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
         self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
@@ -52,6 +63,7 @@ class NoisyLinear(nn.Module):
         return x.sign() * x.abs().sqrt()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
-        bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+        ns = self.noise_scale
+        weight = self.weight_mu + ns * self.weight_sigma * self.weight_epsilon
+        bias = self.bias_mu + ns * self.bias_sigma * self.bias_epsilon
         return F.linear(x, weight, bias)

@@ -31,12 +31,18 @@ from simulation.rl.multihead_dqn.unified_replay_buffer import (
     UnifiedReplayBuffer, UnifiedPrioritizedReplayBuffer, UnifiedTransition,
 )
 
+# ── Named constants ───────────────────────────────────────────────────
 # Channel indices (must match unified_state_encoder.UnifiedChannelSpec)
 _CH_OCCUPANCY = 0
 _CH_CONTAINER_START = 1
+_OCC_THRESHOLD = 0.5        # Binary threshold for occupancy channel
+_MAX_CONTAINER_SPLITS = 25  # Largest container (45ft) spans at most 25 splits
 
-# Type alias for dest mask builder callable
-DestMaskFn = Callable[[int, int, int], np.ndarray]
+# Type alias for dest mask builder callable.
+# Returns (mask, n_splits): the boolean dest mask and the source container's
+# footprint in sub-bays, so the caller can resolve the downsampled
+# destination back to full resolution with the correct width.
+DestMaskFn = Callable[[int, int, int], Tuple[np.ndarray, int]]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -209,6 +215,14 @@ class BaseSpatialDQNAgent(ABC):
     def clear_epsilon_override(self):
         self.epsilon_override = None
 
+    # ── Noise scale (NoisyNet variants override) ──────────────────
+
+    def set_noise_scale(self, scale: float) -> None:
+        """Set noise multiplier on NoisyLinear layers.  No-op for non-noisy agents."""
+
+    def set_tutorial_noise(self, epoch: int) -> None:
+        """Anneal noise over tutorial epochs.  No-op for non-noisy agents."""
+
     # ── Mask helpers ────────────────────────────────────────────────
 
     def _downsample_mask(self, mask: np.ndarray) -> np.ndarray:
@@ -225,18 +239,24 @@ class BaseSpatialDQNAgent(ABC):
         s_start = s_down * self._s_stride
         s_end = min(s_start + self._s_stride, self.dims.n_splits)
         for s in range(s_start, s_end):
-            if state[channel, row, s, tier] > 0.5:
+            if state[channel, row, s, tier] > _OCC_THRESHOLD:
                 return s
         return s_start
 
     def _source_n_splits(
         self, state: np.ndarray, row: int, split: int, tier: int,
     ) -> int:
-        """Measure the source container's extent from the occupancy channel."""
+        """Measure the source container's extent from the occupancy channel.
+
+        .. deprecated::
+            No longer called from ``act()``.  The authoritative n_splits is
+            now returned by ``dest_mask_fn`` alongside the mask.  Kept for
+            backward compatibility and debugging.
+        """
         S = self.dims.n_splits
         n = 0
-        for s in range(split, min(split + 25, S)):  # 25 = max for 45ft
-            if state[_CH_OCCUPANCY, row, s, tier] > 0.5:
+        for s in range(split, min(split + _MAX_CONTAINER_SPLITS, S)):
+            if state[_CH_OCCUPANCY, row, s, tier] > _OCC_THRESHOLD:
                 n += 1
             else:
                 break
@@ -248,10 +268,14 @@ class BaseSpatialDQNAgent(ABC):
     ) -> int:
         """Map a downsampled dest cell back to a full-resolution split.
 
-        For YARD destinations the resolved split must be the start of
-        *n_splits* contiguous free sub-bays (with support from the tier
-        below when tier > 0) so the position the agent commits to is
-        genuinely placeable.
+        Resolution strategy depends on the destination region:
+
+        * **YARD** — find the first *n_splits* contiguous free sub-bays
+          (with tier support) so the position is genuinely placeable.
+        * **PARKING** — find the first *free* split in the stride window
+          so the truck doesn't land on an already-occupied spot.
+        * **RAIL / other** — find the first *occupied* split
+          (``CONTAINER_START``), i.e. the wagon / entity to deliver to.
         """
         region = self.dims.region_of(row)
         s_start = s_down * self._s_stride
@@ -263,21 +287,30 @@ class BaseSpatialDQNAgent(ABC):
                 if s + n_splits > self.dims.n_splits:
                     continue
                 # All destination splits must be free
-                if occ[row, s:s + n_splits, tier].max() > 0.5:
+                if occ[row, s:s + n_splits, tier].max() > _OCC_THRESHOLD:
                     continue
                 # Upper tiers need solid support from below
                 if tier > 0:
-                    if occ[row, s:s + n_splits, tier - 1].min() < 0.5:
+                    if occ[row, s:s + n_splits, tier - 1].min() < _OCC_THRESHOLD:
                         continue
                 return s
             # Fallback: first free single split (may still be rejected by
             # the resolver, but avoids an obviously occupied position).
             for s in range(s_start, s_end):
-                if occ[row, s, tier] < 0.5:
+                if occ[row, s, tier] < _OCC_THRESHOLD:
                     return s
             return s_start
-        else:
-            return self._find_start_in_window(row, s_down, tier, state)
+
+        if region == "PARKING":
+            # Parking dest = empty spot.  Scan for the first FREE split.
+            occ = state[_CH_OCCUPANCY]
+            for s in range(s_start, s_end):
+                if occ[row, s, tier] < _OCC_THRESHOLD:
+                    return s
+            return s_start  # fallback (executor will reject if full)
+
+        # RAIL / other: find the occupied entity (wagon position).
+        return self._find_start_in_window(row, s_down, tier, state)
 
     def _unflatten(self, flat_idx: int) -> Tuple[int, int, int]:
         T = self._T
@@ -311,7 +344,7 @@ class BaseSpatialDQNAgent(ABC):
         starts = states[:, _CH_CONTAINER_START:_CH_CONTAINER_START + 1]
         stride = self._s_stride
         down = F.max_pool3d(starts, (1, stride, 1), stride=(1, stride, 1))
-        return down.squeeze(1) > 0.5
+        return down.squeeze(1) > _OCC_THRESHOLD
 
     # ── Action selection ────────────────────────────────────────────
 
@@ -360,7 +393,7 @@ class BaseSpatialDQNAgent(ABC):
         source_feat = self.q_net.extract_source_feat(encoded.feat_map, pos_t)
 
         # ── Stage 2: Destination selection ──────────────────────────
-        dest_mask_down = dest_mask_fn(src_row, src_s_orig, src_tier)
+        dest_mask_down, src_n_splits = dest_mask_fn(src_row, src_s_orig, src_tier)
         if not dest_mask_down.any():
             return UnifiedActionResult(
                 source_pos=source_pos,
@@ -375,7 +408,6 @@ class BaseSpatialDQNAgent(ABC):
         dst_flat = self._select_dest_action(q_dst, dest_mask_down.flatten(), eps)
 
         dst_row, dst_s_down, dst_tier = self._unflatten(dst_flat)
-        src_n_splits = self._source_n_splits(state, *source_pos)
         dst_s_orig = self._resolve_dest_split(
             dst_row, dst_s_down, dst_tier, state, n_splits=src_n_splits,
         )
@@ -434,6 +466,53 @@ class BaseSpatialDQNAgent(ABC):
         loss_val = loss.item()
         self.losses.append(loss_val)
         return loss_val
+
+    # ── Auxiliary destination loss (shared by all loss variants) ────
+
+    def _aux_dest_loss(
+        self,
+        encoded,
+        transitions: List[UnifiedTransition],
+    ) -> Optional[torch.Tensor]:
+        """Reward-prediction auxiliary loss on the destination head.
+
+        For each transition with a valid dest_pos_down, score the
+        destination Q-value and predict the move's reward.  Returns
+        None if no transitions have destination info (e.g. all IDLE).
+        """
+        aux_preds: List[torch.Tensor] = []
+        aux_targets: List[float] = []
+
+        for i, t in enumerate(transitions):
+            if t.dest_pos_down is None:
+                continue
+            sp = t.source_pos_down
+            pos = torch.tensor(
+                [[sp[0], sp[1], sp[2]]], dtype=torch.long, device=self.device,
+            )
+            src_feat = self.q_net.extract_source_feat(
+                encoded.feat_map[i:i + 1], pos,
+            )
+            dp = t.dest_pos_down
+            dp_flat = self._flatten_down(dp)
+            dest_mask = torch.zeros(
+                1, self._R, self._s_down, self._T,
+                dtype=torch.bool, device=self.device,
+            )
+            dest_mask[0, dp[0], dp[1], dp[2]] = True
+            q_dst = self.q_net.q_dest(
+                encoded.feat_map[i:i + 1], encoded.global_feat[i:i + 1],
+                src_feat, dest_mask,
+            )[0]
+            aux_preds.append(q_dst[dp_flat])
+            aux_targets.append(t.reward)
+
+        if not aux_preds:
+            return None
+        return F.smooth_l1_loss(
+            torch.stack(aux_preds),
+            torch.tensor(aux_targets, dtype=torch.float32, device=self.device),
+        )
 
     # ── Standard TD loss (shared by most variants) ──────────────────
 
@@ -503,39 +582,8 @@ class BaseSpatialDQNAgent(ABC):
 
         # Auxiliary dest loss: reward prediction
         total_loss = src_loss
-        aux_preds = []
-        aux_targets = []
-
-        for i, t in enumerate(transitions):
-            if t.dest_pos_down is None:
-                continue
-            sp = t.source_pos_down
-            pos = torch.tensor(
-                [[sp[0], sp[1], sp[2]]], dtype=torch.long, device=self.device,
-            )
-            src_feat = self.q_net.extract_source_feat(
-                encoded.feat_map[i:i + 1], pos,
-            )
-            dp = t.dest_pos_down
-            dp_flat = self._flatten_down(dp)
-            dest_mask = torch.zeros(
-                1, self._R, self._s_down, self._T,
-                dtype=torch.bool, device=self.device,
-            )
-            dest_mask[0, dp[0], dp[1], dp[2]] = True
-            q_dst = self.q_net.q_dest(
-                encoded.feat_map[i:i + 1], encoded.global_feat[i:i + 1],
-                src_feat, dest_mask,
-            )[0]
-            aux_preds.append(q_dst[dp_flat])
-            aux_targets.append(t.reward)
-
-        if aux_preds:
-            aux_preds_t = torch.stack(aux_preds)
-            aux_targets_t = torch.tensor(
-                aux_targets, dtype=torch.float32, device=self.device,
-            )
-            aux_loss = F.smooth_l1_loss(aux_preds_t, aux_targets_t)
+        aux_loss = self._aux_dest_loss(encoded, transitions)
+        if aux_loss is not None:
             total_loss = src_loss + dest_aux_w * aux_loss
 
         return total_loss, td_errors.detach()

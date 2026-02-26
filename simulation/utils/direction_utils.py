@@ -22,13 +22,3 @@ def is_import(container) -> bool:
 def is_export(container) -> bool:
     """True if container direction is Export."""
     return _direction_str(container) == "Export"
-
-
-def direction_float(container) -> float:
-    """Numeric direction for state encoding: 0.0=Import, 1.0=Export, 0.5=unknown."""
-    s = _direction_str(container)
-    if s == "Import":
-        return 0.0
-    if s == "Export":
-        return 1.0
-    return 0.5

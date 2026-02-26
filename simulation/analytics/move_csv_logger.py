@@ -10,6 +10,7 @@ These CSVs feed the post-hoc crane movement visualiser and Phase 2 metrics.
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -181,4 +182,4 @@ class MoveCSVLogger:
         try:
             self.close()
         except Exception:
-            pass
+            logging.debug("MoveCSVLogger: failed to close during __del__", exc_info=True)

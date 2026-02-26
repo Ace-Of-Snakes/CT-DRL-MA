@@ -2,12 +2,10 @@
 """RMGC crane cost estimation with trapezoidal motion profiles."""
 from typing import Dict, Tuple, Optional, Any, Callable
 from dataclasses import dataclass
-from enum import Enum
 
 from simulation.operations._rmgc_math import move_time as _jit_move_time
 from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
 from simulation.core.facilities.railyard import OptimizedRailYard
-from simulation.core.facilities.parking import ParkingSpot
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.config.crane_config import CraneGeometry, CranePerformance

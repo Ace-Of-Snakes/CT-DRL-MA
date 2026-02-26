@@ -82,40 +82,44 @@ class OptimizedParkingArea:
     
     # ========== Core Operations ==========
     
-    def is_free(self, bay: int, split: int) -> bool:
-        """Check if spot is free - O(1)."""
-        if not (0 <= bay < self.n_bays and 0 <= split < self.split_factor):
+    def is_free(self, bay: int, split: int = 0) -> bool:
+        """Check if bay is free (split kept for API compat but ignored)."""
+        if not (0 <= bay < self.n_bays):
             return False
-        return not self.occupied[bay, split]
+        return not self.occupied[bay].any()
     
     def allocate(self, truck: Truck, bay: int, split: int) -> bool:
+        """Allocate a bay to a truck.
+
+        One truck occupies an entire bay (all splits are marked occupied)
+        so that no second truck can park in the same bay.  The *split*
+        argument is recorded for backward-compat but the whole bay is
+        claimed.  Returns True if successful.
         """
-        Allocate spot to truck - O(1).
-        Returns True if successful.
-        """
-        if not self.is_free(bay, split):
+        if not (0 <= bay < self.n_bays):
             return False
-        
-        self.occupied[bay, split] = True
-        self.truck_ids[bay, split] = truck.truck_id
-        self._truck_spots[truck.truck_id] = (bay, split)
-        
-        # Update truck's parking spot
-        truck.parking_spot = ParkingSpot(bay=bay, split=split)
-        
+        # Bay-level check: reject if ANY split in this bay is occupied
+        if self.occupied[bay].any():
+            return False
+
+        self.occupied[bay, :] = True
+        self.truck_ids[bay, 0] = truck.truck_id
+        self._truck_spots[truck.truck_id] = (bay, 0)
+
+        # Update truck's parking spot (always split 0 — canonical)
+        truck.parking_spot = ParkingSpot(bay=bay, split=0)
+
         return True
 
     def release(self, truck: Truck) -> bool:
-        """
-        Release truck's spot - O(1).
-        """
+        """Release a truck's bay (frees all splits)."""
         pos = self._truck_spots.get(truck.truck_id)
         if pos is None:
             return False
-        
-        bay, split = pos
-        self.occupied[bay, split] = False
-        self.truck_ids[bay, split] = None
+
+        bay, _split = pos
+        self.occupied[bay, :] = False
+        self.truck_ids[bay, :] = None
         del self._truck_spots[truck.truck_id]
         truck.parking_spot = None
         

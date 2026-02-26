@@ -11,7 +11,6 @@ Adapted for:
 import csv
 import json
 import random
-import sys
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any

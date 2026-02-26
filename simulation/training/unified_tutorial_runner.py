@@ -129,15 +129,24 @@ class UnifiedTutorialRunner:
             executed = info.get("executed", [])
             transitions = info.get("transitions", [])
 
-            # ── Build MoveRecords from executed + transitions ─────────
+            # ── Separate move vs IDLE transitions ─────────────────────
+            _IDLE_SENTINEL = (-1, -1, -1)
+            move_transitions = []
+            idle_transitions = []
+            for t in transitions:
+                if getattr(t, "source_pos_down", None) == _IDLE_SENTINEL:
+                    idle_transitions.append(t)
+                else:
+                    move_transitions.append(t)
+
+            # ── Build MoveRecords from executed + move transitions ─────
             for i, ex in enumerate(executed):
                 agent_moves += 1
                 move_log_raw.append(ex)
 
-                # Match executed[i] with transitions[i] for per-move reward
                 move_reward = 0.0
-                if i < len(transitions):
-                    move_reward = transitions[i].reward
+                if i < len(move_transitions):
+                    move_reward = move_transitions[i].reward
 
                 move_records.append(MoveRecord(
                     step=step,
@@ -148,21 +157,30 @@ class UnifiedTutorialRunner:
                     time_s=ex.get("time_s", 0.0),
                     reward=move_reward,
                     proximity_bonus=ex.get("proximity_bonus"),
-                    # Spatial fields (populated when env provides them — Phase D)
                     src_row=ex.get("src_row"),
                     src_bay=ex.get("src_bay"),
                     dst_row=ex.get("dst_row"),
                     dst_bay=ex.get("dst_bay"),
                 ))
 
+            # ── Track IDLE penalties as visible events ─────────────────
+            for idle_t in idle_transitions:
+                step_events.append(StepEvent(
+                    step=step,
+                    event_type="IDLE",
+                    reward=idle_t.reward,
+                    detail=(f"Crane chose IDLE"
+                            f" (penalty={idle_t.reward:+.1f})"
+                            if idle_t.reward != 0.0 else "Crane chose IDLE"),
+                ))
+
             # ── Accumulate step reward ────────────────────────────────
             total_reward += reward
 
-            # ── Track non-move reward (reward that doesn't come from moves)
-            move_reward_sum = sum(
-                t.reward for t in transitions
-            )
-            non_move_reward = reward - move_reward_sum
+            # ── Track non-move reward (departures, waiting, etc.) ─────
+            accounted = (sum(t.reward for t in move_transitions)
+                         + sum(t.reward for t in idle_transitions))
+            non_move_reward = reward - accounted
             if abs(non_move_reward) > 1e-6:
                 step_events.append(StepEvent(
                     step=step,
@@ -274,6 +292,7 @@ class UnifiedTutorialRunner:
 
         for epoch in range(epochs):
             self.agent.set_tutorial_epsilon(epoch)
+            self.agent.set_tutorial_noise(epoch)     # anneal NoisyNet (no-op for others)
             steps_this_epoch = 0
 
             # ── Run current tier (every epoch) ───────────────────────

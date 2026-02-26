@@ -201,10 +201,17 @@ class IdleSourceWrapper(nn.Module):
         # noise is zeroed (greedy eval) IDLE would otherwise dominate.
         nn.init.constant_(self.idle_mlp[-1].bias, -5.0)
 
+    IDLE_Q_CEIL = -1.0  # IDLE should never look attractive vs productive moves
+
     def _idle_q(self, feat_map: torch.Tensor) -> torch.Tensor:
-        """Compute IDLE Q-value from mean-pooled spatial features. (B, 1)."""
+        """Compute IDLE Q-value from mean-pooled spatial features. (B, 1).
+
+        Clamped to IDLE_Q_CEIL so the agent always prefers a real move when
+        one is available.  The clamp is differentiable on the active side
+        (q < ceil) so gradients still flow during training.
+        """
         pooled = feat_map.mean(dim=(2, 3, 4))  # (B, C)
-        return self.idle_mlp(pooled)            # (B, 1)
+        return self.idle_mlp(pooled).clamp(max=self.IDLE_Q_CEIL)  # (B, 1)
 
     def forward(
         self, feat_map: torch.Tensor, source_mask: torch.Tensor, **kwargs,

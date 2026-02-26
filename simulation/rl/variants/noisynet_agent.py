@@ -93,6 +93,22 @@ class NoisyNetDQNAgent(BaseSpatialDQNAgent):
             return self.epsilon_override
         return 0.0
 
+    # ── Noise scale annealing ─────────────────────────────────────
+
+    def set_noise_scale(self, scale: float) -> None:
+        """Set noise multiplier on all NoisyLinear layers in both networks."""
+        for net in (self.q_net, self.target_net):
+            for m in net.modules():
+                if isinstance(m, NoisyLinear):
+                    m.noise_scale = scale
+
+    def set_tutorial_noise(self, epoch: int) -> None:
+        """Linearly anneal noise from 1.0 → noisy_sigma_min over training."""
+        cfg = self.cfg.training
+        frac = min(1.0, epoch / max(cfg.noisy_decay_epochs, 1))
+        scale = 1.0 - frac * (1.0 - cfg.noisy_sigma_min)
+        self.set_noise_scale(scale)
+
     def _select_source_action(self, q_flat, valid_mask_flat, eps):
         if eps > 0 and random.random() < eps:
             valid = np.where(valid_mask_flat)[0]

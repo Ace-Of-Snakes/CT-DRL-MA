@@ -10,6 +10,7 @@ Changes from env.py:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -17,12 +18,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
+log = logging.getLogger(__name__)
+
 from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
 from simulation.core.facilities.parking import OptimizedParkingArea
 from simulation.core.facilities.railyard import OptimizedRailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.enums import MoveType, TruckStatus, TerminalTruckStatus
+from simulation.utils.direction_utils import is_import as _is_import, is_export as _is_export
 from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
 from simulation.analytics.move_csv_logger import MoveCSVLogger
 
@@ -31,7 +35,7 @@ from simulation.env.env import ContainerTerminalEnv
 
 # Unified components (Phase 1-3 deliverables)
 from simulation.env.unified_state_encoder import UnifiedStateEncoder, CH
-from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, UnifiedDims
+from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, UnifiedDims, DEFAULT_S_STRIDE
 from simulation.rl.multihead_dqn.unified_agent import (
     UnifiedDQNAgent, UnifiedActionResult, resolve_move_type,
 )
@@ -51,6 +55,10 @@ PARKING_PROXIMITY_RADIUS_BAYS: int = 5
 # Channel indices (from CH enum)
 _CH_DIRECTION: int = CH.DIRECTION
 _DIRECTION_EXPORT_THRESHOLD: float = 0.5
+
+# Flat IDLE penalty — every deliberate IDLE costs the same small amount so the
+# agent always prefers a productive move over waiting.
+IDLE_PENALTY: float = -1.0
 
 
 # ── Data classes ─────────────────────────────────────────────────────────
@@ -98,7 +106,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         self.unified_encoder = UnifiedStateEncoder(
             self.yard, self.rail, self.parking, self.dims,
         )
-        self._s_stride: int = 4  # must match CNNConfig.s_stride
+        self._s_stride: int = DEFAULT_S_STRIDE
         self._s_down: int = self.dims.n_splits // self._s_stride
 
         # Optional CSV move logger (activated when log_dir is provided)
@@ -228,6 +236,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             "crane_id": crane_id, "executed": [], "retries": 0,
         }
         total_penalty = 0.0
+        sf = self.dims.split_factor
 
         for retry in range(self.max_retries + 1):
             info["retries"] = retry
@@ -240,6 +249,10 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             if blacklist:
                 self._apply_source_blacklist(source_mask, blacklist)
             if not source_mask.any():
+                log.debug(
+                    "crane=%d retry=%d | NO_SOURCE (sources=%d blacklist=%d)",
+                    crane_id, retry, 0, len(blacklist),
+                )
                 break  # nothing to do
 
             dest_mask_fn = self._make_dest_mask_fn(state_np)
@@ -251,7 +264,11 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             )
 
             if action.move_type == "IDLE":
-                # Deliberate idle — create transition for learning
+                log.debug(
+                    "crane=%d retry=%d | IDLE chosen (penalty=%.1f)",
+                    crane_id, retry, IDLE_PENALTY,
+                )
+                # Deliberate idle — flat penalty every time
                 self._advance_time()
                 next_state = self._encode_state()
                 done = self._check_day_end()
@@ -259,14 +276,14 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                     state=state_np,
                     source_pos_down=(-1, -1, -1),
                     dest_pos_down=None,
-                    reward=0.0,
+                    reward=IDLE_PENALTY,
                     next_state=next_state,
                     done=done,
                 )
                 info["idle"] = True
                 return UnifiedStepResult(
                     next_state=next_state,
-                    reward=total_penalty,
+                    reward=total_penalty + IDLE_PENALTY,
                     done=done,
                     info=info,
                     transition=transition,
@@ -274,11 +291,34 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 )
 
             if action.move_type is None or action.dest_pos is None:
+                log.debug(
+                    "crane=%d retry=%d | NO_DEST src=%s src_region=%s "
+                    "move_type=%s dest_pos=%s",
+                    crane_id, retry,
+                    action.source_pos, action.source_region,
+                    action.move_type, action.dest_pos,
+                )
                 break  # no valid action — idle
+
+            # Log the attempt
+            src = action.source_pos
+            dst = action.dest_pos
+            log.debug(
+                "crane=%d retry=%d | ATTEMPT %s  "
+                "src=(%d,s%d,t%d)[%s]  dst=(%d,s%d,t%d)[%s]",
+                crane_id, retry, action.move_type,
+                src[0], src[1], src[2], action.source_region,
+                dst[0], dst[1], dst[2], action.dest_region,
+            )
 
             if action.move_type == "PARK_TRUCK":
                 result = self._execute_park_truck(
                     state_np, action, crane_id, info,
+                )
+                log.debug(
+                    "crane=%d | PARK_TRUCK → bay=%d valid=%s reward=%.2f",
+                    crane_id, dst[1] // sf, result.was_valid_move,
+                    result.reward,
                 )
                 result.reward += total_penalty
                 return result
@@ -288,14 +328,34 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 state_np, action, crane_id, info,
             )
             if result is not None:
+                log.debug(
+                    "crane=%d | SUCCESS %s  "
+                    "src=(%d,b%d,t%d) → dst=(%d,b%d,t%d)  reward=%.2f",
+                    crane_id, action.move_type,
+                    src[0], src[1] // sf, src[2],
+                    dst[0], dst[1] // sf, dst[2],
+                    result.reward,
+                )
                 result.reward += total_penalty
                 return result
 
             # Invalid → penalty, retry
             total_penalty += self.no_destination_penalty
             info.setdefault("retry_reasons", []).append("invalid_placement")
+            log.debug(
+                "crane=%d retry=%d | RESOLVER_REJECTED %s  "
+                "src=(%d,s%d,t%d) dst=(%d,s%d,t%d)  penalty=%.1f",
+                crane_id, retry, action.move_type,
+                src[0], src[1], src[2],
+                dst[0], dst[1], dst[2],
+                total_penalty,
+            )
 
         # All retries exhausted or nothing to do — idle advance
+        log.debug(
+            "crane=%d | FALLTHROUGH retries=%d total_penalty=%.1f",
+            crane_id, info["retries"], total_penalty,
+        )
         self._advance_time()
         return UnifiedStepResult(
             next_state=self._encode_state(),
@@ -310,8 +370,13 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
     def _make_dest_mask_fn(
         self, state: np.ndarray,
-    ) -> Callable[[int, int, int], np.ndarray]:
-        """Build closure returning (R_uni, S_down, T) dest mask per source.
+    ) -> Callable[[int, int, int], Tuple[np.ndarray, int]]:
+        """Build closure returning ``(mask, n_splits)`` per source.
+
+        *mask* is an ``(R_uni, S_down, T)`` boolean array of valid
+        destinations.  *n_splits* is the source container's footprint in
+        sub-bays so the caller can resolve the downsampled destination back
+        to full resolution with the correct width.
 
         Computes yard validity per source container's actual n_splits so the
         mask accurately reflects whether that container fits.  A lightweight
@@ -341,14 +406,14 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
         def dest_mask_fn(
             src_row: int, src_split: int, src_tier: int,
-        ) -> np.ndarray:
+        ) -> Tuple[np.ndarray, int]:
             region = d.region_of(src_row)
             mask = np.zeros((d.R_unified, S_down, d.n_tiers), dtype=bool)
 
             if region == "QUEUE":
                 # Queue → Parking: free parking spots
                 mask[d.parking_row_start, :, 0] = parking_free_down
-                return mask
+                return mask, 1
 
             # Look up actual container to get correct n_splits
             container = self._source_container_object(
@@ -410,7 +475,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                             mask, d, S_down, stride,
                         )
 
-            return mask
+            return mask, n_splits
 
         return dest_mask_fn
 
@@ -721,6 +786,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         """Execute a container move. Returns None if invalid."""
         move = self._resolve_move(action)
         if move is None:
+            # Resolver already logged the specific rejection reason.
             return None
 
         # Compute RMGC cost BEFORE execution (container still in yard)
@@ -735,9 +801,12 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             )
         except Exception as e:
             info.setdefault("errors", []).append(str(e))
+            log.debug("  TLM exception: %s", e)
             return None
 
         if not success:
+            log.debug("  TLM execute returned False for %s",
+                       move.type.value)
             return None
 
         # Terminal truck busy timer — TT carries the container offsite
@@ -838,6 +907,8 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         """Restack: yard container → different yard position."""
         record = self._yard_container_at_unified(*action.source_pos)
         if record is None:
+            log.debug("  YARD_TO_YARD reject: no container at src %s",
+                       action.source_pos)
             return None
 
         container = record.container
@@ -846,6 +917,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
         yard_row = dst_row - d.yard_row_start
         if not (0 <= yard_row < d.n_yard_rows):
+            log.debug("  YARD_TO_YARD reject: dst row %d outside yard", dst_row)
             return None
 
         # Validate span fits
@@ -853,32 +925,46 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             getattr(container, "length_ft", 0), 0,
         )
         if n_splits <= 0 or dst_split + n_splits > d.n_splits:
+            log.debug("  YARD_TO_YARD reject: span overflow "
+                       "(n_splits=%d dst_split=%d limit=%d)",
+                       n_splits, dst_split, d.n_splits)
             return None
 
         # Occupancy + support checks
         occ = self.yard.occupancy_mask
         if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
+            log.debug("  YARD_TO_YARD reject: occupied at "
+                       "(yr%d, s%d:%d, t%d)",
+                       yard_row, dst_split, dst_split + n_splits, dst_tier)
             return None
         if dst_tier > 0:
             if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
+                log.debug("  YARD_TO_YARD reject: no support at tier %d "
+                           "(yr%d, s%d:%d)", dst_tier, yard_row,
+                           dst_split, dst_split + n_splits)
                 return None
 
         # Reject no-op (same position)
         pl = record.placement
         src_abs = pl.bay * self.yard.split_factor + pl.start_split
         if yard_row == pl.row and dst_split == src_abs and dst_tier == pl.tier:
+            log.debug("  YARD_TO_YARD reject: no-op (same position)")
             return None
 
         dst_bay = dst_split // self.yard.split_factor
         dst_start = dst_split % self.yard.split_factor
+        placement = PlacementResult(
+            row=yard_row, bay=dst_bay, tier=dst_tier,
+            start_split=dst_start,
+        )
+        log.debug("  YARD_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
+                   container.container_id, yard_row, dst_bay,
+                   dst_start, dst_tier)
         return Move(
             type=MoveType.YARD_TO_YARD,
             args={
                 "container_id": container.container_id,
-                "placement": PlacementResult(
-                    row=yard_row, bay=dst_bay, tier=dst_tier,
-                    start_split=dst_start,
-                ),
+                "placement": placement,
             },
         )
 
@@ -964,26 +1050,56 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         )
 
     def _resolve_rail_to_yard(self, action: UnifiedActionResult) -> Optional[Move]:
-        """Import: train container → yard placement."""
+        """Import: train container → yard placement (exact coordinates)."""
         container, train = self._find_rail_container(
             action.source_pos[0], action.source_pos[1],
         )
         if container is None or train is None:
+            log.debug("  TRAIN_TO_YARD reject: no container at rail src %s",
+                       action.source_pos)
             return None
 
         dst_row, dst_split, dst_tier = action.dest_pos
         d = self.dims
+
         yard_row = dst_row - d.yard_row_start
         if not (0 <= yard_row < d.n_yard_rows):
+            log.debug("  TRAIN_TO_YARD reject: dst row %d outside yard",
+                       dst_row)
             return None
 
-        anchor_bay = dst_split // self.yard.split_factor
-        placement = self.yard.find_single_placement(
-            container, target_bay=anchor_bay,
+        # Validate span fits
+        n_splits = self.yard.container_length_map.get(
+            getattr(container, "length_ft", 0), 0,
         )
-        if placement is None:
+        if n_splits <= 0 or dst_split + n_splits > d.n_splits:
+            log.debug("  TRAIN_TO_YARD reject: span overflow "
+                       "(n_splits=%d dst_split=%d limit=%d)",
+                       n_splits, dst_split, d.n_splits)
             return None
 
+        # Occupancy + support checks
+        occ = self.yard.occupancy_mask
+        if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
+            log.debug("  TRAIN_TO_YARD reject: occupied at "
+                       "(yr%d, s%d:%d, t%d)",
+                       yard_row, dst_split, dst_split + n_splits, dst_tier)
+            return None
+        if dst_tier > 0:
+            if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
+                log.debug("  TRAIN_TO_YARD reject: no support at tier %d",
+                           dst_tier)
+                return None
+
+        dst_bay = dst_split // self.yard.split_factor
+        dst_start = dst_split % self.yard.split_factor
+        placement = PlacementResult(
+            row=yard_row, bay=dst_bay, tier=dst_tier,
+            start_split=dst_start,
+        )
+        log.debug("  TRAIN_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
+                   container.container_id, yard_row, dst_bay,
+                   dst_start, dst_tier)
         return Move(
             type=MoveType.TRAIN_TO_YARD,
             args={
@@ -994,26 +1110,56 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         )
 
     def _resolve_parking_to_yard(self, action: UnifiedActionResult) -> Optional[Move]:
-        """Delivery: truck container → yard placement."""
+        """Delivery: truck container → yard placement (exact coordinates)."""
         truck = self._find_truck_at_parking_split(action.source_pos[1])
         if truck is None or not getattr(truck, "containers", None):
+            log.debug("  TRUCK_TO_YARD reject: no truck/container at "
+                       "parking split %d", action.source_pos[1])
             return None
 
         container = truck.containers[0]
 
         dst_row, dst_split, dst_tier = action.dest_pos
         d = self.dims
+
         yard_row = dst_row - d.yard_row_start
         if not (0 <= yard_row < d.n_yard_rows):
+            log.debug("  TRUCK_TO_YARD reject: dst row %d outside yard",
+                       dst_row)
             return None
 
-        anchor_bay = dst_split // self.yard.split_factor
-        placement = self.yard.find_single_placement(
-            container, target_bay=anchor_bay,
+        # Validate span fits
+        n_splits = self.yard.container_length_map.get(
+            getattr(container, "length_ft", 0), 0,
         )
-        if placement is None:
+        if n_splits <= 0 or dst_split + n_splits > d.n_splits:
+            log.debug("  TRUCK_TO_YARD reject: span overflow "
+                       "(n_splits=%d dst_split=%d limit=%d)",
+                       n_splits, dst_split, d.n_splits)
             return None
 
+        # Occupancy + support checks
+        occ = self.yard.occupancy_mask
+        if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
+            log.debug("  TRUCK_TO_YARD reject: occupied at "
+                       "(yr%d, s%d:%d, t%d)",
+                       yard_row, dst_split, dst_split + n_splits, dst_tier)
+            return None
+        if dst_tier > 0:
+            if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
+                log.debug("  TRUCK_TO_YARD reject: no support at tier %d",
+                           dst_tier)
+                return None
+
+        dst_bay = dst_split // self.yard.split_factor
+        dst_start = dst_split % self.yard.split_factor
+        placement = PlacementResult(
+            row=yard_row, bay=dst_bay, tier=dst_tier,
+            start_split=dst_start,
+        )
+        log.debug("  TRUCK_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
+                   container.container_id, yard_row, dst_bay,
+                   dst_start, dst_tier)
         return Move(
             type=MoveType.TRUCK_TO_YARD,
             args={
@@ -1295,17 +1441,3 @@ def _container_n_splits(container, length_map, split_factor: int) -> int:
     return max(1, int(np.ceil(length_ft / ft_per_split)))
 
 
-def _is_export(container) -> bool:
-    """True if container direction is Export."""
-    d = getattr(container, "direction", None)
-    if d is None:
-        return False
-    return (d.value if hasattr(d, "value") else str(d)) == "Export"
-
-
-def _is_import(container) -> bool:
-    """True if container direction is Import."""
-    d = getattr(container, "direction", None)
-    if d is None:
-        return False
-    return (d.value if hasattr(d, "value") else str(d)) == "Import"

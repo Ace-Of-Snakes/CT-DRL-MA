@@ -221,3 +221,4 @@ latex/chapters/*
 !latex/chapters/*.tex
 
 .claude/
+CLAUDE.md

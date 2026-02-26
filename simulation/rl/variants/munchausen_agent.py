@@ -112,39 +112,10 @@ class MunchausenDQNAgent(BaseSpatialDQNAgent):
         else:
             src_loss = F.smooth_l1_loss(q_source_taken, targets)
 
-        # ── Auxiliary dest loss (unchanged — no Munchausen here) ────
+        # Auxiliary dest loss (shared helper)
         total_loss = src_loss
-        aux_preds, aux_targets = [], []
-        for i, t in enumerate(transitions):
-            if t.dest_pos_down is None:
-                continue
-            sp = t.source_pos_down
-            pos = torch.tensor(
-                [[sp[0], sp[1], sp[2]]], dtype=torch.long, device=self.device,
-            )
-            src_feat = self.q_net.extract_source_feat(
-                encoded.feat_map[i:i + 1], pos,
-            )
-            dp = t.dest_pos_down
-            dp_flat = self._flatten_down(dp)
-            dest_mask = torch.zeros(
-                1, self._R, self._s_down, self._T,
-                dtype=torch.bool, device=self.device,
-            )
-            dest_mask[0, dp[0], dp[1], dp[2]] = True
-            q_dst = self.q_net.q_dest(
-                encoded.feat_map[i:i + 1], encoded.global_feat[i:i + 1],
-                src_feat, dest_mask,
-            )[0]
-            aux_preds.append(q_dst[dp_flat])
-            aux_targets.append(t.reward)
-
-        if aux_preds:
-            aux_preds_t = torch.stack(aux_preds)
-            aux_targets_t = torch.tensor(
-                aux_targets, dtype=torch.float32, device=self.device,
-            )
-            aux_loss = F.smooth_l1_loss(aux_preds_t, aux_targets_t)
+        aux_loss = self._aux_dest_loss(encoded, transitions)
+        if aux_loss is not None:
             total_loss = src_loss + dest_aux_w * aux_loss
 
         return total_loss, td_errors.detach()

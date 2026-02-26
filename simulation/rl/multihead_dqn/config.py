@@ -2,25 +2,11 @@
 """Configuration for Unified Spatial DQN agent."""
 from dataclasses import dataclass, field
 from typing import Tuple
-from enum import IntEnum
 import torch
 
 
-# ── Legacy enums (kept for backward compat during migration) ──────────────
-
-class ActionType(IntEnum):
-    """Top-level action types (DEPRECATED — unified arch uses spatial coords)."""
-    MOVE_CONTAINER = 0
-    SLOT_PARKING = 1
-    IMPORT_VEHICLE = 2
-
-
-class DestinationType(IntEnum):
-    """Destination types (DEPRECATED — unified arch infers from region)."""
-    YARD = 0
-    TRAIN = 1
-    TRUCK = 2
-
+# ── Shared constants ──────────────────────────────────────────────────────
+DEFAULT_S_STRIDE: int = 4  # Spatial stride for downsampling splits axis
 
 # ── Unified spatial dimensions ────────────────────────────────────────────
 
@@ -166,7 +152,7 @@ class CNNConfig:
     stage1_channels: int = 32
     feat_channels: int = 64
     global_dim: int = 128
-    s_stride: int = 4
+    s_stride: int = DEFAULT_S_STRIDE
     gn_groups: int = 8
     container_kernel: int = 21   # (1, k, 1) — 20ft = 20 splits
     cross_kernel: int = 3        # (r, 1, t) — stacking / cross-row
@@ -255,6 +241,8 @@ class DQNConfig:
 
     # NoisyNet
     noisy_sigma0: float = 0.5
+    noisy_sigma_min: float = 0.1     # Floor for noise-scale decay (1.0 → this)
+    noisy_decay_epochs: int = 60     # Linear decay schedule length (epochs)
 
     # Spectral / Layer norm
     use_spectral_norm: bool = False

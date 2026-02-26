@@ -28,7 +28,8 @@ from simulation.core.facilities.railyard import OptimizedRailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.enums import TruckStatus
-from simulation.rl.multihead_dqn.config import UnifiedDims
+from simulation.utils.direction_utils import is_import, is_export
+from simulation.rl.multihead_dqn.config import UnifiedDims, DEFAULT_S_STRIDE
 
 
 # ── Channel specification ────────────────────────────────────────────────
@@ -419,7 +420,7 @@ class UnifiedStateEncoder:
                     # Use the container's actual direction attribute — NOT the
                     # pickup list, which gets cleared after loading and would
                     # cause loaded Export containers to be misclassified as sources.
-                    if _is_import_container(container):
+                    if is_import(container):
                         mask[track_row, s0, 0] = True
                     split_cursor += n_splits
 
@@ -437,7 +438,7 @@ class UnifiedStateEncoder:
             # Check if the truck actually has containers to deliver TO the yard.
             # Delivery trucks carry Export containers (arrived from outside).
             # Pickup trucks that just collected Import containers should NOT be sources.
-            if not any(_is_delivery_container(c) for c in containers):
+            if not any(is_export(c) for c in containers):
                 continue
             bay = getattr(spot, "bay", None)
             split_offset = getattr(spot, "split", 0) or 0
@@ -545,7 +546,7 @@ class UnifiedStateEncoder:
           3. ``truck_id`` ascending for deterministic tiebreak
         """
         d = self.dims
-        stride = 4  # must match CNNConfig.s_stride
+        stride = DEFAULT_S_STRIDE
         trucks_per_row = d.n_splits // stride  # 1160 // 4 = 290
 
         queued: List[Tuple[int, float, str, Truck]] = []
@@ -714,24 +715,6 @@ class UnifiedStateEncoder:
 # Pure helper functions
 # ══════════════════════════════════════════════════════════════════════════
 
-def _is_import_container(container) -> bool:
-    """True if container's intrinsic direction is Import."""
-    d = getattr(container, "direction", None)
-    if d is None:
-        return False
-    return (d.value if hasattr(d, "value") else str(d)) == "Import"
-
-
-def _is_delivery_container(container) -> bool:
-    """True if container's intrinsic direction is Export (delivery to yard).
-
-    Delivery trucks bring Export containers from outside to the terminal.
-    Pickup trucks collect Import containers from the yard.
-    """
-    d = getattr(container, "direction", None)
-    if d is None:
-        return False
-    return (d.value if hasattr(d, "value") else str(d)) == "Export"
 
 
 def _container_type_value(c) -> float:
@@ -776,9 +759,14 @@ def _compute_urgency(c, now: datetime) -> float:
 
 
 def _container_splits(container, split_factor: int) -> int:
-    """Number of splits a container occupies."""
+    """Number of splits a container occupies.
+
+    Thin wrapper around :func:`_container_n_splits` from unified_env.
+    Kept as a local helper to avoid a circular import (encoder is imported
+    by the env module).
+    """
     length_ft = getattr(container, "length_ft", None) or getattr(container, "length", 20)
-    sub_bay_ft = 40.0 / split_factor  # BAY_LENGTH_FT / split_factor
+    sub_bay_ft = 40.0 / split_factor
     return max(1, int(np.ceil(length_ft / sub_bay_ft)))
 
 

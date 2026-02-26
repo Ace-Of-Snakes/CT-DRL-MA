@@ -48,19 +48,3 @@ CONTAINER_LENGTH_TO_SUB_BAYS = {
 }
 '''Mapping from container length in feet to number of sub-bays it occupies.'''
 
-# permutations of CONTAINER_LENGTHS_FT that can fit into two bays (80 feet), can be any number of containers
-from itertools import product
-NUMBER_OF_PERMUTATION_SLOTS = BAY_LENGTH_FT * 2 // min(CONTAINER_LENGTHS_FT)
-CONTAINER_LENGTH_PERMUTATIONS = [
-    perm for r in range(1, NUMBER_OF_PERMUTATION_SLOTS + 1)
-    for perm in product(CONTAINER_LENGTHS_FT, repeat=r)
-    if sum(perm) <= BAY_LENGTH_FT * 2 and sum(perm) > BAY_LENGTH_FT and sum(perm) > max(CONTAINER_LENGTHS_FT) + min(CONTAINER_LENGTHS_FT) # at least one bay and bigger than the max single container length
-]    
-# sort by length descending
-CONTAINER_LENGTH_PERMUTATIONS.sort(key=lambda x: sum(x), reverse=True)
-'''All permutations of container lengths that can fit into two bays (80 feet).'''
-
-# calculation of possible starting positions for each container length in two bays (80 feet)
-CONTAINER_STARTING_POSITIONS ={
-    length : set() for length in CONTAINER_LENGTHS_FT
-}
