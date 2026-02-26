@@ -1,6 +1,6 @@
-# simulation/core/facilities/parking_optimized.py
+# simulation/core/facilities/parking.py
 """
-Optimized parking area with array-based storage.
+Parking area with array-based storage.
 Key changes:
 - Bool array instead of string sets
 - O(1) spot operations
@@ -35,7 +35,7 @@ class ParkingSpot:
             return None
 
 
-class OptimizedParkingArea:
+class ParkingArea:
     """
     High-performance parking area using numpy arrays.
     

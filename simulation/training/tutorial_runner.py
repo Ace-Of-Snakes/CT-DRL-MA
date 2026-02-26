@@ -1,4 +1,4 @@
-# simulation/training/unified_tutorial_runner.py
+# simulation/training/tutorial_runner.py
 """Tiered tutorial runner for the unified spatial agent.
 
 The agent must master each tier before advancing to the next.
@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig
-from simulation.rl.multihead_dqn.unified_agent import UnifiedDQNAgent
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.agent import DQNAgent
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.training.scenarios import (
     ALL_SCENARIOS,
     MoveRecord,
@@ -84,13 +84,13 @@ TUTORIAL_TIERS: List[TutorialTier] = _build_tiers()
 # Runner
 # ══════════════════════════════════════════════════════════════════════════
 
-class UnifiedTutorialRunner:
+class TutorialRunner:
     """Execute tutorials with tiered curriculum progression."""
 
     def __init__(
         self,
         env_factory: Callable,
-        agent_or_config: Union[UnifiedDQNAgent, MultiHeadDQNConfig],
+        agent_or_config: Union[DQNAgent, MultiHeadDQNConfig],
         verbose: bool = True,
     ):
         self.env = env_factory()
@@ -99,9 +99,9 @@ class UnifiedTutorialRunner:
         if hasattr(agent_or_config, "act"):
             self.agent = agent_or_config
         else:
-            self.agent = UnifiedDQNAgent(agent_or_config)
+            self.agent = DQNAgent(agent_or_config)
             if self.verbose:
-                logger.info("UnifiedTutorialRunner created agent from config")
+                logger.info("TutorialRunner created agent from config")
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ class UnifiedTutorialRunner:
         move_records: List[MoveRecord] = []
         step_events: List[StepEvent] = []
         move_log_raw: List[Dict] = []
-        last_transition: Optional[UnifiedTransition] = None
+        last_transition: Optional[Transition] = None
 
         for step in range(scenario.max_steps):
             state, reward, done, info = env.step_all_cranes(self.agent)
@@ -578,7 +578,7 @@ class UnifiedTutorialRunner:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _clear_yard(yard) -> None:
-    """Remove all containers from an OptimizedStorageYard."""
+    """Remove all containers from an StorageYard."""
     from simulation.core.facilities.yard import EMPTY_SLOT
     yard.occupancy_mask[:] = False
     yard.position_grid[:] = EMPTY_SLOT

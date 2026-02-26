@@ -1,6 +1,6 @@
-# simulation/core/facilities/yard_optimized.py
+# simulation/core/facilities/yard.py
 """
-Optimized storage yard with array-based lookups.
+Storage yard with array-based lookups.
 Key changes:
 - position_grid: 3D int32 array replaces Dict[Tuple, str]
 - Container indexing: internal int indices, string ID mapping at boundary
@@ -45,7 +45,7 @@ class ContainerRecord:
     is_accessible: bool = True
 
 
-class OptimizedStorageYard:
+class StorageYard:
     """
     High-performance storage yard optimized for RL training.
     

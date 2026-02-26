@@ -7,7 +7,7 @@ from simulation.core.constants import STANDARD_VEHICLE_LENGTH_M, MIN_CONTAINER_L
 
 class Wagon:
     """
-    Optimized wagon with O(1) container operations.
+    Wagon with O(1) container operations.
     Uses OrderedDict to maintain insertion order while having O(1) lookups.
     """
     

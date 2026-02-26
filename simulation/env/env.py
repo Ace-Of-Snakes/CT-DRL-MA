@@ -3,8 +3,8 @@
 Base container terminal environment — simulation infrastructure.
 
 Provides the core simulation loop (arrivals, departures, cranes, RMGC,
-carryover) used by UnifiedContainerTerminalEnv.  All agent-specific
-stepping logic lives in the subclass (unified_env.py).
+carryover) used by TerminalEnv.  All agent-specific
+stepping logic lives in the subclass (terminal_env.py).
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 # -- Facilities (optimised) ----------------------------------------------------
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult, EMPTY_SLOT
-from simulation.core.facilities.parking import OptimizedParkingArea
-from simulation.core.facilities.railyard import OptimizedRailYard, RailSlot
+from simulation.core.facilities.yard import StorageYard, PlacementResult, EMPTY_SLOT
+from simulation.core.facilities.parking import ParkingArea
+from simulation.core.facilities.railyard import RailYard, RailSlot
 
 # -- Vehicles -----------------------------------------------
 from simulation.core.vehicles.train import Train
@@ -77,9 +77,9 @@ class ContainerTerminalEnv:
 
     def __init__(
         self,
-        yard: OptimizedStorageYard,
-        rail: OptimizedRailYard,
-        parking: OptimizedParkingArea,
+        yard: StorageYard,
+        rail: RailYard,
+        parking: ParkingArea,
         tlm: TerminalLogisticsManager,
         lm: LogisticsManager,
         num_tracks: int,

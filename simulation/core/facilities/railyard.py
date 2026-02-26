@@ -1,6 +1,6 @@
-# simulation/core/facilities/railyard_optimized.py
+# simulation/core/facilities/railyard.py
 """
-Optimized rail yard with slots and optional array-based storage.
+Rail yard with slots and optional array-based storage.
 Mostly unchanged from original - not a performance bottleneck.
 """
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ class RailSlot:
     anchor_bay: int  # Yard bay index for proximity searches
 
 
-class OptimizedRailYard:
+class RailYard:
     """
     Rail yard with train-to-track slot mapping.
     

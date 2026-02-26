@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from simulation.core.vehicles.train import Train
 from simulation.core.containers.container import Container
-from simulation.core.facilities.yard import OptimizedStorageYard
+from simulation.core.facilities.yard import StorageYard
 from simulation.core.enums import Direction, GoodsType
 from simulation.planning.train_loader import TrainLoader
 
@@ -30,7 +30,7 @@ class TestTrainLoaderRearrange(unittest.TestCase):
 
     def setUp(self):
         # Minimal yard; TrainLoader only needs yard if it must classify by pickup IDs
-        self.yard = OptimizedStorageYard(
+        self.yard = StorageYard(
             n_rows=2,
             n_bays=10,
             n_tiers=2,

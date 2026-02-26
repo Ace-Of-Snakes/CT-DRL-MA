@@ -39,7 +39,7 @@ DQN_ALGORITHMS = [
 
 def _lazy_registry() -> Dict[str, Type[BaseSpatialDQNAgent]]:
     """Build registry on first access to avoid circular imports."""
-    from simulation.rl.multihead_dqn.unified_agent import UnifiedDQNAgent
+    from simulation.rl.multihead_dqn.agent import DQNAgent
     from simulation.rl.variants import (
         MunchausenDQNAgent,
         SpectralNormDQNAgent,
@@ -50,7 +50,7 @@ def _lazy_registry() -> Dict[str, Type[BaseSpatialDQNAgent]]:
         KitchenSinkDQNAgent,
     )
     return {
-        "baseline": UnifiedDQNAgent,
+        "baseline": DQNAgent,
         "munchausen": MunchausenDQNAgent,
         "spectral_norm": SpectralNormDQNAgent,
         "noisynet": NoisyNetDQNAgent,

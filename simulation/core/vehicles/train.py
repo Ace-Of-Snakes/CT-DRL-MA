@@ -19,7 +19,7 @@ class ContainerLocation:
 
 class Train:
     """
-    Optimized train with O(1) container operations.
+    Train with O(1) container operations.
     Uses hash maps for direct container lookup across all wagons.
     """
     

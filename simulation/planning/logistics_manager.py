@@ -12,7 +12,7 @@ from simulation.planning.time_encoder import WeeklyTimeEncoder
 from simulation.planning.train_loader import TrainLoader
 
 from simulation.operations.gate import TerminalGate
-from simulation.core.facilities.yard import OptimizedStorageYard
+from simulation.core.facilities.yard import StorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.containers.container import Container
@@ -39,7 +39,7 @@ class LogisticsManager:
 
     def __init__(
         self,
-        yard: OptimizedStorageYard,
+        yard: StorageYard,
         terminal_gate: TerminalGate,
         train_loader: TrainLoader,
         train_scheduler: TrainScheduler,

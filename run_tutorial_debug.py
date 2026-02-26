@@ -18,7 +18,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(SEED)
 
 from simulation.rl.agent_registry import create_agent
-from simulation.training.unified_curriculum_trainer import (
+from simulation.training.curriculum_trainer import (
     create_env_factory, build_agent_config,
 )
 from simulation.training.scenarios import (
@@ -26,8 +26,8 @@ from simulation.training.scenarios import (
     ONE_SHOT_SCENARIOS, REPEATABLE_SCENARIOS,
     TutorialResult, MoveRecord, StepEvent,
 )
-from simulation.training.unified_tutorial_runner import (
-    UnifiedTutorialRunner, TUTORIAL_TIERS,
+from simulation.training.tutorial_runner import (
+    TutorialRunner, TUTORIAL_TIERS,
     TUTORIAL_REWARD_SUCCESS, TUTORIAL_REWARD_TIMEOUT,
 )
 
@@ -58,7 +58,7 @@ print(f"  Device:     {base_cfg.device}")
 print(f"  Scenarios:  {len(ALL_SCENARIOS)} total")
 print(f"  Tiers:      {len(TUTORIAL_TIERS)}")
 
-runner = UnifiedTutorialRunner(
+runner = TutorialRunner(
     env_factory=env_factory,
     agent_or_config=agent,
     verbose=False,

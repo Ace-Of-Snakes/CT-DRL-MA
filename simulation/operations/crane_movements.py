@@ -4,8 +4,8 @@ from typing import Dict, Tuple, Optional, Any, Callable
 from dataclasses import dataclass
 
 from simulation.operations._rmgc_math import move_time as _jit_move_time
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
-from simulation.core.facilities.railyard import OptimizedRailYard
+from simulation.core.facilities.yard import StorageYard, PlacementResult
+from simulation.core.facilities.railyard import RailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.config.crane_config import CraneGeometry, CranePerformance
@@ -24,8 +24,8 @@ class TerminalRMGC:
 
     def __init__(
         self,
-        yard: OptimizedStorageYard,
-        rail: OptimizedRailYard,
+        yard: StorageYard,
+        rail: RailYard,
         num_tracks: int,
         geom: CraneGeometry = None,
         perf: CranePerformance = None,
@@ -57,8 +57,8 @@ class TerminalRMGC:
 
     def set_layout(
         self,
-        yard: Optional[OptimizedStorageYard] = None,
-        rail: Optional[OptimizedRailYard] = None,
+        yard: Optional[StorageYard] = None,
+        rail: Optional[RailYard] = None,
         num_tracks: Optional[int] = None,
         geom: Optional[CraneGeometry] = None,
         perf: Optional[CranePerformance] = None,
@@ -219,7 +219,7 @@ class TerminalRMGC:
         move,
         trains: Dict[str, Train],
         trucks: Dict[str, Truck],
-        yard: OptimizedStorageYard,
+        yard: StorageYard,
     ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
         """Resolve move -> (source_xyz, dest_xyz). Accepts Move dataclass or dict."""
         move_type = move.type if hasattr(move, "type") else move["type"]
@@ -242,7 +242,7 @@ class TerminalRMGC:
         move,
         trains: Dict[str, Train],
         trucks: Dict[str, Truck],
-        yard: OptimizedStorageYard,
+        yard: StorageYard,
     ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float], RMGCMoveCost]]:
         """Resolve endpoints + compute cost in one call."""
         endpoints = self.endpoints_for_move(move, trains, trucks, yard)

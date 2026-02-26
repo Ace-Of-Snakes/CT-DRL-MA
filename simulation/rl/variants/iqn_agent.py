@@ -3,7 +3,7 @@
 
 Samples quantile fractions tau ~ U([0,1]) at runtime and conditions
 the Q-value prediction on the quantile level via cosine embedding.
-Uses standard UnifiedQNetwork with swapped IQN heads.
+Uses standard QNetwork with swapped IQN heads.
 """
 from typing import Optional, Tuple, List
 
@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.rl.variants.networks.iqn_heads import IQNSourceHead, IQNDestHead
 
 
@@ -70,7 +70,7 @@ class IQNAgent(BaseSpatialDQNAgent):
         G = self.cfg.cnn.global_dim
 
         def _make():
-            return UnifiedQNetwork(
+            return QNetwork(
                 self.cfg.unified, self.cfg.cnn, self.cfg.heads,
                 source_head=IQNSourceHead(Fc, n_cos=emb_dim),
                 dest_head=IQNDestHead(Fc, G, n_cos=emb_dim),
@@ -80,7 +80,7 @@ class IQNAgent(BaseSpatialDQNAgent):
 
     def _compute_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg.training

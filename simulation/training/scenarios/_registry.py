@@ -3,7 +3,7 @@
 
 Imports every tier's SCENARIOS list and builds the flat registries
 (ALL_SCENARIOS, SCENARIO_BY_ID) plus tier definitions that match the
-ordering in unified_tutorial_runner._TIER_BOUNDARIES.
+ordering in tutorial_runner._TIER_BOUNDARIES.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ REPEATABLE_SCENARIOS: List[TutorialScenario] = [
 ]
 
 # ── Tier definitions ─────────────────────────────────────────────────────
-# Matches the 11-tier ordering from unified_tutorial_runner._TIER_BOUNDARIES.
+# Matches the 11-tier ordering from tutorial_runner._TIER_BOUNDARIES.
 TIER_DEFS: List[Tuple[str, List[int]]] = [
     ("Primitives",          [1, 2, 3, 4]),
     ("Two-action chains",   [5, 6, 26, 27]),

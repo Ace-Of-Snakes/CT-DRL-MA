@@ -4,7 +4,7 @@
 Injects factorized Gaussian noise into the scoring layers of both
 source and destination heads. Epsilon is set to 0 during normal
 operation; exploration comes entirely from network noise.
-Uses standard UnifiedQNetwork with swapped Noisy heads.
+Uses standard QNetwork with swapped Noisy heads.
 """
 import random
 from typing import Optional, Tuple, List
@@ -15,8 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.rl.variants.networks.noisy_linear import NoisyLinear
 
 
@@ -79,7 +79,7 @@ class NoisyNetDQNAgent(BaseSpatialDQNAgent):
         G = self.cfg.cnn.global_dim
 
         def _make():
-            return UnifiedQNetwork(
+            return QNetwork(
                 self.cfg.unified, self.cfg.cnn, self.cfg.heads,
                 source_head=NoisySourceHead(Fc, sigma0),
                 dest_head=NoisyDestHead(Fc, G, sigma0),
@@ -137,6 +137,6 @@ class NoisyNetDQNAgent(BaseSpatialDQNAgent):
                 m.reset_noise()
 
     def _compute_loss(
-        self, transitions: List[UnifiedTransition], weights: Optional[torch.Tensor],
+        self, transitions: List[Transition], weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._standard_td_loss(transitions, weights)

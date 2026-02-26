@@ -8,7 +8,7 @@ from datetime import datetime
 
 from simulation.core.containers.container import Container
 from simulation.core.vehicles.train import Train
-from simulation.core.facilities.yard import OptimizedStorageYard
+from simulation.core.facilities.yard import StorageYard
 from simulation.core.enums import Direction
 from simulation.config.operations_config import OperationsDefaults
 from simulation.core.factories.container_factory import ContainerFactory
@@ -145,7 +145,7 @@ class TrainLoader:
     # ================================================================
 
     @staticmethod
-    def rearrange_wagons_for_goods(train: Train, yard: OptimizedStorageYard) -> List[int]:
+    def rearrange_wagons_for_goods(train: Train, yard: StorageYard) -> List[int]:
         """
         Reorder wagons in-place: reefer at ends, DG in center, regular between.
         Returns old->new index mapping.

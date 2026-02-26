@@ -1,7 +1,7 @@
 # simulation/rl/variants/__init__.py
-"""DQN variant agents — drop-in replacements for UnifiedDQNAgent.
+"""DQN variant agents — drop-in replacements for DQNAgent.
 
-Each agent uses the standard UnifiedQNetwork with swappable heads
+Each agent uses the standard QNetwork with swappable heads
 and/or backbone.  CNN backbone selection is handled orthogonally
 via :func:`simulation.rl.agent_registry.create_agent`.
 """

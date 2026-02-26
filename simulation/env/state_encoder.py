@@ -1,5 +1,5 @@
-# simulation/env/unified_state_encoder.py
-"""13-channel unified state encoder for Spatial DQN.
+# simulation/env/state_encoder.py
+"""13-channel state encoder for Spatial DQN.
 
 Output shape: (C, R_uni, S, T) where
   C     = 13 channels
@@ -23,19 +23,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
-from simulation.core.facilities.yard import OptimizedStorageYard
-from simulation.core.facilities.railyard import OptimizedRailYard
+from simulation.core.facilities.yard import StorageYard
+from simulation.core.facilities.railyard import RailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.enums import TruckStatus
 from simulation.utils.direction_utils import is_import, is_export
-from simulation.rl.multihead_dqn.config import UnifiedDims, DEFAULT_S_STRIDE
+from simulation.rl.multihead_dqn.config import Dims, DEFAULT_S_STRIDE
 
 
 # ── Channel specification ────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class UnifiedChannelSpec:
+class ChannelSpec:
     """Named channel indices for the unified state tensor."""
     OCCUPANCY: int = 0
     CONTAINER_START: int = 1
@@ -54,7 +54,7 @@ class UnifiedChannelSpec:
     NUM_CHANNELS: int = 13
 
 
-CH = UnifiedChannelSpec()
+CH = ChannelSpec()
 
 # ── Container type categorical values ────────────────────────────────────
 
@@ -87,7 +87,7 @@ _HASH_MOD: int = 2**32
 # Encoder
 # ══════════════════════════════════════════════════════════════════════════
 
-class UnifiedStateEncoder:
+class StateEncoder:
     """Encodes terminal state as (C, R_uni, S, T) unified spatial tensor.
 
     All terminal entities (trains, yard, trucks, queue) share one
@@ -98,15 +98,15 @@ class UnifiedStateEncoder:
 
     def __init__(
         self,
-        yard: OptimizedStorageYard,
-        rail: OptimizedRailYard,
+        yard: StorageYard,
+        rail: RailYard,
         parking=None,
-        dims: Optional[UnifiedDims] = None,
+        dims: Optional[Dims] = None,
     ):
         self.yard = yard
         self.rail = rail
         self.parking = parking
-        self.dims = dims or UnifiedDims(
+        self.dims = dims or Dims(
             n_yard_rows=yard.n_rows,
             n_bays=yard.n_bays,
             split_factor=yard.split_factor,
@@ -379,7 +379,7 @@ class UnifiedStateEncoder:
         trucks: Dict[str, Truck],
         now: Optional[datetime] = None,
     ) -> np.ndarray:
-        """Unified source mask (R_uni, S, T): True where an actionable entity starts.
+        """Source mask (R_uni, S, T): True where an actionable entity starts.
 
         Marks:
           - Accessible yard containers (CONTAINER_START)
@@ -761,7 +761,7 @@ def _compute_urgency(c, now: datetime) -> float:
 def _container_splits(container, split_factor: int) -> int:
     """Number of splits a container occupies.
 
-    Thin wrapper around :func:`_container_n_splits` from unified_env.
+    Thin wrapper around :func:`_container_n_splits` from terminal_env.
     Kept as a local helper to avoid a circular import (encoder is imported
     by the env module).
     """
@@ -814,7 +814,7 @@ def _collect_truck_demand(trucks: Dict[str, Truck]) -> Dict[str, float]:
 
 def _collect_train_demand(
     trains: Dict[str, Train],
-    rail: OptimizedRailYard,
+    rail: RailYard,
     n_bays: int,
 ) -> Dict[str, float]:
     """Map container_id → normalised train anchor bay.

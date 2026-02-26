@@ -1,5 +1,5 @@
-# multihead_dqn/unified_networks.py
-"""Unified Spatial Q-Network — 2-head architecture.
+# multihead_dqn/networks.py
+"""Spatial Q-Network — 2-head architecture.
 
 Architecture:
   State (C, R_uni, S, T)
@@ -7,7 +7,7 @@ Architecture:
     → OccupiedPooling      → global_feat (G)
     → SourceHead           → Q-values per source position
     → extract source feat  → source_feat (F)
-    → UnifiedDestHead      → Q-values per dest position
+    → DestHead      → Q-values per dest position
 
 Move type = f(source_region, dest_region) — inferred, not predicted.
 Vehicle identity = resolved from spatial coordinates — no separate head.
@@ -17,17 +17,17 @@ Compared to the old 6-head design:
   KEPT:    FactoredCNNBackbone (processes taller R=15 image)
            OccupiedPooling (pools across all regions)
            DuelingHead (utility for small fixed-size outputs)
-  NEW:     UnifiedDestHead (source-conditioned destination scoring)
+  NEW:     DestHead (source-conditioned destination scoring)
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 
-from simulation.rl.multihead_dqn.config import CNNConfig, HeadConfig, UnifiedDims
+from simulation.rl.multihead_dqn.config import CNNConfig, HeadConfig, Dims
 
 
-# Channel indices (must match unified_state_encoder.UnifiedChannelSpec)
+# Channel indices (must match state_encoder.ChannelSpec)
 _CH_OCCUPANCY = 0
 _CH_CONTAINER_START = 1
 
@@ -253,7 +253,7 @@ class IdleSourceWrapper(nn.Module):
             self.inner.reset_noise()
 
 
-class UnifiedDestHead(nn.Module):
+class DestHead(nn.Module):
     """Source-conditioned destination scoring via additive feat_map fusion.
 
     Given a selected source entity, scores every position in the unified
@@ -321,11 +321,11 @@ class UnifiedDestHead(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Complete Unified Q-Network
+# Complete Q-Network
 # ══════════════════════════════════════════════════════════════════════════
 
-class UnifiedQNetwork(nn.Module):
-    """Unified Spatial Q-Network with 2-head architecture.
+class QNetwork(nn.Module):
+    """Spatial Q-Network with 2-head architecture.
 
     Pipeline:
       State (C, R_uni, S, T)
@@ -344,7 +344,7 @@ class UnifiedQNetwork(nn.Module):
 
     def __init__(
         self,
-        dims: UnifiedDims,
+        dims: Dims,
         cnn_cfg: CNNConfig,
         head_cfg: HeadConfig,
         backbone: nn.Module = None,
@@ -364,7 +364,7 @@ class UnifiedQNetwork(nn.Module):
         self.pool = pool if pool is not None else OccupiedPooling(Fc, G)
         inner_src = source_head if source_head is not None else SourceHead(Fc)
         self.source_head = IdleSourceWrapper(inner_src, Fc)
-        self.dest_head = dest_head if dest_head is not None else UnifiedDestHead(Fc, G)
+        self.dest_head = dest_head if dest_head is not None else DestHead(Fc, G)
 
     # ── Encoding ──────────────────────────────────────────────────────
 

@@ -60,7 +60,7 @@ class DuelingDestHead(nn.Module):
         super().__init__()
         mid = feat_channels // 2
 
-        # Shared query projection (same as UnifiedDestHead)
+        # Shared query projection (same as DestHead)
         self.query_net = nn.Sequential(
             nn.Linear(global_dim + feat_channels, feat_channels),
             nn.ReLU(inplace=True),

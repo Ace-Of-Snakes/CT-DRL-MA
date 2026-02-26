@@ -40,7 +40,7 @@ class TerminalTruckStatus(str, Enum):
 
 
 class Region(str, Enum):
-    """Unified spatial regions in the CNN state matrix."""
+    """Spatial regions in the CNN state matrix."""
     RAIL = "RAIL"
     PARKING = "PARKING"
     YARD = "YARD"

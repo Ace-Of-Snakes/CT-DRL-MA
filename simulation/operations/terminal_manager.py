@@ -8,9 +8,9 @@ import numpy as np
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.vehicles.terminal_truck import TerminalTruck
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
-from simulation.core.facilities.railyard import OptimizedRailYard
-from simulation.core.facilities.parking import OptimizedParkingArea, ParkingSpot
+from simulation.core.facilities.yard import StorageYard, PlacementResult
+from simulation.core.facilities.railyard import RailYard
+from simulation.core.facilities.parking import ParkingArea, ParkingSpot
 from simulation.core.enums import MoveType
 from simulation.config.operations_config import OperationsDefaults
 from simulation.utils.direction_utils import is_import
@@ -28,9 +28,9 @@ class TerminalLogisticsManager:
 
     def __init__(
         self,
-        yard: OptimizedStorageYard,
-        rail: OptimizedRailYard,
-        parking: Optional[OptimizedParkingArea] = None,
+        yard: StorageYard,
+        rail: RailYard,
+        parking: Optional[ParkingArea] = None,
     ):
         self.yard = yard
         self.rail = rail

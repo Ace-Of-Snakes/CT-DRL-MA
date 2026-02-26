@@ -17,7 +17,7 @@ import json
 import argparse
 from pathlib import Path
 
-# ── Scenario metadata (matches unified_tutorial_runner.py) ───────────
+# ── Scenario metadata (matches tutorial_runner.py) ───────────
 
 SCENARIO_NAMES = {
     1: "park_truck",

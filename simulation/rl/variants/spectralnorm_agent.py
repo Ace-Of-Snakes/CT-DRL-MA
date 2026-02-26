@@ -12,8 +12,8 @@ import torch.nn as nn
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
 from simulation.rl.backbone_factory import build_backbone
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 
 
 class SpectralNormDQNAgent(BaseSpatialDQNAgent):
@@ -22,11 +22,11 @@ class SpectralNormDQNAgent(BaseSpatialDQNAgent):
     def _build_networks(self) -> Tuple[nn.Module, nn.Module]:
         backbone_q = build_backbone(self.cfg.cnn, spectral_norm=True)
         backbone_t = build_backbone(self.cfg.cnn, spectral_norm=True)
-        q = UnifiedQNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads, backbone=backbone_q)
-        t = UnifiedQNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads, backbone=backbone_t)
+        q = QNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads, backbone=backbone_q)
+        t = QNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads, backbone=backbone_t)
         return q, t
 
     def _compute_loss(
-        self, transitions: List[UnifiedTransition], weights: Optional[torch.Tensor],
+        self, transitions: List[Transition], weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._standard_td_loss(transitions, weights)

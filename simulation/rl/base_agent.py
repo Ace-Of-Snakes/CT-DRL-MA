@@ -1,7 +1,7 @@
 # simulation/rl/base_agent.py
 """Abstract base for all 2-stage spatial DQN agent variants.
 
-Extracts reusable infrastructure from UnifiedDQNAgent:
+Extracts reusable infrastructure from DQNAgent:
   - 2-stage act (source → destination, with ε-greedy hooks)
   - Replay buffer management
   - Optimize loop (sample, loss, backprop, target update)
@@ -26,13 +26,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, UnifiedDims
-from simulation.rl.multihead_dqn.unified_replay_buffer import (
-    UnifiedReplayBuffer, UnifiedPrioritizedReplayBuffer, UnifiedTransition,
+from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, Dims
+from simulation.rl.multihead_dqn.replay_buffer import (
+    ReplayBuffer, PrioritizedReplayBuffer, Transition,
 )
 
 # ── Named constants ───────────────────────────────────────────────────
-# Channel indices (must match unified_state_encoder.UnifiedChannelSpec)
+# Channel indices (must match state_encoder.ChannelSpec)
 _CH_OCCUPANCY = 0
 _CH_CONTAINER_START = 1
 _OCC_THRESHOLD = 0.5        # Binary threshold for occupancy channel
@@ -70,7 +70,7 @@ def resolve_move_type(source_region: str, dest_region: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class UnifiedActionResult:
+class ActionResult:
     """Complete action from the unified agent."""
     source_pos: Optional[Tuple[int, int, int]] = None
     dest_pos: Optional[Tuple[int, int, int]] = None
@@ -90,7 +90,7 @@ class BaseSpatialDQNAgent(ABC):
     """Abstract base for 2-stage spatial DQN agents.
 
     Public interface (required by tutorial runner + curriculum trainer):
-        act(state, source_mask, dest_mask_fn, epsilon) -> UnifiedActionResult
+        act(state, source_mask, dest_mask_fn, epsilon) -> ActionResult
         remember(transition)
         optimize() -> float
         save(path), load(path)
@@ -120,11 +120,11 @@ class BaseSpatialDQNAgent(ABC):
 
         # Replay buffer
         if cfg.training.use_per:
-            self.replay = UnifiedPrioritizedReplayBuffer(
+            self.replay = PrioritizedReplayBuffer(
                 cfg.training.replay_size, cfg.training.per_alpha,
             )
         else:
-            self.replay = UnifiedReplayBuffer(cfg.training.replay_size)
+            self.replay = ReplayBuffer(cfg.training.replay_size)
 
         self.step_count = 0
         self.losses: List[float] = []
@@ -145,7 +145,7 @@ class BaseSpatialDQNAgent(ABC):
     @abstractmethod
     def _compute_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute loss and TD errors. Return (loss, td_errors_detached)."""
@@ -355,13 +355,13 @@ class BaseSpatialDQNAgent(ABC):
         source_mask: np.ndarray,
         dest_mask_fn: DestMaskFn,
         epsilon: Optional[float] = None,
-    ) -> UnifiedActionResult:
+    ) -> ActionResult:
         self.step_count += 1
         eps = epsilon if epsilon is not None else self._get_epsilon()
         self._pre_act_hook()
 
         if not source_mask.any():
-            return UnifiedActionResult()
+            return ActionResult()
 
         state_t = self._to_tensor(state).unsqueeze(0)
         self.q_net.eval()
@@ -370,7 +370,7 @@ class BaseSpatialDQNAgent(ABC):
         # ── Stage 1: Source selection ───────────────────────────────
         src_down = self._downsample_mask(source_mask)
         if not src_down.any():
-            return UnifiedActionResult()
+            return ActionResult()
 
         src_mask_t = self._to_bool_tensor(src_down).unsqueeze(0)
         q_src = self.q_net.q_source(encoded.feat_map, src_mask_t)[0]
@@ -380,7 +380,7 @@ class BaseSpatialDQNAgent(ABC):
 
         # Check for IDLE selection
         if src_flat == self._idle_source_index:
-            return UnifiedActionResult(move_type="IDLE")
+            return ActionResult(move_type="IDLE")
 
         src_row, src_s_down, src_tier = self._unflatten(src_flat)
         src_s_orig = self._find_start_in_window(src_row, src_s_down, src_tier, state)
@@ -395,7 +395,7 @@ class BaseSpatialDQNAgent(ABC):
         # ── Stage 2: Destination selection ──────────────────────────
         dest_mask_down, src_n_splits = dest_mask_fn(src_row, src_s_orig, src_tier)
         if not dest_mask_down.any():
-            return UnifiedActionResult(
+            return ActionResult(
                 source_pos=source_pos,
                 source_region=source_region,
                 source_pos_down=(src_row, src_s_down, src_tier),
@@ -415,7 +415,7 @@ class BaseSpatialDQNAgent(ABC):
         dest_region = self.dims.region_of(dst_row)
         move_type = resolve_move_type(source_region, dest_region)
 
-        return UnifiedActionResult(
+        return ActionResult(
             source_pos=source_pos,
             dest_pos=dest_pos,
             source_region=source_region,
@@ -427,7 +427,7 @@ class BaseSpatialDQNAgent(ABC):
 
     # ── Replay ──────────────────────────────────────────────────────
 
-    def remember(self, transition: UnifiedTransition):
+    def remember(self, transition: Transition):
         self.replay.push(transition)
 
     # ── Optimization ────────────────────────────────────────────────
@@ -472,7 +472,7 @@ class BaseSpatialDQNAgent(ABC):
     def _aux_dest_loss(
         self,
         encoded,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
     ) -> Optional[torch.Tensor]:
         """Reward-prediction auxiliary loss on the destination head.
 
@@ -518,7 +518,7 @@ class BaseSpatialDQNAgent(ABC):
 
     def _standard_td_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Double-DQN TD on source head + auxiliary reward prediction on dest."""

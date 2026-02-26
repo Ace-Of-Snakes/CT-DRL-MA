@@ -1,12 +1,12 @@
 # simulation/training/curriculum_trainer.py
 """
-Curriculum-based training for Unified Spatial DQN agent.
+Curriculum-based training for Spatial DQN agent.
 
 Adapted for:
-- UnifiedContainerTerminalEnv (2-stage spatial stepping)
-- OptimizedStorageYard / OptimizedRailYard / OptimizedParkingArea
-- 10-channel unified state encoder (C, R_uni, S, T)
-- UnifiedDQNAgent with source/dest heads
+- TerminalEnv (2-stage spatial stepping)
+- StorageYard / RailYard / ParkingArea
+- 10-channel state encoder (C, R_uni, S, T)
+- DQNAgent with source/dest heads
 """
 import csv
 import json
@@ -21,10 +21,10 @@ from tqdm import tqdm
 import torch
 
 from simulation.rl.multihead_dqn.config import (
-    MultiHeadDQNConfig, YardDims, UnifiedDims, CNNConfig, HeadConfig, DQNConfig,
+    MultiHeadDQNConfig, YardDims, Dims, CNNConfig, HeadConfig, DQNConfig,
 )
-from simulation.env.unified_state_encoder import CH
-from simulation.rl.multihead_dqn.unified_agent import UnifiedDQNAgent
+from simulation.env.state_encoder import CH
+from simulation.rl.multihead_dqn.agent import DQNAgent
 
 
 # -- Safety limits --
@@ -147,7 +147,7 @@ class MetricsLogger:
 #
 
 class CurriculumTrainer:
-    """Trains Unified DQN agent through curriculum stages."""
+    """Trains DQN agent through curriculum stages."""
 
     def __init__(
         self,
@@ -194,7 +194,7 @@ class CurriculumTrainer:
 
     def _run_tutorial_phase(self):
         """Run tutorial scenarios before curriculum stages."""
-        from simulation.training.unified_tutorial_runner import UnifiedTutorialRunner
+        from simulation.training.tutorial_runner import TutorialRunner
 
         self._print("\n" + "=" * 60)
         self._print("PHASE 0: Tutorial Scenarios")
@@ -202,7 +202,7 @@ class CurriculumTrainer:
         self._print(f"Max epochs: {self.tutorial_epochs}")
         self._print("=" * 60)
 
-        runner = UnifiedTutorialRunner(
+        runner = TutorialRunner(
             env_factory=self.env_factory,
             agent_or_config=self.agent,
             verbose=self.verbose,
@@ -243,7 +243,7 @@ class CurriculumTrainer:
     def train(self, start_stage: int = 0, load_checkpoint: Optional[str] = None):
         """Run full curriculum training."""
         sched = self.schedule
-        self._print("=== Curriculum Training (Unified Spatial DQN) ===")
+        self._print("=== Curriculum Training (Spatial DQN) ===")
         self._print(f"Stages: {sched.num_stages}  |  Days/stage: {sched.days_per_stage}")
         self._print(f"Output: {self.output_dir}  |  Device: {self.agent_cfg.device}\n")
 
@@ -258,7 +258,7 @@ class CurriculumTrainer:
         # -- Create agent (or use pre-built one) --
         if self.agent is None:
             self._print("Creating agent ...")
-            self.agent = UnifiedDQNAgent(self.agent_cfg)
+            self.agent = DQNAgent(self.agent_cfg)
         else:
             self._print("Using pre-built agent ...")
         params = sum(p.numel() for p in self.agent.q_net.parameters())
@@ -367,7 +367,7 @@ class CurriculumTrainer:
             day_reward += reward
             day_moves += len(info.get("executed", []))
 
-            # Unified env puts transitions in info — caller stores them
+            # Env puts transitions in info — caller stores them
             for t in info.get("transitions", []):
                 self.agent.remember(t)
 
@@ -413,7 +413,7 @@ class CurriculumTrainer:
 
     def _print_step_debug(self, step: int, moves: int, reward: float):
         env = self.env
-        src_mask = env.unified_encoder.get_source_mask(env.trains, env.trucks)
+        src_mask = env.encoder.get_source_mask(env.trains, env.trucks)
         n_sources = int(src_mask.sum())
         self._print(f"    Step {step}: time={env.current_time.strftime('%H:%M')}, "
                     f"t={len(env.trains)}, tk={len(env.trucks)}, "
@@ -433,11 +433,11 @@ def create_env_factory(
     max_retries: int = 10, no_destination_penalty: float = -1.0,
     log_dir: str = None,
 ):
-    """Return a callable that creates a UnifiedContainerTerminalEnv."""
+    """Return a callable that creates a TerminalEnv."""
     def factory():
-        from simulation.core.facilities.yard import OptimizedStorageYard
-        from simulation.core.facilities.railyard import OptimizedRailYard
-        from simulation.core.facilities.parking import OptimizedParkingArea
+        from simulation.core.facilities.yard import StorageYard
+        from simulation.core.facilities.railyard import RailYard
+        from simulation.core.facilities.parking import ParkingArea
         from simulation.core.facilities.constants import BAY_SPLIT_FACTOR
         from simulation.core.factories.container_factory import ContainerFactory
         from simulation.core.factories.truck_factory import TruckFactory
@@ -447,19 +447,19 @@ def create_env_factory(
         from simulation.planning.driving_plan_parser import DrivingPlanParser
         from simulation.planning.train_scheduler import TrainScheduler
         from simulation.planning.train_loader import TrainLoader
-        from simulation.env.unified_env import UnifiedContainerTerminalEnv
+        from simulation.env.terminal_env import TerminalEnv
         from simulation.config.yard_config import YardZoneConfig
 
         sf = split_factor or BAY_SPLIT_FACTOR
-        dims = UnifiedDims(
+        dims = Dims(
             n_yard_rows=rows, n_bays=bays, split_factor=sf, n_tiers=tiers,
         )
 
         coordinates = YardZoneConfig.generate_special_coordinates(n_rows=rows, n_bays=bays)
-        yard = OptimizedStorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers,
+        yard = StorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers,
                                     coordinates=coordinates, validate=False)
-        rail = OptimizedRailYard(n_tracks=tracks)
-        parking = OptimizedParkingArea(n_bays=bays, split_factor=sf)
+        rail = RailYard(n_tracks=tracks)
+        parking = ParkingArea(n_bays=bays, split_factor=sf)
 
         container_factory = ContainerFactory()
         truck_factory = TruckFactory()
@@ -472,7 +472,7 @@ def create_env_factory(
                                export_per_import=export_ratio, daily_train_import_cap=20)
         tlm = TerminalLogisticsManager(yard, rail, parking)
 
-        return UnifiedContainerTerminalEnv(
+        return TerminalEnv(
             yard=yard, rail=rail, parking=parking, tlm=tlm, lm=lm,
             num_tracks=tracks, step_minutes=5,
             max_retries=max_retries, no_destination_penalty=no_destination_penalty,
@@ -494,7 +494,7 @@ def build_agent_config(
         n_bays=bays,
         split_factor=split_factor,
     )
-    unified = UnifiedDims(
+    unified = Dims(
         n_yard_rows=rows,
         n_bays=bays,
         split_factor=split_factor,
@@ -516,7 +516,7 @@ def build_agent_config(
 
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="Curriculum training - Unified Spatial DQN")
+    p = argparse.ArgumentParser(description="Curriculum training - Spatial DQN")
     p.add_argument("--output-dir", type=str, default="runs/curriculum")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--start-stage", type=int, default=0)

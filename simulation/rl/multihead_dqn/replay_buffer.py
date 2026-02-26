@@ -1,5 +1,5 @@
-# multihead_dqn/unified_replay_buffer.py
-"""Memory-efficient replay buffer for Unified Spatial DQN.
+# multihead_dqn/replay_buffer.py
+"""Memory-efficient replay buffer for Spatial DQN.
 
 Transitions store only (source_pos_down, dest_pos_down) instead of
 the old 6-field structure (action_type, container_pos, dest_type,
@@ -13,7 +13,7 @@ import random
 
 
 @dataclass
-class UnifiedTransition:
+class Transition:
     """Single transition for the unified 2-head architecture.
 
     Positions are at DOWNSAMPLED resolution (s_down = s // stride)
@@ -45,15 +45,15 @@ def _decompress(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
 
 # ── Replay Buffers ───────────────────────────────────────────────────────
 
-class UnifiedReplayBuffer:
+class ReplayBuffer:
     """Circular replay buffer with float16 state compression."""
 
     def __init__(self, capacity: int):
         self.capacity = capacity
-        self.buffer: List[UnifiedTransition] = []
+        self.buffer: List[Transition] = []
         self.position = 0
 
-    def push(self, transition: UnifiedTransition):
+    def push(self, transition: Transition):
         """Add transition, compressing states to float16."""
         transition.state = _compress(transition.state)
         transition.next_state = _compress(transition.next_state)
@@ -64,7 +64,7 @@ class UnifiedReplayBuffer:
             self.buffer[self.position] = transition
         self.position = (self.position + 1) % self.capacity
 
-    def sample(self, batch_size: int) -> List[UnifiedTransition]:
+    def sample(self, batch_size: int) -> List[Transition]:
         """Sample batch, decompressing states to float32 COPIES."""
         n = min(batch_size, len(self.buffer))
         indices = random.sample(range(len(self.buffer)), n)
@@ -83,7 +83,7 @@ class UnifiedReplayBuffer:
         return len(self.buffer) >= batch_size
 
 
-class UnifiedPrioritizedReplayBuffer:
+class PrioritizedReplayBuffer:
     """Prioritized experience replay with float16 compression."""
 
     def __init__(
@@ -99,7 +99,7 @@ class UnifiedPrioritizedReplayBuffer:
         self.beta_frames = beta_frames
         self.frame = 0
 
-        self.buffer: List[Optional[UnifiedTransition]] = [None] * capacity
+        self.buffer: List[Optional[Transition]] = [None] * capacity
         self.priorities = np.zeros(capacity, dtype=np.float32)
         self.position = 0
         self.size = 0
@@ -110,7 +110,7 @@ class UnifiedPrioritizedReplayBuffer:
         progress = min(1.0, self.frame / self.beta_frames)
         return self.beta_start + progress * (1.0 - self.beta_start)
 
-    def push(self, transition: UnifiedTransition):
+    def push(self, transition: Transition):
         """Add transition with max priority."""
         transition.state = _compress(transition.state)
         transition.next_state = _compress(transition.next_state)
@@ -123,7 +123,7 @@ class UnifiedPrioritizedReplayBuffer:
 
     def sample(
         self, batch_size: int,
-    ) -> Tuple[List[UnifiedTransition], np.ndarray, np.ndarray]:
+    ) -> Tuple[List[Transition], np.ndarray, np.ndarray]:
         """Sample with importance-sampling weights."""
         self.frame += 1
         n = min(batch_size, self.size)

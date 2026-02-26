@@ -1,5 +1,5 @@
 # multihead_dqn/config.py
-"""Configuration for Unified Spatial DQN agent."""
+"""Configuration for Spatial DQN agent."""
 from dataclasses import dataclass, field
 from typing import Tuple
 import torch
@@ -8,11 +8,11 @@ import torch
 # ── Shared constants ──────────────────────────────────────────────────────
 DEFAULT_S_STRIDE: int = 4  # Spatial stride for downsampling splits axis
 
-# ── Unified spatial dimensions ────────────────────────────────────────────
+# ── Spatial dimensions ────────────────────────────────────────────────────
 
 @dataclass
-class UnifiedDims:
-    """Dimensions for the unified spatial state matrix.
+class Dims:
+    """Dimensions for the spatial state matrix.
 
     Layout (row order):
         Rail tracks  → Parking row → Yard rows → Queue rows
@@ -116,7 +116,7 @@ class UnifiedDims:
 
 @dataclass
 class YardDims:
-    """Yard dimensions (DEPRECATED — use UnifiedDims)."""
+    """Yard dimensions (DEPRECATED — use Dims)."""
     n_rows: int
     n_splits: int
     n_tiers: int
@@ -148,7 +148,7 @@ class CNNConfig:
       (cross_kernel, 1, cross_kernel) across R×T → stacking + cross-region
       (1, refine_kernel, 1) along S → neighbourhood refinement
     """
-    n_state_channels: int = 13   # Unified: 13 channels (10 base + crane, train urgency, time)
+    n_state_channels: int = 13   # 13 channels (10 base + crane, train urgency, time)
     stage1_channels: int = 32
     feat_channels: int = 64
     global_dim: int = 128
@@ -255,7 +255,7 @@ class DQNConfig:
 class MultiHeadDQNConfig:
     """Complete agent configuration (unified spatial version)."""
     yard: YardDims = None
-    unified: UnifiedDims = field(default_factory=UnifiedDims)
+    unified: Dims = field(default_factory=Dims)
     cnn: CNNConfig = field(default_factory=CNNConfig)
     heads: HeadConfig = field(default_factory=HeadConfig)
     training: DQNConfig = field(default_factory=DQNConfig)

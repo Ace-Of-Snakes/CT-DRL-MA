@@ -13,21 +13,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 
 
 class MunchausenDQNAgent(BaseSpatialDQNAgent):
     """M-DQN: adds tau * log pi(a|s) to the reward in TD targets."""
 
     def _build_networks(self) -> Tuple[nn.Module, nn.Module]:
-        q = UnifiedQNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads)
-        t = UnifiedQNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads)
+        q = QNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads)
+        t = QNetwork(self.cfg.unified, self.cfg.cnn, self.cfg.heads)
         return q, t
 
     def _compute_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg.training

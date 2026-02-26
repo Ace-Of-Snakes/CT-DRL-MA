@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
+from simulation.core.facilities.yard import StorageYard, PlacementResult
 from simulation.core.containers.container import Container
 from simulation.core.facilities.constants import CONTAINER_LENGTH_TO_SUB_BAYS
 from simulation.core.enums import Direction, GoodsType
@@ -26,7 +26,7 @@ def make_container(container_id: str, length_ft: int, goods_type: GoodsType = Go
     )
 
 
-def draw_yard(yard: OptimizedStorageYard, title: str = "", show_ids: bool = True):
+def draw_yard(yard: StorageYard, title: str = "", show_ids: bool = True):
     """
     Draw containers as rectangles in split space.
     Y-axis stacks tiers (top tier at top) and rows within each tier.
@@ -73,7 +73,7 @@ def draw_yard(yard: OptimizedStorageYard, title: str = "", show_ids: bool = True
     plt.show()
 
 
-def draw_candidate_placement(yard: OptimizedStorageYard, placement, length_ft: int, title: str = ""):
+def draw_candidate_placement(yard: StorageYard, placement, length_ft: int, title: str = ""):
     """
     Draw a single candidate placement as a dashed rectangle (does not alter yard).
     """
@@ -127,7 +127,7 @@ def draw_candidate_placement(yard: OptimizedStorageYard, placement, length_ft: i
 
 def main():
     # Small yard; leave coordinates empty or add a few special slots if you want
-    yard = OptimizedStorageYard(
+    yard = StorageYard(
         n_rows=3,
         n_bays=12,
         n_tiers=3,

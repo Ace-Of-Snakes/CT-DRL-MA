@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from simulation.rl.multihead_dqn.config import CNNConfig, UnifiedDims
+from simulation.rl.multihead_dqn.config import CNNConfig, Dims
 
 
 class RegionAwareCNNBackbone(nn.Module):
@@ -39,7 +39,7 @@ class RegionAwareCNNBackbone(nn.Module):
     Drop-in replacement: (B, C_in, R, S, T) -> (B, feat_ch, R, S_down, T).
     """
 
-    def __init__(self, cfg: CNNConfig, dims: UnifiedDims):
+    def __init__(self, cfg: CNNConfig, dims: Dims):
         super().__init__()
         self.dims = dims
         C_in = cfg.n_state_channels
@@ -186,7 +186,7 @@ class RegionAwarePooling(nn.Module):
     N_REGIONS = 4
 
     def __init__(
-        self, feat_channels: int, global_dim: int, dims: UnifiedDims,
+        self, feat_channels: int, global_dim: int, dims: Dims,
     ):
         super().__init__()
         self.dims = dims

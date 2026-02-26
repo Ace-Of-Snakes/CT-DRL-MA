@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Set
 
-from simulation.core.facilities.yard import OptimizedStorageYard
+from simulation.core.facilities.yard import StorageYard
 from simulation.core.vehicles.train import Train
 from simulation.core.enums import MoveType
 from simulation.config.operations_config import RewardWeights
@@ -27,7 +27,7 @@ _EPSILON = 1e-6
 class RewardEngine:
     """Computes rewards for container moves, truck waits, train departures, and end-of-day state."""
 
-    def __init__(self, yard: OptimizedStorageYard, weights: RewardWeights = None):
+    def __init__(self, yard: StorageYard, weights: RewardWeights = None):
         self.yard = yard
         self.weights = weights or RewardWeights()
         self._departed_trains: Set[str] = set()

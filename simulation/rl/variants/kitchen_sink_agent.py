@@ -35,8 +35,8 @@ import torch.nn.functional as F
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
 from simulation.rl.backbone_factory import build_backbone
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.rl.variants.noisynet_agent import NoisySourceHead, NoisyDestHead
 from simulation.rl.variants.networks.noisy_linear import NoisyLinear
 
@@ -61,7 +61,7 @@ class KitchenSinkDQNAgent(BaseSpatialDQNAgent):
                 variant="kitchen_sink",
                 spectral_norm=True,
             )
-            return UnifiedQNetwork(
+            return QNetwork(
                 self.cfg.unified, self.cfg.cnn, self.cfg.heads,
                 backbone=backbone,
                 source_head=NoisySourceHead(Fc, sigma0),
@@ -125,7 +125,7 @@ class KitchenSinkDQNAgent(BaseSpatialDQNAgent):
 
     def _compute_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg.training

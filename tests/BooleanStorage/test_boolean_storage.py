@@ -6,14 +6,14 @@ from typing import List, Tuple
 from datetime import datetime, timedelta
 
 from simulation.core.containers.container import Container
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
+from simulation.core.facilities.yard import StorageYard, PlacementResult
 from simulation.core.enums import Direction, GoodsType
 
 np.random.seed(42)
 
 
-class TestOptimizedStorageYard(unittest.TestCase):
-    """Comprehensive tests for OptimizedStorageYard with performance analysis."""
+class TestStorageYard(unittest.TestCase):
+    """Comprehensive tests for StorageYard with performance analysis."""
 
     def setUp(self):
         """Set up test yard with special positions."""
@@ -24,7 +24,7 @@ class TestOptimizedStorageYard(unittest.TestCase):
             (1, 2, "r"),
             (2, 2, "dg"),
         ]
-        self.yard = OptimizedStorageYard(
+        self.yard = StorageYard(
             n_rows=5,
             n_bays=58,
             n_tiers=5,
@@ -195,7 +195,7 @@ class TestOptimizedStorageYard(unittest.TestCase):
 
         for count in container_counts:
             # Reset yard
-            self.yard = OptimizedStorageYard(
+            self.yard = StorageYard(
                 n_rows=5,
                 n_bays=50,
                 n_tiers=5,
@@ -401,7 +401,7 @@ class TestOptimizedStorageYard(unittest.TestCase):
     def _plot_performance_results(self, results):
         """Plot performance analysis results."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('OptimizedStorageYard Performance Analysis', fontsize=16)
+        fig.suptitle('StorageYard Performance Analysis', fontsize=16)
 
         # Container scaling - placement time
         axes[0, 0].plot(results['containers'], results['placement_time'], 'b-o')

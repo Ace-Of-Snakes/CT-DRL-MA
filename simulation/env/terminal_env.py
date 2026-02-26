@@ -1,8 +1,8 @@
-# simulation/env/unified_env.py
-"""Unified spatial environment — replaces multihead stepping.
+# simulation/env/terminal_env.py
+"""Spatial environment — replaces multihead stepping.
 
 Changes from env.py:
-  - State encoded via UnifiedStateEncoder (10ch, R=15)
+  - State encoded via StateEncoder (10ch, R=15)
   - Agent stepping is 2-stage: source → dest (no hierarchical heads)
   - Move type inferred from spatial regions
   - Truck parking is an explicit agent decision (QUEUE → PARKING)
@@ -20,9 +20,9 @@ from numpy.typing import NDArray
 
 log = logging.getLogger(__name__)
 
-from simulation.core.facilities.yard import OptimizedStorageYard, PlacementResult
-from simulation.core.facilities.parking import OptimizedParkingArea
-from simulation.core.facilities.railyard import OptimizedRailYard
+from simulation.core.facilities.yard import StorageYard, PlacementResult
+from simulation.core.facilities.parking import ParkingArea
+from simulation.core.facilities.railyard import RailYard
 from simulation.core.vehicles.train import Train
 from simulation.core.vehicles.truck import Truck
 from simulation.core.enums import MoveType, TruckStatus, TerminalTruckStatus
@@ -33,13 +33,13 @@ from simulation.analytics.move_csv_logger import MoveCSVLogger
 # Parent env — inherits all simulation infrastructure
 from simulation.env.env import ContainerTerminalEnv
 
-# Unified components (Phase 1-3 deliverables)
-from simulation.env.unified_state_encoder import UnifiedStateEncoder, CH
-from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, UnifiedDims, DEFAULT_S_STRIDE
-from simulation.rl.multihead_dqn.unified_agent import (
-    UnifiedDQNAgent, UnifiedActionResult, resolve_move_type,
+# RL components
+from simulation.env.state_encoder import StateEncoder, CH
+from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, Dims, DEFAULT_S_STRIDE
+from simulation.rl.multihead_dqn.agent import (
+    DQNAgent, ActionResult, resolve_move_type,
 )
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -64,21 +64,21 @@ IDLE_PENALTY: float = -1.0
 # ── Data classes ─────────────────────────────────────────────────────────
 
 @dataclass
-class UnifiedStepResult:
+class StepResult:
     """Result of one unified step for a single crane."""
     next_state: NDArray[np.float32]
     reward: float
     done: bool
     info: Dict[str, Any]
-    transition: Optional[UnifiedTransition] = None
+    transition: Optional[Transition] = None
     was_valid_move: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Unified Environment
+# Terminal Environment
 # ══════════════════════════════════════════════════════════════════════════
 
-class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
+class TerminalEnv(ContainerTerminalEnv):
     """Extended env with unified spatial stepping.
 
     Inherits all infrastructure (arrivals, departures, cranes, RMGC, etc.)
@@ -89,7 +89,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     def __init__(
         self,
         *args,
-        dims: Optional[UnifiedDims] = None,
+        dims: Optional[Dims] = None,
         log_dir: Optional[str] = None,
         **kwargs,
     ):
@@ -97,13 +97,13 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         kwargs["auto_park"] = False
         super().__init__(*args, **kwargs)
 
-        self.dims = dims or UnifiedDims(
+        self.dims = dims or Dims(
             n_yard_rows=self.yard.n_rows,
             n_bays=self.yard.n_bays,
             split_factor=self.yard.split_factor,
             n_tiers=self.yard.n_tiers,
         )
-        self.unified_encoder = UnifiedStateEncoder(
+        self.encoder = StateEncoder(
             self.yard, self.rail, self.parking, self.dims,
         )
         self._s_stride: int = DEFAULT_S_STRIDE
@@ -127,8 +127,8 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     # ── State encoding override ───────────────────────────────────────
 
     def _encode_state(self) -> NDArray[np.float32]:
-        """Unified state: (C, R_uni, S, T)."""
-        return self.unified_encoder.encode(
+        """Encode state: (C, R_uni, S, T)."""
+        return self.encoder.encode(
             self.trains, self.trucks, self.current_time,
             crane_states=self.cranes,
         )
@@ -138,7 +138,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     # ══════════════════════════════════════════════════════════════════
 
     def step_all_cranes(
-        self, agent: UnifiedDQNAgent,
+        self, agent: DQNAgent,
     ) -> Tuple[NDArray[np.float32], float, bool, Dict[str, Any]]:
         """Execute unified steps for all idle cranes.
 
@@ -227,10 +227,10 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
     def _step_unified(
         self,
-        agent: UnifiedDQNAgent,
+        agent: DQNAgent,
         crane_id: int,
         state_np: NDArray[np.float32],
-    ) -> UnifiedStepResult:
+    ) -> StepResult:
         """One unified step: source selection → dest selection → execute."""
         info: Dict[str, Any] = {
             "crane_id": crane_id, "executed": [], "retries": 0,
@@ -241,7 +241,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         for retry in range(self.max_retries + 1):
             info["retries"] = retry
 
-            source_mask = self.unified_encoder.get_source_mask(
+            source_mask = self.encoder.get_source_mask(
                 self.trains, self.trucks, self.current_time,
             )
             # Exclude containers moved by earlier cranes this step
@@ -272,7 +272,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 self._advance_time()
                 next_state = self._encode_state()
                 done = self._check_day_end()
-                transition = UnifiedTransition(
+                transition = Transition(
                     state=state_np,
                     source_pos_down=(-1, -1, -1),
                     dest_pos_down=None,
@@ -281,7 +281,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                     done=done,
                 )
                 info["idle"] = True
-                return UnifiedStepResult(
+                return StepResult(
                     next_state=next_state,
                     reward=total_penalty + IDLE_PENALTY,
                     done=done,
@@ -324,7 +324,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
                 return result
 
             # Container move
-            result = self._execute_unified_move(
+            result = self._execute_move(
                 state_np, action, crane_id, info,
             )
             if result is not None:
@@ -357,7 +357,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             crane_id, info["retries"], total_penalty,
         )
         self._advance_time()
-        return UnifiedStepResult(
+        return StepResult(
             next_state=self._encode_state(),
             reward=total_penalty,
             done=self._check_day_end(),
@@ -399,7 +399,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             cached = _yard_cache.get(n_splits)
             if cached is not None:
                 return cached
-            full = self.unified_encoder.get_yard_validity_mask(n_splits)
+            full = self.encoder.get_yard_validity_mask(n_splits)
             down = _downsample_mask(full, stride)
             _yard_cache[n_splits] = down
             return down
@@ -525,7 +525,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         self,
         mask: np.ndarray,
         container: Any,
-        d: UnifiedDims,
+        d: Dims,
         S_down: int,
         stride: int,
     ) -> None:
@@ -563,7 +563,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         self,
         mask: np.ndarray,
         container: Any,
-        d: UnifiedDims,
+        d: Dims,
         S_down: int,
         stride: int,
     ) -> None:
@@ -590,7 +590,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     def _add_terminal_truck_dest_mask(
         self,
         mask: np.ndarray,
-        d: UnifiedDims,
+        d: Dims,
         S_down: int,
         stride: int,
     ) -> None:
@@ -619,7 +619,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     def _log_container_move(
         self,
         move: Move,
-        action: UnifiedActionResult,
+        action: ActionResult,
         container_id: str,
         crane_id: int,
         distance_m: float,
@@ -681,10 +681,10 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     def _execute_park_truck(
         self,
         state_np: NDArray,
-        action: UnifiedActionResult,
+        action: ActionResult,
         crane_id: int,
         info: Dict,
-    ) -> UnifiedStepResult:
+    ) -> StepResult:
         """Park a queued truck at the agent-chosen parking spot."""
         d = self.dims
         sf = d.split_factor
@@ -713,7 +713,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             truck.status = TerminalTruckStatus.IDLE
 
         # Proximity reward: bonus for parking near goods anchor
-        preferred = self.unified_encoder._preferred_bay_for_truck(truck)
+        preferred = self.encoder._preferred_bay_for_truck(truck)
         if preferred is not None:
             delta = abs(dst_bay - preferred)
             proximity_bonus = PARKING_PROXIMITY_BONUS_MAX * max(
@@ -758,7 +758,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         next_state = self._encode_state()
         done = self._check_day_end()
 
-        transition = UnifiedTransition(
+        transition = Transition(
             state=state_np,
             source_pos_down=action.source_pos_down,
             dest_pos_down=action.dest_pos_down,
@@ -767,7 +767,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             done=done,
         )
 
-        return UnifiedStepResult(
+        return StepResult(
             next_state=next_state, reward=reward, done=done,
             info=info, transition=transition, was_valid_move=True,
         )
@@ -776,13 +776,13 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
     # Execution: container moves
     # ══════════════════════════════════════════════════════════════════
 
-    def _execute_unified_move(
+    def _execute_move(
         self,
         state_np: NDArray,
-        action: UnifiedActionResult,
+        action: ActionResult,
         crane_id: int,
         info: Dict,
-    ) -> Optional[UnifiedStepResult]:
+    ) -> Optional[StepResult]:
         """Execute a container move. Returns None if invalid."""
         move = self._resolve_move(action)
         if move is None:
@@ -867,7 +867,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         next_state = self._encode_state()
         done = self._check_day_end()
 
-        transition = UnifiedTransition(
+        transition = Transition(
             state=state_np,
             source_pos_down=action.source_pos_down,
             dest_pos_down=action.dest_pos_down,
@@ -876,7 +876,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             done=done,
         )
 
-        return UnifiedStepResult(
+        return StepResult(
             next_state=next_state, reward=reward, done=done,
             info=info, transition=transition, was_valid_move=True,
         )
@@ -895,7 +895,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         "TRUCK_TO_TRAIN": "_resolve_parking_to_rail",
     }
 
-    def _resolve_move(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_move(self, action: ActionResult) -> Optional[Move]:
         """Convert unified spatial action to a TLM Move."""
         mt = action.move_type
         handler_name = self._MOVE_DISPATCH.get(mt)
@@ -903,7 +903,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             return None
         return getattr(self, handler_name)(action)
 
-    def _resolve_yard_to_yard(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_yard_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Restack: yard container → different yard position."""
         record = self._yard_container_at_unified(*action.source_pos)
         if record is None:
@@ -968,7 +968,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_yard_to_train(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_yard_to_train(self, action: ActionResult) -> Optional[Move]:
         """Export: yard container → train."""
         record = self._yard_container_at_unified(*action.source_pos)
         if record is None:
@@ -1000,7 +1000,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_yard_to_truck(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_yard_to_truck(self, action: ActionResult) -> Optional[Move]:
         """Import: yard container → pickup truck at parking.
 
         Also handles terminal truck dispatch: if the destination truck is a
@@ -1049,7 +1049,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_rail_to_yard(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_rail_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Import: train container → yard placement (exact coordinates)."""
         container, train = self._find_rail_container(
             action.source_pos[0], action.source_pos[1],
@@ -1109,7 +1109,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_parking_to_yard(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_parking_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Delivery: truck container → yard placement (exact coordinates)."""
         truck = self._find_truck_at_parking_split(action.source_pos[1])
         if truck is None or not getattr(truck, "containers", None):
@@ -1169,7 +1169,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_rail_to_parking(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_rail_to_parking(self, action: ActionResult) -> Optional[Move]:
         """Direct transfer: train container → pickup truck at parking."""
         container, train = self._find_rail_container(
             action.source_pos[0], action.source_pos[1],
@@ -1201,7 +1201,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             },
         )
 
-    def _resolve_parking_to_rail(self, action: UnifiedActionResult) -> Optional[Move]:
+    def _resolve_parking_to_rail(self, action: ActionResult) -> Optional[Move]:
         """Direct transfer: truck container → train."""
         truck = self._find_truck_at_parking_split(action.source_pos[1])
         if truck is None or not getattr(truck, "containers", None):
@@ -1259,7 +1259,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
         if queue_row < d.queue_row_start or queue_row >= d.queue_row_end:
             return None
 
-        layout = self.unified_encoder._compute_queue_layout(
+        layout = self.encoder._compute_queue_layout(
             self.trucks, self.current_time,
         )
         lookup = {(r, s): tk for tk, r, s in layout}
@@ -1358,7 +1358,7 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
             slot = self.rail.get_slot(train_id)
             if slot is None:
                 continue
-            track_row = self.unified_encoder._track_id_to_row(slot.track_id)
+            track_row = self.encoder._track_id_to_row(slot.track_id)
             if track_row is None or track_row >= d.rail_row_end:
                 continue
             anchor = slot.anchor_bay
@@ -1395,10 +1395,10 @@ class UnifiedContainerTerminalEnv(ContainerTerminalEnv):
 
     # ── Idle / utility ────────────────────────────────────────────────
 
-    def _idle_result(self, info: Dict) -> UnifiedStepResult:
+    def _idle_result(self, info: Dict) -> StepResult:
         """Advance time, return zero-reward result."""
         self._advance_time()
-        return UnifiedStepResult(
+        return StepResult(
             next_state=self._encode_state(), reward=0.0,
             done=self._check_day_end(), info=info, was_valid_move=False,
         )

@@ -3,7 +3,7 @@
 
 Models the full return distribution using N fixed quantile atoms.
 Uses quantile Huber loss instead of standard TD error.
-Uses standard UnifiedQNetwork with swapped Quantile heads.
+Uses standard QNetwork with swapped Quantile heads.
 """
 from typing import Optional, Tuple, List
 
@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simulation.rl.base_agent import BaseSpatialDQNAgent
-from simulation.rl.multihead_dqn.unified_networks import UnifiedQNetwork
-from simulation.rl.multihead_dqn.unified_replay_buffer import UnifiedTransition
+from simulation.rl.multihead_dqn.networks import QNetwork
+from simulation.rl.multihead_dqn.replay_buffer import Transition
 from simulation.rl.variants.networks.quantile_heads import (
     QuantileSourceHead, QuantileDestHead,
 )
@@ -91,7 +91,7 @@ class QRDQNAgent(BaseSpatialDQNAgent):
         G = self.cfg.cnn.global_dim
 
         def _make():
-            return UnifiedQNetwork(
+            return QNetwork(
                 self.cfg.unified, self.cfg.cnn, self.cfg.heads,
                 source_head=QuantileSourceHead(Fc, N),
                 dest_head=QuantileDestHead(Fc, G, N),
@@ -101,7 +101,7 @@ class QRDQNAgent(BaseSpatialDQNAgent):
 
     def _compute_loss(
         self,
-        transitions: List[UnifiedTransition],
+        transitions: List[Transition],
         weights: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg.training
