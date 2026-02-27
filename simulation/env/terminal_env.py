@@ -29,6 +29,7 @@ from simulation.core.enums import MoveType, TruckStatus, TerminalTruckStatus
 from simulation.utils.direction_utils import is_import as _is_import, is_export as _is_export
 from simulation.operations.terminal_manager import TerminalLogisticsManager, Move
 from simulation.analytics.move_csv_logger import MoveCSVLogger
+from simulation.env.facility_coordinator import FacilityCoordinator
 
 # Parent env — inherits all simulation infrastructure
 from simulation.env.env import ContainerTerminalEnv
@@ -104,6 +105,9 @@ class TerminalEnv(ContainerTerminalEnv):
             n_tiers=self.yard.n_tiers,
         )
         self.encoder = StateEncoder(
+            self.yard, self.rail, self.parking, self.dims,
+        )
+        self.coordinator = FacilityCoordinator(
             self.yard, self.rail, self.parking, self.dims,
         )
         self._s_stride: int = DEFAULT_S_STRIDE
@@ -484,15 +488,15 @@ class TerminalEnv(ContainerTerminalEnv):
     ):
         """Return the container object at the given source position, or None."""
         if region == "RAIL":
-            container, _train = self._find_rail_container(row, split)
-            return container
+            rec = self.coordinator.get_rail_record(row, split)
+            return rec.container if rec is not None else None
         elif region == "PARKING":
-            truck = self._find_truck_at_parking_split(split)
+            truck = self.coordinator.get_truck_at(split)
             if truck is not None:
                 containers = getattr(truck, "containers", [])
                 return containers[0] if containers else None
         elif region == "YARD":
-            rec = self._yard_container_at_unified(row, split, tier)
+            rec = self.coordinator.get_yard_record(row, split, tier)
             return rec.container if rec is not None else None
         return None
 
@@ -809,6 +813,17 @@ class TerminalEnv(ContainerTerminalEnv):
                        move.type.value)
             return None
 
+        # Sync rail grid after any train-mutating move
+        if move.type in (
+            MoveType.TRAIN_TO_YARD, MoveType.YARD_TO_TRAIN,
+            MoveType.TRAIN_TO_TRUCK, MoveType.TRUCK_TO_TRAIN,
+        ):
+            train_id = move.args.get("train_id")
+            if train_id:
+                train = self.trains.get(train_id)
+                if train:
+                    self.rail.sync_train(train_id, train)
+
         # Terminal truck busy timer — TT carries the container offsite
         if move.type == MoveType.YARD_TO_TERMINAL_TRUCK:
             from simulation.core.constants import TERMINAL_TRUCK_TASK_DURATION_S
@@ -905,61 +920,33 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_yard_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Restack: yard container → different yard position."""
-        record = self._yard_container_at_unified(*action.source_pos)
+        record = self.coordinator.get_yard_record(*action.source_pos)
         if record is None:
             log.debug("  YARD_TO_YARD reject: no container at src %s",
                        action.source_pos)
             return None
 
         container = record.container
-        dst_row, dst_split, dst_tier = action.dest_pos
-        d = self.dims
-
-        yard_row = dst_row - d.yard_row_start
-        if not (0 <= yard_row < d.n_yard_rows):
-            log.debug("  YARD_TO_YARD reject: dst row %d outside yard", dst_row)
-            return None
-
-        # Validate span fits
         n_splits = self.yard.container_length_map.get(
             getattr(container, "length_ft", 0), 0,
         )
-        if n_splits <= 0 or dst_split + n_splits > d.n_splits:
-            log.debug("  YARD_TO_YARD reject: span overflow "
-                       "(n_splits=%d dst_split=%d limit=%d)",
-                       n_splits, dst_split, d.n_splits)
-            return None
 
-        # Occupancy + support checks
-        occ = self.yard.occupancy_mask
-        if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
-            log.debug("  YARD_TO_YARD reject: occupied at "
-                       "(yr%d, s%d:%d, t%d)",
-                       yard_row, dst_split, dst_split + n_splits, dst_tier)
+        placement = self.coordinator.validate_yard_dest(
+            *action.dest_pos, n_splits=n_splits,
+        )
+        if placement is None:
+            log.debug("  YARD_TO_YARD reject: invalid dest %s", action.dest_pos)
             return None
-        if dst_tier > 0:
-            if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
-                log.debug("  YARD_TO_YARD reject: no support at tier %d "
-                           "(yr%d, s%d:%d)", dst_tier, yard_row,
-                           dst_split, dst_split + n_splits)
-                return None
 
         # Reject no-op (same position)
         pl = record.placement
         src_abs = pl.bay * self.yard.split_factor + pl.start_split
-        if yard_row == pl.row and dst_split == src_abs and dst_tier == pl.tier:
+        if (placement.row == pl.row
+                and action.dest_pos[1] == src_abs
+                and placement.tier == pl.tier):
             log.debug("  YARD_TO_YARD reject: no-op (same position)")
             return None
 
-        dst_bay = dst_split // self.yard.split_factor
-        dst_start = dst_split % self.yard.split_factor
-        placement = PlacementResult(
-            row=yard_row, bay=dst_bay, tier=dst_tier,
-            start_split=dst_start,
-        )
-        log.debug("  YARD_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
-                   container.container_id, yard_row, dst_bay,
-                   dst_start, dst_tier)
         return Move(
             type=MoveType.YARD_TO_YARD,
             args={
@@ -970,7 +957,7 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_yard_to_train(self, action: ActionResult) -> Optional[Move]:
         """Export: yard container → train."""
-        record = self._yard_container_at_unified(*action.source_pos)
+        record = self.coordinator.get_yard_record(*action.source_pos)
         if record is None:
             return None
 
@@ -978,12 +965,8 @@ class TerminalEnv(ContainerTerminalEnv):
         if not _is_export(container):
             return None
 
-        # Find train on dest track
         dst_row = action.dest_pos[0]
-        if dst_row >= self.dims.rail_row_end:
-            return None
-
-        train = self._find_train_on_track(dst_row)
+        train = self.coordinator.get_train_on_track(dst_row, self.trains)
         if train is None:
             return None
 
@@ -1007,14 +990,12 @@ class TerminalEnv(ContainerTerminalEnv):
         terminal truck and the source container is a swap body or trailer,
         the move is resolved as YARD_TO_TERMINAL_TRUCK instead.
         """
-        record = self._yard_container_at_unified(*action.source_pos)
+        record = self.coordinator.get_yard_record(*action.source_pos)
         if record is None:
             return None
 
         container = record.container
-
-        # Find truck at dest parking position
-        truck = self._find_truck_at_parking_split(action.dest_pos[1])
+        truck = self.coordinator.get_truck_at(action.dest_pos[1])
         if truck is None:
             return None
 
@@ -1030,12 +1011,10 @@ class TerminalEnv(ContainerTerminalEnv):
                         "container_id": container.container_id,
                     },
                 )
-            return None  # terminal truck cannot carry non-swap-body containers
-
-        # Regular pickup truck: must be an import container
-        if not _is_import(container):
             return None
 
+        if not _is_import(container):
+            return None
         if container.container_id not in getattr(truck, "pickup_container_ids", set()):
             return None
         if not truck.can_accommodate_container(container):
@@ -1051,59 +1030,30 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_rail_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Import: train container → yard placement (exact coordinates)."""
-        container, train = self._find_rail_container(
+        rec = self.coordinator.get_rail_record(
             action.source_pos[0], action.source_pos[1],
         )
-        if container is None or train is None:
+        if rec is None:
             log.debug("  TRAIN_TO_YARD reject: no container at rail src %s",
                        action.source_pos)
             return None
 
-        dst_row, dst_split, dst_tier = action.dest_pos
-        d = self.dims
-
-        yard_row = dst_row - d.yard_row_start
-        if not (0 <= yard_row < d.n_yard_rows):
-            log.debug("  TRAIN_TO_YARD reject: dst row %d outside yard",
-                       dst_row)
-            return None
-
-        # Validate span fits
+        container = rec.container
         n_splits = self.yard.container_length_map.get(
             getattr(container, "length_ft", 0), 0,
         )
-        if n_splits <= 0 or dst_split + n_splits > d.n_splits:
-            log.debug("  TRAIN_TO_YARD reject: span overflow "
-                       "(n_splits=%d dst_split=%d limit=%d)",
-                       n_splits, dst_split, d.n_splits)
-            return None
 
-        # Occupancy + support checks
-        occ = self.yard.occupancy_mask
-        if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
-            log.debug("  TRAIN_TO_YARD reject: occupied at "
-                       "(yr%d, s%d:%d, t%d)",
-                       yard_row, dst_split, dst_split + n_splits, dst_tier)
-            return None
-        if dst_tier > 0:
-            if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
-                log.debug("  TRAIN_TO_YARD reject: no support at tier %d",
-                           dst_tier)
-                return None
-
-        dst_bay = dst_split // self.yard.split_factor
-        dst_start = dst_split % self.yard.split_factor
-        placement = PlacementResult(
-            row=yard_row, bay=dst_bay, tier=dst_tier,
-            start_split=dst_start,
+        placement = self.coordinator.validate_yard_dest(
+            *action.dest_pos, n_splits=n_splits,
         )
-        log.debug("  TRAIN_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
-                   container.container_id, yard_row, dst_bay,
-                   dst_start, dst_tier)
+        if placement is None:
+            log.debug("  TRAIN_TO_YARD reject: invalid dest %s", action.dest_pos)
+            return None
+
         return Move(
             type=MoveType.TRAIN_TO_YARD,
             args={
-                "train_id": train.train_id,
+                "train_id": rec.train_id,
                 "container_id": container.container_id,
                 "placement": placement,
             },
@@ -1111,55 +1061,24 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_parking_to_yard(self, action: ActionResult) -> Optional[Move]:
         """Delivery: truck container → yard placement (exact coordinates)."""
-        truck = self._find_truck_at_parking_split(action.source_pos[1])
+        truck = self.coordinator.get_truck_at(action.source_pos[1])
         if truck is None or not getattr(truck, "containers", None):
             log.debug("  TRUCK_TO_YARD reject: no truck/container at "
                        "parking split %d", action.source_pos[1])
             return None
 
         container = truck.containers[0]
-
-        dst_row, dst_split, dst_tier = action.dest_pos
-        d = self.dims
-
-        yard_row = dst_row - d.yard_row_start
-        if not (0 <= yard_row < d.n_yard_rows):
-            log.debug("  TRUCK_TO_YARD reject: dst row %d outside yard",
-                       dst_row)
-            return None
-
-        # Validate span fits
         n_splits = self.yard.container_length_map.get(
             getattr(container, "length_ft", 0), 0,
         )
-        if n_splits <= 0 or dst_split + n_splits > d.n_splits:
-            log.debug("  TRUCK_TO_YARD reject: span overflow "
-                       "(n_splits=%d dst_split=%d limit=%d)",
-                       n_splits, dst_split, d.n_splits)
-            return None
 
-        # Occupancy + support checks
-        occ = self.yard.occupancy_mask
-        if occ[dst_tier, yard_row, dst_split:dst_split + n_splits].any():
-            log.debug("  TRUCK_TO_YARD reject: occupied at "
-                       "(yr%d, s%d:%d, t%d)",
-                       yard_row, dst_split, dst_split + n_splits, dst_tier)
-            return None
-        if dst_tier > 0:
-            if not occ[dst_tier - 1, yard_row, dst_split:dst_split + n_splits].all():
-                log.debug("  TRUCK_TO_YARD reject: no support at tier %d",
-                           dst_tier)
-                return None
-
-        dst_bay = dst_split // self.yard.split_factor
-        dst_start = dst_split % self.yard.split_factor
-        placement = PlacementResult(
-            row=yard_row, bay=dst_bay, tier=dst_tier,
-            start_split=dst_start,
+        placement = self.coordinator.validate_yard_dest(
+            *action.dest_pos, n_splits=n_splits,
         )
-        log.debug("  TRUCK_TO_YARD accept: %s → yard(r%d,b%d,s%d,t%d)",
-                   container.container_id, yard_row, dst_bay,
-                   dst_start, dst_tier)
+        if placement is None:
+            log.debug("  TRUCK_TO_YARD reject: invalid dest %s", action.dest_pos)
+            return None
+
         return Move(
             type=MoveType.TRUCK_TO_YARD,
             args={
@@ -1171,21 +1090,22 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_rail_to_parking(self, action: ActionResult) -> Optional[Move]:
         """Direct transfer: train container → pickup truck at parking."""
-        container, train = self._find_rail_container(
+        rec = self.coordinator.get_rail_record(
             action.source_pos[0], action.source_pos[1],
         )
-        if container is None or train is None:
+        if rec is None:
             return None
 
+        container = rec.container
         if not _is_import(container):
             return None
 
-        truck = self._find_truck_at_parking_split(action.dest_pos[1])
+        truck = self.coordinator.get_truck_at(action.dest_pos[1])
         if truck is None:
             return None
 
         if getattr(truck, "is_terminal_truck", False):
-            return None  # terminal trucks use YARD_TO_TERMINAL_TRUCK
+            return None
 
         if container.container_id not in getattr(truck, "pickup_container_ids", set()):
             return None
@@ -1195,7 +1115,7 @@ class TerminalEnv(ContainerTerminalEnv):
         return Move(
             type=MoveType.TRAIN_TO_TRUCK,
             args={
-                "train_id": train.train_id,
+                "train_id": rec.train_id,
                 "truck_id": truck.truck_id,
                 "container_id": container.container_id,
             },
@@ -1203,7 +1123,7 @@ class TerminalEnv(ContainerTerminalEnv):
 
     def _resolve_parking_to_rail(self, action: ActionResult) -> Optional[Move]:
         """Direct transfer: truck container → train."""
-        truck = self._find_truck_at_parking_split(action.source_pos[1])
+        truck = self.coordinator.get_truck_at(action.source_pos[1])
         if truck is None or not getattr(truck, "containers", None):
             return None
 
@@ -1212,10 +1132,7 @@ class TerminalEnv(ContainerTerminalEnv):
             return None
 
         dst_row = action.dest_pos[0]
-        if dst_row >= self.dims.rail_row_end:
-            return None
-
-        train = self._find_train_on_track(dst_row)
+        train = self.coordinator.get_train_on_track(dst_row, self.trains)
         if train is None:
             return None
 
@@ -1232,20 +1149,6 @@ class TerminalEnv(ContainerTerminalEnv):
                 "container_id": container.container_id,
             },
         )
-
-    # ══════════════════════════════════════════════════════════════════
-    # Entity resolution helpers
-    # ══════════════════════════════════════════════════════════════════
-
-    def _yard_container_at_unified(
-        self, row: int, split: int, tier: int,
-    ) -> Optional[Any]:
-        """Look up container at unified (row, split, tier)."""
-        d = self.dims
-        yard_row = row - d.yard_row_start
-        if not (0 <= yard_row < d.n_yard_rows):
-            return None
-        return self._container_at_position(yard_row, split, tier)
 
     def _find_queued_truck_at(
         self, queue_row: int, split: int,
@@ -1265,76 +1168,6 @@ class TerminalEnv(ContainerTerminalEnv):
         lookup = {(r, s): tk for tk, r, s in layout}
         return lookup.get((queue_row, split))
 
-    def _find_rail_container(
-        self, track_row: int, split: int,
-    ) -> Tuple[Optional[Any], Optional[Train]]:
-        """Find container on train at (track_row, split).
-
-        Uses the same split_cursor logic as the source mask builder to
-        resolve which container within a multi-container wagon the
-        selected split position corresponds to.
-        """
-        d = self.dims
-        sf = d.split_factor
-
-        if track_row >= d.rail_row_end:
-            return None, None
-
-        target_bay = split // sf
-        split_offset = split % sf          # position within the bay
-
-        for train_id, train in self.trains.items():
-            slot = self.rail.get_slot(train_id)
-            if slot is None or slot.track_id != track_row:
-                continue
-
-            wagon_idx = target_bay - slot.anchor_bay
-            if wagon_idx < 0 or wagon_idx >= len(train.wagons):
-                continue
-
-            wagon = train.wagons[wagon_idx]
-            # Walk containers with split_cursor to find the one at the
-            # selected split offset (mirrors _build_source_mask logic).
-            cursor = 0
-            for container in wagon.containers.values():
-                n_splits = max(1, int(np.ceil(
-                    getattr(container, "length_ft", 20) / (40.0 / sf)
-                )))
-                if cursor <= split_offset < cursor + n_splits:
-                    return container, train
-                cursor += n_splits
-
-            # Split is beyond all containers on the wagon (empty space)
-            return None, None
-
-        return None, None
-
-    def _find_truck_at_parking_split(self, split: int) -> Optional[Truck]:
-        """Find truck parked at a given absolute split position."""
-        if self.parking is None:
-            return None
-
-        sf = self.dims.split_factor
-        bay = split // sf
-        split_offset = split % sf
-
-        if bay >= self.parking.n_bays or split_offset >= self.parking.split_factor:
-            return None
-
-        truck_id = self.parking.truck_ids[bay, split_offset]
-        if truck_id is None:
-            return None
-
-        return self.trucks.get(truck_id)
-
-    def _find_train_on_track(self, track_id: int) -> Optional[Train]:
-        """Find the train assigned to a specific rail track."""
-        for train_id, train in self.trains.items():
-            slot = self.rail.get_slot(train_id)
-            if slot is not None and slot.track_id == track_id:
-                return train
-        return None
-
     # ── Source blacklist (crane anti-reversal) ──────────────────────
 
     def _apply_source_blacklist(
@@ -1353,45 +1186,20 @@ class TerminalEnv(ContainerTerminalEnv):
                 r = d.yard_row_start + rec.placement.row
                 mask[r, rec.placement.abs_start, rec.placement.tier] = False
 
-        # Rail: check containers on trains
-        for train_id, train in self.trains.items():
-            slot = self.rail.get_slot(train_id)
-            if slot is None:
-                continue
-            track_row = self.encoder._track_id_to_row(slot.track_id)
-            if track_row is None or track_row >= d.rail_row_end:
-                continue
-            anchor = slot.anchor_bay
-            for wagon_idx, wagon in enumerate(train.wagons):
-                wagon_bay = anchor + wagon_idx
-                if wagon_bay < 0 or wagon_bay >= d.n_bays:
-                    continue
-                split_cursor = 0
-                for container in wagon.containers.values():
-                    sf = self.dims.split_factor
-                    n_splits = max(1, int(np.ceil(
-                        getattr(container, "length_ft", 20) / (40.0 / sf)
-                    )))
-                    s0 = wagon_bay * sf + split_cursor
-                    if container.container_id in blacklist:
-                        mask[track_row, s0, 0] = False
-                    split_cursor += n_splits
+        # Rail: iterate grid records (replaces wagon split_cursor walk)
+        for rec in self.rail.iter_records():
+            if rec.container.container_id in blacklist:
+                mask[rec.track, rec.abs_split, 0] = False
 
-        # Parking: check trucks whose containers were just moved
-        for tk in self.trucks.values():
-            spot = getattr(tk, "parking_spot", None)
-            if spot is None:
-                continue
-            containers = getattr(tk, "containers", None)
+        # Parking: iterate records (replaces truck iteration + bay math)
+        for rec in self.parking.iter_records():
+            containers = getattr(rec.truck, "containers", None)
             if not containers:
                 continue
             if any(c.container_id in blacklist for c in containers):
-                bay = getattr(spot, "bay", None)
-                split_offset = getattr(spot, "split", 0) or 0
-                if bay is not None:
-                    s = bay * self.dims.split_factor + split_offset
-                    if 0 <= s < d.n_splits:
-                        mask[d.parking_row_start, s, 0] = False
+                s = rec.abs_split
+                if 0 <= s < d.n_splits:
+                    mask[d.parking_row_start, s, 0] = False
 
     # ── Idle / utility ────────────────────────────────────────────────
 

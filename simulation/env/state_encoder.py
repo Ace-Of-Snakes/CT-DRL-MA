@@ -155,54 +155,43 @@ class StateEncoder:
         trains: Dict[str, Train],
         now: datetime,
     ) -> None:
-        """Encode containers on train wagons into rail track rows.
+        """Encode containers on trains via rail grid records.
 
-        Each wagon maps to ~1 bay. Container placed at wagon's bay offset
-        within the train's anchor position.
+        Uses RailYard.iter_records() for spatial data — same pattern as
+        _fill_yard_rows() uses StorageYard.iter_records().
         """
         d = self.dims
         sf = self._sf
 
+        # Container channels from grid records
+        for rec in self.rail.iter_records():
+            track = rec.track
+            s0 = rec.abs_split
+            s1 = min(s0 + rec.n_splits, d.n_splits)
+            if s0 >= d.n_splits:
+                continue
+            container = rec.container
+
+            tensor[CH.OCCUPANCY, track, s0:s1, 0] = 1.0
+            tensor[CH.CONTAINER_START, track, s0, 0] = 1.0
+            tensor[CH.CONTAINER_TYPE, track, s0:s1, 0] = _container_type_value(container)
+            tensor[CH.ACCESSIBLE, track, s0:s1, 0] = 1.0  # all rail containers accessible
+            tensor[CH.DEPARTURE_URGENCY, track, s0:s1, 0] = _compute_urgency(container, now)
+            tensor[CH.DIRECTION, track, s0:s1, 0] = _direction_value(container)
+            tensor[CH.CONTAINER_HASH, track, s0:s1, 0] = _container_hash(container.container_id)
+
+        # Pickup demand (containers the train wants but aren't loaded yet)
         for train_id, train in trains.items():
             slot = self.rail.get_slot(train_id)
             if slot is None:
                 continue
-
             track_row = self._track_id_to_row(slot.track_id)
             if track_row is None or track_row >= d.rail_row_end:
                 continue
-
             anchor = slot.anchor_bay
-
-            for wagon_idx, wagon in enumerate(train.wagons):
-                wagon_bay = anchor + wagon_idx
-                if wagon_bay < 0 or wagon_bay >= d.n_bays:
-                    continue
-
-                # Encode each container on this wagon
-                split_cursor = 0
-                for container in wagon.containers.values():
-                    n_splits = _container_splits(container, sf)
-                    s0 = wagon_bay * sf + split_cursor
-                    s1 = min(s0 + n_splits, d.n_splits)
-                    if s0 >= d.n_splits:
-                        break
-
-                    tensor[CH.OCCUPANCY, track_row, s0:s1, 0] = 1.0
-                    tensor[CH.CONTAINER_START, track_row, s0, 0] = 1.0
-                    tensor[CH.CONTAINER_TYPE, track_row, s0:s1, 0] = _container_type_value(container)
-                    tensor[CH.ACCESSIBLE, track_row, s0:s1, 0] = 1.0  # all rail containers accessible
-                    tensor[CH.DEPARTURE_URGENCY, track_row, s0:s1, 0] = _compute_urgency(container, now)
-                    tensor[CH.DIRECTION, track_row, s0:s1, 0] = _direction_value(container)
-                    tensor[CH.CONTAINER_HASH, track_row, s0:s1, 0] = _container_hash(container.container_id)
-
-                    split_cursor += n_splits
-
-            # Also encode pickup slots (containers the train wants but aren't loaded yet)
             for cid in train.get_all_pickup_container_ids():
                 if train.container_locations.get(cid) is not None:
                     continue  # already on train, encoded above
-                # Mark demand on the track row at anchor position
                 s_center = min(anchor * sf + sf // 2, d.n_splits - 1)
                 tensor[CH.TRAIN_DEMAND, track_row, s_center, 0] = max(
                     tensor[CH.TRAIN_DEMAND, track_row, s_center, 0], 1.0
@@ -216,22 +205,13 @@ class StateEncoder:
         trucks: Dict[str, Truck],
         now: datetime,
     ) -> None:
-        """Encode parked trucks at their parking split positions."""
+        """Encode parked trucks via parking grid records."""
         d = self.dims
         pr = d.parking_row_start
-        sf = self._sf
 
-        for tk in trucks.values():
-            spot = getattr(tk, "parking_spot", None)
-            if spot is None:
-                continue
-
-            bay = getattr(spot, "bay", None)
-            split_offset = getattr(spot, "split", 0) or 0
-            if bay is None:
-                continue
-
-            s = bay * sf + split_offset
+        for rec in self.parking.iter_records():
+            tk = rec.truck
+            s = rec.abs_split
             if s < 0 or s >= d.n_splits:
                 continue
 
@@ -396,55 +376,28 @@ class StateEncoder:
                 r = d.yard_row_start + rec.placement.row
                 mask[r, rec.placement.abs_start, rec.placement.tier] = True
 
-        # Rail: import containers on slotted trains
-        for train_id, train in trains.items():
-            slot = self.rail.get_slot(train_id)
-            if slot is None:
-                continue
-            track_row = self._track_id_to_row(slot.track_id)
-            if track_row is None or track_row >= d.rail_row_end:
-                continue
+        # Rail: import containers via grid records
+        for rec in self.rail.iter_records():
+            # Only Import containers are source-selectable from rail.
+            # Use the container's actual direction attribute — NOT the
+            # pickup list, which gets cleared after loading and would
+            # cause loaded Export containers to be misclassified as sources.
+            if is_import(rec.container):
+                s0 = rec.abs_split
+                if 0 <= s0 < d.n_splits:
+                    mask[rec.track, s0, 0] = True
 
-            anchor = slot.anchor_bay
-            for wagon_idx, wagon in enumerate(train.wagons):
-                wagon_bay = anchor + wagon_idx
-                if wagon_bay < 0 or wagon_bay >= d.n_bays:
-                    continue
-                split_cursor = 0
-                for container in wagon.containers.values():
-                    n_splits = _container_splits(container, self._sf)
-                    s0 = wagon_bay * self._sf + split_cursor
-                    if s0 >= d.n_splits:
-                        break
-                    # Only Import containers are source-selectable from rail.
-                    # Use the container's actual direction attribute — NOT the
-                    # pickup list, which gets cleared after loading and would
-                    # cause loaded Export containers to be misclassified as sources.
-                    if is_import(container):
-                        mask[track_row, s0, 0] = True
-                    split_cursor += n_splits
-
-        # Parking: delivery trucks with containers to unload
+        # Parking: delivery trucks with containers to unload via records.
         # Only mark trucks that carry EXPORT containers (genuine deliveries).
-        # Pickup trucks that were just loaded (Import containers collected)
-        # must NOT be sources — they should depart, not get unloaded.
-        for tk in trucks.values():
-            spot = getattr(tk, "parking_spot", None)
-            if spot is None:
-                continue
+        # Pickup trucks that just collected Import containers should NOT be sources.
+        for rec in self.parking.iter_records():
+            tk = rec.truck
             containers = getattr(tk, "containers", None)
             if not containers:
                 continue
-            # Check if the truck actually has containers to deliver TO the yard.
-            # Delivery trucks carry Export containers (arrived from outside).
-            # Pickup trucks that just collected Import containers should NOT be sources.
             if not any(is_export(c) for c in containers):
                 continue
-            bay = getattr(spot, "bay", None)
-            split_offset = getattr(spot, "split", 0) or 0
-            if bay is None:
-                continue
-            s = bay * self._sf + split_offset
+            s = rec.abs_split
             if 0 <= s < d.n_splits:
                 mask[d.parking_row_start, s, 0] = True
 

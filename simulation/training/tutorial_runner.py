@@ -595,15 +595,34 @@ def _clear_parking(parking) -> None:
     """Remove all trucks from parking."""
     if parking is None:
         return
+    from simulation.core.facilities.base import EMPTY_SLOT as _EMPTY
+    # Bay-level arrays (existing)
     parking.occupied[:] = False
     parking.truck_ids.fill(None)
     parking._truck_spots.clear()
+    # Flat spatial grid (new)
+    parking.occupancy_flat[:] = False
+    parking.position_grid[:] = _EMPTY
+    for i in range(len(parking._records)):
+        parking._records[i] = None
+    parking._id_to_idx.clear()
+    parking._free_indices = list(range(len(parking._records) - 1, -1, -1))
 
 
 def _clear_rail(rail) -> None:
     """Remove all trains from rail yard."""
+    from simulation.core.facilities.base import EMPTY_SLOT as _EMPTY
+    # Dict-based slot tracking (existing)
     rail._train_to_slot.clear()
     rail._track_trains.clear()
+    # Spatial grid (new)
+    rail.occupancy_mask[:] = False
+    rail.position_grid[:] = _EMPTY
+    for i in range(len(rail._records)):
+        rail._records[i] = None
+    rail._id_to_idx.clear()
+    rail._free_indices = list(range(len(rail._records) - 1, -1, -1))
+    rail._train_records.clear()
 
 
 class _StubDayPlan:

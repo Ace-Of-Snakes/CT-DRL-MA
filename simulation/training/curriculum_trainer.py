@@ -458,7 +458,7 @@ def create_env_factory(
         coordinates = YardZoneConfig.generate_special_coordinates(n_rows=rows, n_bays=bays)
         yard = StorageYard(n_rows=rows, n_bays=bays, n_tiers=tiers,
                                     coordinates=coordinates, validate=False)
-        rail = RailYard(n_tracks=tracks)
+        rail = RailYard(n_tracks=tracks, n_bays=bays, split_factor=sf)
         parking = ParkingArea(n_bays=bays, split_factor=sf)
 
         container_factory = ContainerFactory()

@@ -275,7 +275,16 @@ class StorageYard:
             return None
         record = self._records[idx]
         return record.container if record else None
-    
+
+    def get_record_at(self, row: int, tier: int, split: int) -> Optional['ContainerRecord']:
+        """Get full record at position - O(1)."""
+        if not (0 <= tier < self.n_tiers and 0 <= row < self.n_rows and 0 <= split < self.total_splits):
+            return None
+        idx = self.position_grid[tier, row, split]
+        if idx == EMPTY_SLOT:
+            return None
+        return self._records[idx]
+
     def get_placement(self, container_id: str) -> Optional[PlacementResult]:
         """Get placement by ID - O(1)."""
         idx = self._id_to_idx.get(container_id)

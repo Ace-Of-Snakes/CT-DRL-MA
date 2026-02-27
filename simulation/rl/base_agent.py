@@ -265,15 +265,19 @@ class BaseSpatialDQNAgent(ABC):
     def _resolve_dest_split(
         self, row: int, s_down: int, tier: int, state: np.ndarray,
         n_splits: int = 1,
+        source_region: str = "",
     ) -> int:
         """Map a downsampled dest cell back to a full-resolution split.
 
-        Resolution strategy depends on the destination region:
+        Resolution strategy depends on the destination region **and** the
+        source region (for PARKING destinations):
 
         * **YARD** — find the first *n_splits* contiguous free sub-bays
           (with tier support) so the position is genuinely placeable.
-        * **PARKING** — find the first *free* split in the stride window
-          so the truck doesn't land on an already-occupied spot.
+        * **PARKING (from QUEUE)** — find the first *free* split in the
+          stride window so the truck parks at an unoccupied spot.
+        * **PARKING (from YARD/RAIL)** — find the first *occupied* split
+          (``CONTAINER_START``), i.e. the truck to deliver to.
         * **RAIL / other** — find the first *occupied* split
           (``CONTAINER_START``), i.e. the wagon / entity to deliver to.
         """
@@ -302,12 +306,17 @@ class BaseSpatialDQNAgent(ABC):
             return s_start
 
         if region == "PARKING":
-            # Parking dest = empty spot.  Scan for the first FREE split.
-            occ = state[_CH_OCCUPANCY]
-            for s in range(s_start, s_end):
-                if occ[row, s, tier] < _OCC_THRESHOLD:
-                    return s
-            return s_start  # fallback (executor will reject if full)
+            if source_region == "QUEUE":
+                # Parking a new truck → find first FREE split.
+                occ = state[_CH_OCCUPANCY]
+                for s in range(s_start, s_end):
+                    if occ[row, s, tier] < _OCC_THRESHOLD:
+                        return s
+                return s_start  # fallback (executor will reject if full)
+            else:
+                # Delivering to an existing truck → find the OCCUPIED
+                # truck position (same logic as RAIL destinations).
+                return self._find_start_in_window(row, s_down, tier, state)
 
         # RAIL / other: find the occupied entity (wagon position).
         return self._find_start_in_window(row, s_down, tier, state)
@@ -409,7 +418,8 @@ class BaseSpatialDQNAgent(ABC):
 
         dst_row, dst_s_down, dst_tier = self._unflatten(dst_flat)
         dst_s_orig = self._resolve_dest_split(
-            dst_row, dst_s_down, dst_tier, state, n_splits=src_n_splits,
+            dst_row, dst_s_down, dst_tier, state,
+            n_splits=src_n_splits, source_region=source_region,
         )
         dest_pos = (dst_row, dst_s_orig, dst_tier)
         dest_region = self.dims.region_of(dst_row)
