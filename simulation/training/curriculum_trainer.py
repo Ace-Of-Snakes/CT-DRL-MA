@@ -381,6 +381,9 @@ class CurriculumTrainer:
             if step % DEBUG_INTERVAL_STEPS == 0 and self.verbose and day == 0:
                 self._print_step_debug(step, day_moves, day_reward)
 
+        # Flush n-step buffer at day boundary
+        self.agent.reset_nstep()
+
         if step >= MAX_STEPS_PER_DAY:
             self._print(f"WARNING: Day {day} hit step limit ({MAX_STEPS_PER_DAY})")
 

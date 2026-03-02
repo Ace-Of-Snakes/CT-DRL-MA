@@ -205,6 +205,7 @@ class TutorialRunner:
                 if last_transition is not None:
                     last_transition.done = True
                     last_transition.reward += TUTORIAL_REWARD_SUCCESS
+                self.agent.reset_nstep()
                 passed = scenario.check_pass(env, agent_moves)
                 return TutorialResult(
                     scenario_id=scenario.id,
@@ -231,6 +232,7 @@ class TutorialRunner:
         if last_transition is not None:
             last_transition.done = True
             last_transition.reward += TUTORIAL_REWARD_TIMEOUT
+        self.agent.reset_nstep()
         return TutorialResult(
             scenario_id=scenario.id,
             name=scenario.name,

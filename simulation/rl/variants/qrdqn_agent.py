@@ -168,7 +168,8 @@ class QRDQNAgent(BaseSpatialDQNAgent):
                 torch.zeros_like(theta_target),
             )
 
-            T_theta = rewards_t.unsqueeze(1) + gamma * (1 - dones_t.unsqueeze(1)) * theta_target
+            gamma_n = gamma ** cfg.n_step
+            T_theta = rewards_t.unsqueeze(1) + gamma_n * (1 - dones_t.unsqueeze(1)) * theta_target
 
         # Quantile Huber loss
         src_loss = _quantile_huber_loss(theta, T_theta, self._taus)

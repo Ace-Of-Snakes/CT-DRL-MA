@@ -23,6 +23,7 @@ _tier_5 = importlib.import_module("simulation.training.scenarios.5_terminal_truc
 _tier_6 = importlib.import_module("simulation.training.scenarios.6_multi_vehicle")
 _tier_7 = importlib.import_module("simulation.training.scenarios.7_bidirectional")
 _tier_8 = importlib.import_module("simulation.training.scenarios.8_stress")
+_tier_9 = importlib.import_module("simulation.training.scenarios.9_complex_ops")
 
 TIER_0: List[Type[TutorialScenario]] = _tier_0.SCENARIOS
 TIER_1: List[Type[TutorialScenario]] = _tier_1.SCENARIOS
@@ -33,11 +34,12 @@ TIER_5: List[Type[TutorialScenario]] = _tier_5.SCENARIOS
 TIER_6: List[Type[TutorialScenario]] = _tier_6.SCENARIOS
 TIER_7: List[Type[TutorialScenario]] = _tier_7.SCENARIOS
 TIER_8: List[Type[TutorialScenario]] = _tier_8.SCENARIOS
+TIER_9: List[Type[TutorialScenario]] = _tier_9.SCENARIOS
 
 # ── Flat list of all scenario classes ────────────────────────────────────
 ALL_SCENARIO_CLASSES: List[Type[TutorialScenario]] = (
     TIER_0 + TIER_1 + TIER_2 + TIER_3 + TIER_4
-    + TIER_5 + TIER_6 + TIER_7 + TIER_8
+    + TIER_5 + TIER_6 + TIER_7 + TIER_8 + TIER_9
 )
 
 # ── Instantiated registries ─────────────────────────────────────────────
@@ -53,7 +55,7 @@ REPEATABLE_SCENARIOS: List[TutorialScenario] = [
 ]
 
 # ── Tier definitions ─────────────────────────────────────────────────────
-# Matches the 11-tier ordering from tutorial_runner._TIER_BOUNDARIES.
+# Matches the 13-tier ordering used by tutorial_runner.
 TIER_DEFS: List[Tuple[str, List[int]]] = [
     ("Primitives",          [1, 2, 3, 4]),
     ("Two-action chains",   [5, 6, 26, 27]),
@@ -66,4 +68,6 @@ TIER_DEFS: List[Tuple[str, List[int]]] = [
     ("Bidirectional train", [17]),
     ("Concurrent ops",      [18, 19]),
     ("Full complexity",     [20, 21]),
+    ("Full train ops",     [28, 29]),
+    ("Cross-modal orchestration", [30, 31]),
 ]

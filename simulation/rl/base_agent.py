@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 from simulation.rl.multihead_dqn.config import MultiHeadDQNConfig, Dims
 from simulation.rl.multihead_dqn.replay_buffer import (
-    ReplayBuffer, PrioritizedReplayBuffer, Transition,
+    ReplayBuffer, PrioritizedReplayBuffer, NStepBuffer, Transition,
 )
 
 # ── Named constants ───────────────────────────────────────────────────
@@ -125,6 +125,12 @@ class BaseSpatialDQNAgent(ABC):
             )
         else:
             self.replay = ReplayBuffer(cfg.training.replay_size)
+
+        # N-step return buffer (sits between remember() and replay.push())
+        self.nstep_buffer = NStepBuffer(
+            n=cfg.training.n_step,
+            gamma=cfg.training.gamma,
+        )
 
         self.step_count = 0
         self.losses: List[float] = []
@@ -438,7 +444,15 @@ class BaseSpatialDQNAgent(ABC):
     # ── Replay ──────────────────────────────────────────────────────
 
     def remember(self, transition: Transition):
-        self.replay.push(transition)
+        for nstep_t in self.nstep_buffer.push(transition):
+            self.replay.push(nstep_t)
+
+    def reset_nstep(self):
+        """Flush remaining partial n-step transitions at episode / scenario
+        boundary, then clear the buffer for the next episode."""
+        for nstep_t in self.nstep_buffer.flush():
+            self.replay.push(nstep_t)
+        self.nstep_buffer.reset()
 
     # ── Optimization ────────────────────────────────────────────────
 
@@ -579,7 +593,8 @@ class BaseSpatialDQNAgent(ABC):
                 torch.isfinite(max_q_next), max_q_next,
                 torch.zeros_like(max_q_next),
             )
-            targets = rewards_t + gamma * (1 - dones_t) * max_q_next
+            gamma_n = gamma ** self.cfg.training.n_step
+            targets = rewards_t + gamma_n * (1 - dones_t) * max_q_next
 
         td_errors = targets - q_source_taken
 

@@ -214,7 +214,7 @@ class DQNConfig:
     tutorial_epsilon_epochs: int = 80
 
     double_dqn: bool = True
-    n_step: int = 3
+    n_step: int = 5
 
     # Dest head auxiliary loss weight (reward prediction, no bootstrap)
     dest_aux_weight: float = 0.5

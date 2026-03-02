@@ -2,22 +2,21 @@
 """Kitchen Sink DQN — combines all independently successful components.
 
 Following the Rainbow philosophy of Hessel et al. (2018), this agent
-merges the four orthogonal improvements that survived the Phase 1
+merges the three orthogonal improvements that survived the Phase 1
 tutorial screening into a single architecture:
 
-  1. **Deeper-Residual backbone** — 5-layer CNN with skip connections,
-     providing a larger cross-region receptive field (RF_R=5) and
-     stable gradient flow.  (From CNN screening: Deeper + Residual.)
+  1. **Deeper backbone + Spectral normalisation** — 5-layer CNN with a
+     second cross-region pass (RF_R=5), spectrally normalised for
+     stable off-policy learning.  Phase 1 screening showed Deeper +
+     SpectralNorm = 305 epochs / 99.2% accuracy (best CNN combo).
+     Residual skip connections were removed after screening showed
+     they hurt convergence (754 epochs vs 305).
 
-  2. **Spectral normalisation** — applied to all Conv3d layers in the
-     backbone, constraining the Lipschitz constant for stable off-policy
-     learning.  (From DQN screening: SpectralNorm.)
-
-  3. **Munchausen reward augmentation** — adds alpha * tau * log pi(a|s)
+  2. **Munchausen reward augmentation** — adds alpha * tau * log pi(a|s)
      to the TD target reward, providing implicit KL regularisation.
-     (From DQN screening: Munchausen.)
+     Fastest DQN variant in Phase 1 (317 epochs).
 
-  4. **NoisyNet exploration** — parametric noise in the scoring layers
+  3. **NoisyNet exploration** — parametric noise in the scoring layers
      replaces epsilon-greedy, enabling state-dependent exploration.
      (From DQN screening: NoisyNet.)
 
@@ -42,9 +41,9 @@ from simulation.rl.variants.networks.noisy_linear import NoisyLinear
 
 
 class KitchenSinkDQNAgent(BaseSpatialDQNAgent):
-    """Combined agent: Deeper-Residual backbone + SpectralNorm + Munchausen + NoisyNet.
+    """Combined agent: Deeper backbone + SpectralNorm + Munchausen + NoisyNet.
 
-    - Backbone: KitchenSinkCNNBackbone with spectral normalisation
+    - Backbone: KitchenSinkCNNBackbone (5-layer Deeper) with spectral norm
     - Heads: NoisySourceHead + NoisyDestHead (parametric exploration)
     - Loss: Munchausen-augmented TD (reward += alpha * tau * log_pi)
     - Exploration: NoisyNet (epsilon = 0, noise provides exploration)
@@ -196,7 +195,8 @@ class KitchenSinkDQNAgent(BaseSpatialDQNAgent):
                 torch.isfinite(max_q_next), max_q_next,
                 torch.zeros_like(max_q_next),
             )
-            targets = munchausen_reward + gamma * (1 - dones_t) * max_q_next
+            gamma_n = gamma ** cfg.n_step
+            targets = munchausen_reward + gamma_n * (1 - dones_t) * max_q_next
 
         td_errors = targets - q_source_taken
 

@@ -101,7 +101,8 @@ class MunchausenDQNAgent(BaseSpatialDQNAgent):
                 torch.isfinite(max_q_next), max_q_next,
                 torch.zeros_like(max_q_next),
             )
-            targets = munchausen_reward + gamma * (1 - dones_t) * max_q_next
+            gamma_n = gamma ** cfg.n_step
+            targets = munchausen_reward + gamma_n * (1 - dones_t) * max_q_next
 
         td_errors = targets - q_source_taken
 

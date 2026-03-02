@@ -5,6 +5,7 @@ Transitions store only (source_pos_down, dest_pos_down) instead of
 the old 6-field structure (action_type, container_pos, dest_type,
 placement_pos, vehicle_idx, parking_idx).
 """
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from copy import copy
@@ -41,6 +42,75 @@ def _decompress(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if arr is None:
         return None
     return arr.astype(np.float32) if arr.dtype == np.float16 else arr
+
+
+# ── N-Step Return Buffer ─────────────────────────────────────────────────
+
+class NStepBuffer:
+    """Accumulates *n* transitions, computes the n-step discounted return,
+    then emits a single ``(s_0, a_0, R_n, s_n, done_n)`` transition for
+    the replay buffer.
+
+    * On each ``push`` the buffer may return 0 or more ready transitions.
+    * When a terminal transition arrives (``done=True``) the buffer is
+      flushed so that shorter partial returns are also emitted.
+    """
+
+    def __init__(self, n: int, gamma: float):
+        self.n = n
+        self.gamma = gamma
+        self.buffer: deque = deque(maxlen=n)
+
+    # ── public API ───────────────────────────────────────────────────
+
+    def push(self, transition: Transition) -> List[Transition]:
+        """Push a 1-step transition.  Returns ready n-step transitions."""
+        self.buffer.append(transition)
+
+        # Episode ended → flush everything (partial windows included).
+        if transition.done:
+            return self._flush()
+
+        # Buffer full → emit oldest as n-step, then drop it.
+        if len(self.buffer) == self.n:
+            result = [self._make_nstep()]
+            self.buffer.popleft()
+            return result
+
+        return []
+
+    def flush(self) -> List[Transition]:
+        """Emit all remaining partial-window transitions (call between
+        episodes / scenarios)."""
+        return self._flush()
+
+    def reset(self):
+        """Discard buffer contents without emitting."""
+        self.buffer.clear()
+
+    # ── internals ────────────────────────────────────────────────────
+
+    def _make_nstep(self) -> Transition:
+        """Compute n-step return from the current buffer window."""
+        R = 0.0
+        for i in reversed(range(len(self.buffer))):
+            t = self.buffer[i]
+            R = t.reward + self.gamma * R * (1.0 - float(t.done))
+        return Transition(
+            state=self.buffer[0].state,
+            source_pos_down=self.buffer[0].source_pos_down,
+            dest_pos_down=self.buffer[0].dest_pos_down,
+            reward=R,
+            next_state=self.buffer[-1].next_state,
+            done=self.buffer[-1].done,
+        )
+
+    def _flush(self) -> List[Transition]:
+        results: List[Transition] = []
+        while self.buffer:
+            results.append(self._make_nstep())
+            self.buffer.popleft()
+        return results
 
 
 # ── Replay Buffers ───────────────────────────────────────────────────────

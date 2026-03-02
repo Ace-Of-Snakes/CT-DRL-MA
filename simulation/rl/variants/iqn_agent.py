@@ -152,9 +152,10 @@ class IQNAgent(BaseSpatialDQNAgent):
                 torch.zeros_like(theta_target),
             )
 
+            gamma_n = gamma ** cfg.n_step
             T_theta = (
                 rewards_t.unsqueeze(1)
-                + gamma * (1 - dones_t.unsqueeze(1)) * theta_target
+                + gamma_n * (1 - dones_t.unsqueeze(1)) * theta_target
             )
 
         with torch.no_grad():

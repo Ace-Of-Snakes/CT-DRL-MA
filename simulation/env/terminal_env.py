@@ -214,6 +214,8 @@ class TerminalEnv(ContainerTerminalEnv):
 
         truck_events = self._collect_truck_departures()
         all_info["truck_departures"] = truck_events
+        for evt in truck_events:
+            total_reward += self.reward_engine.truck_wait_reward(evt["wait_min"])
 
         if not done:
             done = self._check_day_end()
