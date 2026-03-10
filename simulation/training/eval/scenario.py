@@ -13,7 +13,7 @@ import math
 import random
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from simulation.core.enums import Direction
 from simulation.training.eval.metrics import SubTaskProgress
@@ -55,6 +55,8 @@ class EvalParams:
     n_exports: int = 10
     n_delivery_trucks: int = 0
     n_pickup_trucks: int = 0
+    n_train_to_truck: int = 0   # imports on train destined for pickup trucks
+    n_truck_to_train: int = 0   # exports on delivery trucks destined for trains
     yard_fill_pct: float = 0.0  # 0.0 to 0.7
     seed: int = 42
     safety_factor: float = 2.0
@@ -67,6 +69,10 @@ class EvalParams:
             parts.append(f"dtk={self.n_delivery_trucks}")
         if self.n_pickup_trucks:
             parts.append(f"ptk={self.n_pickup_trucks}")
+        if self.n_train_to_truck:
+            parts.append(f"t2tk={self.n_train_to_truck}")
+        if self.n_truck_to_train:
+            parts.append(f"tk2t={self.n_truck_to_train}")
         parts.append(f"fill={self.yard_fill_pct:.0%}")
         return "_".join(parts)
 
@@ -77,6 +83,8 @@ class EvalParams:
             + self.n_exports
             + self.n_delivery_trucks
             + self.n_pickup_trucks
+            + self.n_train_to_truck
+            + self.n_truck_to_train
         )
 
 
@@ -107,6 +115,10 @@ class ScalableEvalScenario(TutorialScenario):
         # Minimum 10 minutes so very small scenarios don't have 0-second windows
         self._feasible_seconds = max(600.0, self._feasible_seconds)
 
+        # Tracking for progress checks (populated during setup)
+        self._t2tk_truck_ids: List[str] = []
+        self._tk2t_map: Dict[str, str] = {}  # {container_id: train_id}
+
         # TutorialScenario interface
         self.id = 9000 + params.seed % 1000
         self.name = f"eval_{params.label}"
@@ -119,7 +131,11 @@ class ScalableEvalScenario(TutorialScenario):
 
     def _plan_trains(self) -> Tuple[int, List[int]]:
         """Determine number of trains and wagons per train."""
-        total_rail = self.params.n_imports + self.params.n_exports
+        p = self.params
+        total_rail = (
+            p.n_imports + p.n_exports
+            + p.n_train_to_truck + p.n_truck_to_train
+        )
         if total_rail == 0:
             return 0, []
 
@@ -139,19 +155,36 @@ class ScalableEvalScenario(TutorialScenario):
         productive = (
             p.n_imports + p.n_exports
             + p.n_delivery_trucks + p.n_pickup_trucks
+            + p.n_train_to_truck + p.n_truck_to_train
         )
         reshuffles = max(0, int(productive * _RESHUFFLE_OVERHEAD))
+
+        # Extra reshuffles for buried exports/pickups when yard is filled
+        if p.yard_fill_pct > 0:
+            buried_fraction = min(0.3, p.yard_fill_pct)
+            n_buried = int(
+                (p.n_exports + p.n_pickup_trucks) * buried_fraction
+            )
+            reshuffles += n_buried
 
         # Average bay spread depends on container count vs yard size
         # More containers → more spread → longer gantry travel
         avg_spread = min(15.0, max(3.0, p.total_containers * 0.5))
 
+        # Budget direct transfers conservatively as via-yard (2 crane moves)
+        # Agent may use direct TRAIN_TO_TRUCK / TRUCK_TO_TRAIN (1 move) and
+        # finish early, but we must guarantee feasibility for the slower path.
+        n_all_trucks = (
+            p.n_delivery_trucks + p.n_pickup_trucks
+            + p.n_train_to_truck + p.n_truck_to_train
+        )
+
         return WorkloadEstimate(
-            n_train_to_yard=p.n_imports,
-            n_yard_to_train=p.n_exports,
-            n_park_truck=p.n_delivery_trucks + p.n_pickup_trucks,
-            n_truck_to_yard=p.n_delivery_trucks,
-            n_yard_to_truck=p.n_pickup_trucks,
+            n_train_to_yard=p.n_imports + p.n_train_to_truck,
+            n_yard_to_train=p.n_exports + p.n_truck_to_train,
+            n_park_truck=n_all_trucks,
+            n_truck_to_yard=p.n_delivery_trucks + p.n_truck_to_train,
+            n_yard_to_truck=p.n_pickup_trucks + p.n_train_to_truck,
             n_yard_to_yard=reshuffles,
             avg_bay_spread=avg_spread,
         )
@@ -210,11 +243,35 @@ class ScalableEvalScenario(TutorialScenario):
         prefix = self._prefix
         active_bays: Set[int] = set()
 
+        # Reset tracking state (setup may be called multiple times)
+        self._t2tk_truck_ids = []
+        self._tk2t_map = {}
+
         n_bays = env.yard.n_bays
         n_rows = env.yard.n_rows
         departure = TUTORIAL_TIME + timedelta(seconds=self._feasible_seconds)
+        has_fill = p.yard_fill_pct > 0
+
+        # Staggered truck arrivals: spread across the first third of the
+        # feasible window so they arrive well before train departure.
+        n_total_trucks = (
+            p.n_delivery_trucks + p.n_pickup_trucks
+            + p.n_train_to_truck + p.n_truck_to_train
+        )
+        arrival_window_s = self._feasible_seconds / 3.0
+
+        def _truck_arrival(idx: int) -> datetime:
+            """Return a staggered arrival time for truck *idx* (0-based)."""
+            if n_total_trucks <= 1:
+                return TUTORIAL_TIME
+            frac = idx / max(1, n_total_trucks - 1)
+            return TUTORIAL_TIME + timedelta(seconds=frac * arrival_window_s)
+
+        truck_idx = 0  # running counter across all truck categories
 
         # ── 1. Export containers in yard (for train pickup) ────
+        #    With fill > 0: placed at tier 0-2 (semi-sorted) and counted
+        #    toward fill.  Without fill: placed at tier 0 (always accessible).
         export_ids: List[str] = []
         if p.n_exports > 0:
             export_bays = self._spread_bays(p.n_exports, n_bays, rng)
@@ -225,8 +282,24 @@ class ScalableEvalScenario(TutorialScenario):
                     departure=departure,
                     rng=rng,
                 )
-                row = i % n_rows
-                env.yard.add_container(c, _yard_placement(bay=bay, row=row, tier=0))
+                if has_fill:
+                    # Semi-sorted: use find_single_placement (tier 0-2)
+                    placement = env.yard.find_single_placement(
+                        c, target_bay=bay,
+                    )
+                    if placement is not None:
+                        env.yard.add_container(c, placement)
+                    else:
+                        # Fallback to tier 0
+                        row = i % n_rows
+                        env.yard.add_container(
+                            c, _yard_placement(bay=bay, row=row, tier=0),
+                        )
+                else:
+                    row = i % n_rows
+                    env.yard.add_container(
+                        c, _yard_placement(bay=bay, row=row, tier=0),
+                    )
                 export_ids.append(c.container_id)
                 active_bays.add(bay)
 
@@ -242,20 +315,44 @@ class ScalableEvalScenario(TutorialScenario):
                     direction=Direction.IMPORT,
                     rng=rng,
                 )
-                row = (i + p.n_exports) % n_rows
-                env.yard.add_container(c, _yard_placement(bay=bay, row=row, tier=0))
+                if has_fill:
+                    placement = env.yard.find_single_placement(
+                        c, target_bay=bay,
+                    )
+                    if placement is not None:
+                        env.yard.add_container(c, placement)
+                    else:
+                        row = (i + p.n_exports) % n_rows
+                        env.yard.add_container(
+                            c, _yard_placement(bay=bay, row=row, tier=0),
+                        )
+                else:
+                    row = (i + p.n_exports) % n_rows
+                    env.yard.add_container(
+                        c, _yard_placement(bay=bay, row=row, tier=0),
+                    )
                 pickup_ids.append(c.container_id)
                 active_bays.add(bay)
 
-        # ── 3. Trains with imports + export pickup lists ───────
+        # ── 3. Trains with imports + export/truck-to-train pickups ──
+        #    Train-to-truck containers are loaded as imports on the train.
+        #    Truck-to-train containers are registered as train pickup IDs.
+        t2tk_per_train = self._distribute(p.n_train_to_truck, self._n_trains)
+        tk2t_per_train = self._distribute(p.n_truck_to_train, self._n_trains)
+
         if self._n_trains > 0:
             imports_per_train = self._distribute(p.n_imports, self._n_trains)
             exports_per_train = self._distribute(p.n_exports, self._n_trains)
 
             export_cursor = 0
             imp_global = 0
+            t2tk_global = 0
+            tk2t_global = 0
+
             for t_idx in range(self._n_trains):
-                # Import containers loaded on this train
+                train_id = f"{prefix}_TR{t_idx}"
+
+                # Regular import containers loaded on this train
                 train_imports = []
                 for _ in range(imports_per_train[t_idx]):
                     c = _make_container(
@@ -266,15 +363,33 @@ class ScalableEvalScenario(TutorialScenario):
                     train_imports.append(c)
                     imp_global += 1
 
+                # Train-to-truck containers (also loaded as imports)
+                for _ in range(t2tk_per_train[t_idx]):
+                    c = _make_container(
+                        f"{prefix}_T2TK{t2tk_global}",
+                        direction=Direction.IMPORT,
+                        rng=rng,
+                    )
+                    train_imports.append(c)
+                    t2tk_global += 1
+
                 # Export pickup IDs for this train
                 n_exp = exports_per_train[t_idx]
                 train_pickup_ids = export_ids[export_cursor:export_cursor + n_exp]
                 export_cursor += n_exp
 
+                # Truck-to-train pickup IDs (will be added after trucks)
+                tk2t_ids_for_train: List[str] = []
+                for _ in range(tk2t_per_train[t_idx]):
+                    cid = f"{prefix}_TK2T{tk2t_global}"
+                    tk2t_ids_for_train.append(cid)
+                    self._tk2t_map[cid] = train_id
+                    tk2t_global += 1
+
                 tr = _make_train(
-                    f"{prefix}_TR{t_idx}",
+                    train_id,
                     containers=train_imports,
-                    pickup_ids=train_pickup_ids,
+                    pickup_ids=train_pickup_ids + tk2t_ids_for_train,
                     num_wagons=self._wagons_per_train[t_idx],
                 )
                 tr.departure_time = departure
@@ -290,25 +405,71 @@ class ScalableEvalScenario(TutorialScenario):
                 departure=TUTORIAL_TIME + timedelta(days=10),
                 rng=rng,
             )
-            tk = _make_truck(f"{prefix}_DTK{i}", containers=[c])
+            tk = _make_truck(
+                f"{prefix}_DTK{i}", containers=[c],
+                arrival_time=_truck_arrival(truck_idx),
+            )
             env.trucks[tk.truck_id] = tk
+            truck_idx += 1
 
         # ── 5. Pickup trucks ──────────────────────────────────
         for i in range(p.n_pickup_trucks):
             tk = _make_truck(
                 f"{prefix}_PTK{i}",
                 pickup_ids=[pickup_ids[i]],
+                arrival_time=_truck_arrival(truck_idx),
             )
             env.trucks[tk.truck_id] = tk
+            truck_idx += 1
 
-        # ── 6. Distractors (yard fill) ────────────────────────
-        if p.yard_fill_pct > 0:
-            total_tier0_slots = n_bays * n_rows
-            n_distractors = int(total_tier0_slots * p.yard_fill_pct)
-            _place_distractors(
-                env, rng, n_distractors, prefix,
-                exclude_bays=active_bays,
+        # ── 6. Train-to-truck pickup trucks ────────────────────
+        #    These trucks want specific import containers that arrive
+        #    on trains.  Agent can deliver directly (TRAIN_TO_TRUCK)
+        #    or route via yard (TRAIN_TO_YARD + YARD_TO_TRUCK).
+        for i in range(p.n_train_to_truck):
+            cid = f"{prefix}_T2TK{i}"
+            truck_id = f"{prefix}_T2TK_TK{i}"
+            tk = _make_truck(
+                truck_id, pickup_ids=[cid],
+                arrival_time=_truck_arrival(truck_idx),
             )
+            env.trucks[tk.truck_id] = tk
+            self._t2tk_truck_ids.append(truck_id)
+            truck_idx += 1
+
+        # ── 7. Truck-to-train delivery trucks ──────────────────
+        #    These trucks carry export containers that must reach a
+        #    train.  Agent can deliver directly (TRUCK_TO_TRAIN)
+        #    or route via yard (TRUCK_TO_YARD + YARD_TO_TRAIN).
+        for i in range(p.n_truck_to_train):
+            cid = f"{prefix}_TK2T{i}"
+            c = _make_container(
+                cid,
+                direction=Direction.EXPORT,
+                departure=departure,
+                rng=rng,
+            )
+            tk = _make_truck(
+                f"{prefix}_TK2T_TK{i}", containers=[c],
+                arrival_time=_truck_arrival(truck_idx),
+            )
+            env.trucks[tk.truck_id] = tk
+            truck_idx += 1
+
+        # ── 8. Distractors (yard fill) ────────────────────────
+        #    When fill > 0, exports and pickups already count toward
+        #    fill (placed at tier 0-2 above).  Fill remaining slots.
+        if has_fill:
+            total_tier0_slots = n_bays * n_rows
+            n_fill_target = int(total_tier0_slots * p.yard_fill_pct)
+            # Exports + pickups already occupy some slots
+            n_already = p.n_exports + p.n_pickup_trucks
+            n_distractors = max(0, n_fill_target - n_already)
+            if n_distractors > 0:
+                _place_distractors(
+                    env, rng, n_distractors, prefix,
+                    exclude_bays=active_bays,
+                )
 
     # ── Success / progress checking ────────────────────────────
 
@@ -349,6 +510,27 @@ class ScalableEvalScenario(TutorialScenario):
                 if env.yard.get_container(f"{prefix}_PKP{i}") is None
             )
             progress.append(SubTaskProgress("pickups_served", done, p.n_pickup_trucks))
+
+        # Train-to-truck: pickup truck has departed (got its container)
+        if p.n_train_to_truck > 0:
+            done = sum(
+                1 for tk_id in self._t2tk_truck_ids
+                if tk_id not in env.trucks
+            )
+            progress.append(SubTaskProgress(
+                "train_to_truck_done", done, p.n_train_to_truck,
+            ))
+
+        # Truck-to-train: container is on the assigned train
+        if p.n_truck_to_train > 0:
+            done = 0
+            for cid, train_id in self._tk2t_map.items():
+                tr = env.trains.get(train_id)
+                if tr is not None and tr.has_container(cid):
+                    done += 1
+            progress.append(SubTaskProgress(
+                "truck_to_train_done", done, p.n_truck_to_train,
+            ))
 
         return progress
 

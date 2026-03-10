@@ -46,6 +46,8 @@ def _warmup_on_scenario(
             n_exports=params.n_exports,
             n_delivery_trucks=params.n_delivery_trucks,
             n_pickup_trucks=params.n_pickup_trucks,
+            n_train_to_truck=params.n_train_to_truck,
+            n_truck_to_train=params.n_truck_to_train,
             yard_fill_pct=params.yard_fill_pct,
             seed=params.seed + epoch * 137,  # offset from eval seeds
             safety_factor=params.safety_factor,
@@ -131,6 +133,8 @@ def run_eval_matrix(
                 n_exports=params.n_exports,
                 n_delivery_trucks=params.n_delivery_trucks,
                 n_pickup_trucks=params.n_pickup_trucks,
+                n_train_to_truck=params.n_train_to_truck,
+                n_truck_to_train=params.n_truck_to_train,
                 yard_fill_pct=params.yard_fill_pct,
                 seed=params.seed + rep * 1000,
                 safety_factor=params.safety_factor,
@@ -162,6 +166,8 @@ def run_eval_matrix(
                 "n_exports": params.n_exports,
                 "n_delivery_trucks": params.n_delivery_trucks,
                 "n_pickup_trucks": params.n_pickup_trucks,
+                "n_train_to_truck": params.n_train_to_truck,
+                "n_truck_to_train": params.n_truck_to_train,
                 "yard_fill_pct": params.yard_fill_pct,
                 "total_containers": rep_params.total_containers,
                 "seed": rep_params.seed,
@@ -243,9 +249,11 @@ def default_eval_grid(base_seed: int = 7000) -> List[EvalParams]:
 
 
 def default_eval_grid_with_trucks(base_seed: int = 8000) -> List[EvalParams]:
-    """Extended grid including truck operations.
+    """Extended grid including truck operations and direct transfers.
 
-    Load is split roughly ⅓ imports, ⅓ exports, ⅓ trucks.
+    Load is split across 6 categories:
+    ~⅓ rail (imports + exports), ~⅓ trucks (delivery + pickup),
+    ~⅓ direct transfers (train-to-truck + truck-to-train).
 
     Returns:
         12 :class:`EvalParams` (4 load sizes x 3 fill levels).
@@ -256,16 +264,24 @@ def default_eval_grid_with_trucks(base_seed: int = 8000) -> List[EvalParams]:
 
     for i, n in enumerate(load_sizes):
         for j, fill in enumerate(yard_fills):
-            n_imp = n // 3
-            n_exp = n // 3
-            n_trucks = n - n_imp - n_exp
-            n_del = n_trucks // 2
-            n_pick = n_trucks - n_del
+            # Split into 6 roughly equal buckets
+            per_cat = n // 6
+            remainder = n - per_cat * 6
+
+            n_imp = per_cat + (1 if remainder > 0 else 0)
+            n_exp = per_cat + (1 if remainder > 1 else 0)
+            n_del = per_cat + (1 if remainder > 2 else 0)
+            n_pick = per_cat + (1 if remainder > 3 else 0)
+            n_t2tk = per_cat + (1 if remainder > 4 else 0)
+            n_tk2t = per_cat
+
             grid.append(EvalParams(
                 n_imports=n_imp,
                 n_exports=n_exp,
                 n_delivery_trucks=n_del,
                 n_pickup_trucks=n_pick,
+                n_train_to_truck=n_t2tk,
+                n_truck_to_train=n_tk2t,
                 yard_fill_pct=fill,
                 seed=base_seed + i * 100 + j * 10,
             ))
@@ -283,7 +299,8 @@ def summarize_eval(df: pd.DataFrame) -> pd.DataFrame:
     """
     group_cols = [
         "n_imports", "n_exports", "n_delivery_trucks",
-        "n_pickup_trucks", "yard_fill_pct", "total_containers",
+        "n_pickup_trucks", "n_train_to_truck", "n_truck_to_train",
+        "yard_fill_pct", "total_containers",
     ]
     # Only group by columns that exist
     group_cols = [c for c in group_cols if c in df.columns]

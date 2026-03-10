@@ -257,9 +257,10 @@ def _make_truck(
     tkid: str,
     containers: Optional[List[Container]] = None,
     pickup_ids: Optional[List[str]] = None,
+    arrival_time: Optional[datetime] = None,
 ) -> Truck:
     """Create a truck, optionally with cargo or pickup demand."""
-    truck = Truck(truck_id=tkid, arrival_time=TUTORIAL_TIME)
+    truck = Truck(truck_id=tkid, arrival_time=arrival_time or TUTORIAL_TIME)
     truck.status = TruckStatus.WAITING
     for c in (containers or []):
         truck.add_container(c)
