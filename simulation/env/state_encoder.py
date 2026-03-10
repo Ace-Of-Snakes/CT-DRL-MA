@@ -1,8 +1,8 @@
 # simulation/env/state_encoder.py
-"""13-channel state encoder for Spatial DQN.
+"""14-channel state encoder for Spatial DQN.
 
 Output shape: (C, R_uni, S, T) where
-  C     = 13 channels
+  C     = 14 channels
   R_uni = n_tracks + n_parking + n_yard + n_queue (default 15)
   S     = n_bays * split_factor (default 1160)
   T     = n_tiers (default 5)
@@ -11,6 +11,7 @@ Channels 0-9:  per-entity features (occupancy, type, urgency, demand, …)
 Channel  10:   crane proximity (triangular decay from each crane's last bay)
 Channel  11:   train departure urgency (per-train countdown on rail rows)
 Channel  12:   time progress (uniform seconds_since_midnight / 86400)
+Channel  13:   export pickup demand (yard containers wanted by present trains)
 
 Layout:
   Rows 0..6   Rail tracks    — containers on train wagons
@@ -50,8 +51,9 @@ class ChannelSpec:
     CRANE_PROXIMITY: int = 10
     TRAIN_DEPARTURE_URGENCY: int = 11
     TIME_PROGRESS: int = 12
+    EXPORT_PICKUP_DEMAND: int = 13  # yard containers wanted by present trains
 
-    NUM_CHANNELS: int = 13
+    NUM_CHANNELS: int = 14
 
 
 CH = ChannelSpec()
@@ -139,11 +141,12 @@ class StateEncoder:
         self._fill_yard_rows(tensor, truck_demand, train_demand, now)
         self._fill_queue_rows(tensor, trucks, now)
 
-        # Fill global / cross-entity channels (10-12)
+        # Fill global / cross-entity channels (10-13)
         if crane_states is not None:
             self._fill_crane_proximity(tensor, crane_states)
         self._fill_train_departure_urgency(tensor, trains, now)
         self._fill_time_progress(tensor, now)
+        self._fill_export_pickup_demand(tensor, trains, now)
 
         return tensor
 
@@ -612,6 +615,51 @@ class StateEncoder:
             return
         seconds = now.hour * 3600 + now.minute * 60 + now.second
         tensor[CH.TIME_PROGRESS, :, :, :] = seconds / SECONDS_PER_DAY
+
+    def _fill_export_pickup_demand(
+        self,
+        tensor: np.ndarray,
+        trains: Dict[str, Train],
+        now: datetime,
+    ) -> None:
+        """Mark yard containers wanted by present trains' pickup lists.
+
+        Value = train departure urgency (0.1→1.0) so the CNN sees both
+        'this container is wanted' AND 'how urgently.'
+
+        Only yard rows are marked — rail containers are already on the
+        train and don't need this signal.
+        """
+        if now is None:
+            return
+        d = self.dims
+
+        # Collect all pickup IDs from present trains, with urgency
+        pickup_urgency: Dict[str, float] = {}
+        for train_id, train in trains.items():
+            dep = getattr(train, "departure_time", None)
+            if dep is None:
+                continue
+            hours_until = max(0.0, (dep - now).total_seconds() / 3600.0)
+            urgency = max(0.1, 1.0 - min(1.0, hours_until / MAX_TRAIN_DEPARTURE_HOURS))
+            for cid in train.get_all_pickup_container_ids():
+                # Keep highest urgency if container appears in multiple trains
+                pickup_urgency[cid] = max(pickup_urgency.get(cid, 0.0), urgency)
+
+        if not pickup_urgency:
+            return
+
+        # Mark yard containers that are in pickup lists
+        y0 = d.yard_row_start
+        for rec in self.yard.iter_records():
+            cid = rec.container.container_id
+            urg = pickup_urgency.get(cid)
+            if urg is not None:
+                r = y0 + rec.placement.row
+                s0 = rec.placement.abs_start
+                s1 = min(s0 + rec.n_splits, d.n_splits)
+                t = rec.placement.tier
+                tensor[CH.EXPORT_PICKUP_DEMAND, r, s0:s1, t] = urg
 
     def _preferred_bay_for_truck(self, truck: Truck) -> Optional[int]:
         """Compute preferred bay for queue positioning.

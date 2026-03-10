@@ -13,6 +13,7 @@ from simulation.rl.variants.dueling_agent import DuelingDQNAgent
 from simulation.rl.variants.qrdqn_agent import QRDQNAgent
 from simulation.rl.variants.iqn_agent import IQNAgent
 from simulation.rl.variants.kitchen_sink_agent import KitchenSinkDQNAgent
+from simulation.rl.variants.gru_agent import GRUDQNAgent
 
 __all__ = [
     "MunchausenDQNAgent",
@@ -22,4 +23,5 @@ __all__ = [
     "QRDQNAgent",
     "IQNAgent",
     "KitchenSinkDQNAgent",
+    "GRUDQNAgent",
 ]

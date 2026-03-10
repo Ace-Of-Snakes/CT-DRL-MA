@@ -171,9 +171,19 @@ class ContainerTerminalEnv:
 
         # Clear parking (prevents ghost spots from previous day's terminal trucks)
         if self.parking is not None:
+            # Bay-level arrays
             self.parking.occupied[:] = False
             self.parking.truck_ids.fill(None)
             self.parking._truck_spots.clear()
+            # Flat spatial grid (added during facility unification)
+            self.parking.occupancy_flat[:] = False
+            self.parking.position_grid[:] = EMPTY_SLOT
+            for i in range(len(self.parking._records)):
+                self.parking._records[i] = None
+            self.parking._id_to_idx.clear()
+            self.parking._free_indices = list(
+                range(len(self.parking._records) - 1, -1, -1)
+            )
 
         # Sync RMGC layout
         self.rmgc.set_layout(yard=self.yard, rail=self.rail, num_tracks=self.num_tracks)
@@ -241,10 +251,14 @@ class ContainerTerminalEnv:
 
             if train_id not in self.trains and self.current_time >= arr_dt and self.current_time < dep_dt:
                 anchor = int(round((st.track_id + 1) * (self.yard.n_bays / (self.num_tracks + 1))))
-                anchor = max(0, min(self.yard.n_bays - 1, anchor))
+                # Clamp so the entire train fits within yard boundaries
+                n_wagons = len(st.train.wagons) if st.train.wagons else 1
+                anchor = max(0, min(self.yard.n_bays - n_wagons, anchor))
                 self.rail.slot_train(st.train, RailSlot(track_id=st.track_id, anchor_bay=anchor))
                 st.train.arrival_time = arr_dt
                 st.train.departure_time = dep_dt
+                # Snapshot initial export count before any loading occurs
+                st.train._initial_pickup_count = len(st.train.get_all_pickup_container_ids())
                 self.trains[train_id] = st.train
 
             still.append(st)
@@ -284,9 +298,18 @@ class ContainerTerminalEnv:
         """Admit arrivals, process train departures, return reward."""
         departed = self._admit_arrivals_and_departures()
         reward = 0.0
-        for train_id, _leftover in departed:
+        self._last_train_departures: List[Dict[str, Any]] = []
+        for train_id, leftover in departed:
             train = self._departed_cache.pop(train_id, None)
             if train:
+                scheduled = getattr(train, "_initial_pickup_count", leftover)
+                loaded = max(0, scheduled - leftover)
+                self._last_train_departures.append({
+                    "train_id": train_id,
+                    "scheduled_exports": scheduled,
+                    "loaded_exports": loaded,
+                    "missed_exports": leftover,
+                })
                 reward += self.reward_engine.on_train_departure(train)
         self._update_train_heat()
         return reward
@@ -416,7 +439,8 @@ class ContainerTerminalEnv:
                     if self.rail.get_slot(train.train_id) is None:
                         anchor = self.rail.get_anchor_bay(train.train_id)
                         if anchor is None:
-                            anchor = max(0, min(self.yard.n_bays - 1, self.yard.n_bays // 2))
+                            n_wagons = len(train.wagons) if train.wagons else 1
+                            anchor = max(0, min(self.yard.n_bays - n_wagons, self.yard.n_bays // 2))
                         track_id = int(getattr(train, "rail_track", 0) or 0)
                         self.rail.slot_train(train, RailSlot(track_id=track_id, anchor_bay=anchor))
                     self.trains[train_id] = train
@@ -425,9 +449,17 @@ class ContainerTerminalEnv:
             for truck_id, truck in carryover_trucks.items():
                 if truck and truck.departure_time is None:
                     self.trucks[truck_id] = truck
+                    # Re-register in parking grid (cleared during reset)
+                    spot = getattr(truck, "parking_spot", None)
+                    if spot is not None and self.parking is not None:
+                        ok = self.parking.allocate(truck, spot.bay, 0)
+                        if not ok:
+                            # Bay conflict — send truck back to queue
+                            truck.parking_spot = None
+                            truck.status = TruckStatus.WAITING
 
     def _rollover_missed_deadlines(self) -> None:
-        """Collect vehicles for next-day carryover."""
+        """Collect vehicles for next-day carryover and remove missed containers."""
         self._carryover_trains = {
             tid: t for tid, t in self.trains.items()
             if t and (t.departure_time is None or t.departure_time > self.current_time)
@@ -437,6 +469,38 @@ class ContainerTerminalEnv:
             if t and t.departure_time is None
             and not getattr(t, "is_terminal_truck", False)
         }
+        # Remove containers that missed their departure — they would be
+        # handled by manual intervention in a real terminal.  Leaving them
+        # in the yard wastes capacity and compounds EOD penalties on
+        # subsequent days.
+        self._remove_missed_containers()
+
+    def _remove_missed_containers(self) -> int:
+        """Remove containers whose departure_date has passed from the yard.
+
+        Also cleans the removed container IDs from any pickup trucks so
+        they can depart instead of being stranded forever.
+
+        Returns the number of containers removed.
+        """
+        today = self.current_time.date()
+        to_remove = []
+        for rec in self.yard.iter_records():
+            dep = getattr(rec.container, "departure_date", None)
+            if dep is not None and dep.date() <= today:
+                to_remove.append(rec.container)
+        for container in to_remove:
+            self.yard.remove_container(container)
+
+        # Clean removed IDs from pickup trucks so they can depart
+        if to_remove:
+            removed_ids = {c.container_id for c in to_remove}
+            for truck in self.trucks.values():
+                pids = getattr(truck, "pickup_container_ids", None)
+                if pids:
+                    pids -= removed_ids  # set difference in-place
+
+        return len(to_remove)
 
     # ================================================================
     # Auto-parking

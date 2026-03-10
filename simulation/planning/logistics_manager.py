@@ -55,6 +55,7 @@ class LogisticsManager:
         self.time = WeeklyTimeEncoder()
         self.export_per_import = max(0.0, float(export_per_import))
         self.daily_train_import_cap = daily_train_import_cap
+        self.yard_tracks = train_scheduler.num_tracks
 
     # ================================================================
     # Day planning
@@ -113,10 +114,11 @@ class LogisticsManager:
         # 4) Single pass over yard: partition departing containers into export / import
         yard_exports_due, yard_imports_due = self._collect_yard_departing(today_date)
 
-        # 5) Assign pickups to trains
+        # 5) Assign pickups to trains (proximity-aware)
         pickup_assignments = self._assign_pickups_to_trains(
             containers=yard_exports_due + truck_exports_due,
             trains=[st.train for st in todays_trains],
+            scheduled_trains=todays_trains,
         )
 
         # 6) Generate pickup trucks for imports due today (on trains)
@@ -172,27 +174,32 @@ class LogisticsManager:
         horizon = now + timedelta(minutes=OperationsDefaults.RECALC_WINDOW_MINUTES)
         day_name = now.strftime("%A").lower()
 
-        imminent: List[Train] = []
+        imminent_trains: List[Train] = []
+        imminent_scheduled: List[ScheduledTrain] = []
         for st in day_plan.todays_trains:
             d, h, m = self.time.decode(st.arrival_angle)
             if d != day_name:
                 continue
             arr_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
             if now <= arr_dt <= horizon:
-                imminent.append(st.train)
+                imminent_trains.append(st.train)
+                imminent_scheduled.append(st)
 
-        if not imminent:
+        if not imminent_trains:
             return
 
         today_date = now.date()
         yard_exports_due, _ = self._collect_yard_departing(today_date)
         due_ids = {c.container_id for c in yard_exports_due}
 
-        for train in imminent:
+        for train in imminent_trains:
             for wagon in train.wagons:
                 wagon.pickup_container_ids.intersection_update(due_ids)
 
-        self._assign_pickups_to_trains(yard_exports_due, imminent)
+        self._assign_pickups_to_trains(
+            yard_exports_due, imminent_trains,
+            scheduled_trains=imminent_scheduled,
+        )
 
     # ================================================================
     # Yard departure collection
@@ -266,11 +273,16 @@ class LogisticsManager:
         self,
         containers: List[Container],
         trains: List[Train],
+        scheduled_trains: Optional[List[ScheduledTrain]] = None,
         append_to: Optional[Dict[str, Dict[int, List[str]]]] = None,
     ) -> Dict[str, Dict[int, List[str]]]:
         """
-        Capacity-agnostic intent assignment: round-robin containers to trains,
-        hash-based wagon selection.
+        Proximity-aware pickup assignment: assign each export container to the
+        nearest train (by anchor bay), then to the nearest wagon within that train.
+
+        For containers already in the yard, distance is measured from their bay
+        position to the train's anchor bay.  For containers not yet placed (arriving
+        via truck), round-robin across trains is used as a fallback.
         """
         assignments = append_to if append_to is not None else {}
 
@@ -280,22 +292,53 @@ class LogisticsManager:
         for train in trains:
             assignments.setdefault(train.train_id, {})
 
-        k = len(trains)
+        # Build train → anchor bay mapping for proximity
+        n_bays = self.yard.n_bays
+        num_tracks = self.yard_tracks
+        train_anchors: Dict[str, int] = {}
+        if scheduled_trains:
+            for st in scheduled_trains:
+                n_wagons = len(st.train.wagons) if st.train.wagons else 1
+                anchor = int(round((st.track_id + 1) * (n_bays / (num_tracks + 1))))
+                anchor = max(0, min(n_bays - n_wagons, anchor))
+                train_anchors[st.train.train_id] = anchor
+
+        # Build container → bay mapping from yard records
+        container_bays: Dict[str, int] = {}
+        for rec in self.yard.iter_records():
+            container_bays[rec.container.container_id] = rec.placement.bay
+
         rr = 0
+        k = len(trains)
         for container in containers:
             if not container or container.direction != Direction.EXPORT:
                 continue
 
-            train = trains[rr % k]
-            rr += 1
+            cid = container.container_id
+            container_bay = container_bays.get(cid)
 
-            n_wagons = max(1, len(train.wagons))
-            wagon_idx = abs(hash(container.container_id)) % n_wagons
+            if container_bay is not None and train_anchors:
+                # Proximity: pick the closest train by anchor bay distance
+                best_train = min(
+                    trains,
+                    key=lambda t: abs(train_anchors.get(t.train_id, n_bays) - container_bay),
+                )
+            else:
+                # Fallback: round-robin for containers not yet in yard
+                best_train = trains[rr % k]
+                rr += 1
 
-            train.wagons[wagon_idx].add_pickup_container(container.container_id)
-            assignments[train.train_id].setdefault(wagon_idx, []).append(
-                container.container_id
-            )
+            # Assign to nearest wagon within the chosen train
+            n_wagons = max(1, len(best_train.wagons))
+            if container_bay is not None and best_train.train_id in train_anchors:
+                anchor = train_anchors[best_train.train_id]
+                # Nearest wagon = offset from anchor closest to container bay
+                wagon_idx = max(0, min(n_wagons - 1, container_bay - anchor))
+            else:
+                wagon_idx = abs(hash(cid)) % n_wagons
+
+            best_train.wagons[wagon_idx].add_pickup_container(cid)
+            assignments[best_train.train_id].setdefault(wagon_idx, []).append(cid)
 
         return assignments
 

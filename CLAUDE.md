@@ -22,10 +22,10 @@ python -m simulation.training.curriculum_trainer --output-dir runs/curriculum --
 ```
 
 ## Architecture at a Glance
-- **State**: 13-channel (13, 15, 1160, 5) float32 tensor
+- **State**: 14-channel (14, 15, 1160, 5) float32 tensor
 - **Action**: 2-stage spatial — source position (+ learnable IDLE) then destination position with dynamic masking
 - **Agent**: 7 DQN variants + Kitchen Sink combo, 6 CNN backbone variants
-- **Training**: Phase 0 (27 tutorial scenarios, 11 mastery-gated tiers) → Phase 1 (11 curriculum stages, 20→220 imports/day)
+- **Training**: Phase 0 (33 tutorial scenarios, 14 mastery-gated tiers) → Phase 1 (11 curriculum stages, 20→220 imports/day)
 
 ## Key Directories
 - `simulation/env/` — Environment (`terminal_env.py`), state encoder, reward engine

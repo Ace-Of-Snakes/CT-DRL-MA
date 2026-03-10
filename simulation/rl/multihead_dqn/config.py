@@ -148,7 +148,7 @@ class CNNConfig:
       (cross_kernel, 1, cross_kernel) across R×T → stacking + cross-region
       (1, refine_kernel, 1) along S → neighbourhood refinement
     """
-    n_state_channels: int = 13   # 13 channels (10 base + crane, train urgency, time)
+    n_state_channels: int = 14   # 14 channels (10 base + crane, train urgency, time, export demand)
     stage1_channels: int = 32
     feat_channels: int = 64
     global_dim: int = 128
@@ -201,7 +201,7 @@ class DQNConfig:
     gamma: float = 0.99
     lr: float = 3e-4
     batch_size: int = 32
-    replay_size: int = 2_000
+    replay_size: int = 3_000
     target_tau: float = 0.005
     grad_clip: float = 1.0
 
@@ -214,7 +214,7 @@ class DQNConfig:
     tutorial_epsilon_epochs: int = 80
 
     double_dqn: bool = True
-    n_step: int = 5
+    n_step: int = 3
 
     # Dest head auxiliary loss weight (reward prediction, no bootstrap)
     dest_aux_weight: float = 0.5

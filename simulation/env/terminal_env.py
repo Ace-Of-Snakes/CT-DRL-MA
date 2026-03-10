@@ -32,7 +32,7 @@ from simulation.analytics.move_csv_logger import MoveCSVLogger
 from simulation.env.facility_coordinator import FacilityCoordinator
 
 # Parent env — inherits all simulation infrastructure
-from simulation.env.env import ContainerTerminalEnv
+from simulation.env.env import ContainerTerminalEnv, IDLE_TICK_SECONDS
 
 # RL components
 from simulation.env.state_encoder import StateEncoder, CH
@@ -73,6 +73,7 @@ class StepResult:
     info: Dict[str, Any]
     transition: Optional[Transition] = None
     was_valid_move: bool = False
+    free_action: bool = False  # True for actions that don't occupy the crane (e.g. PARK_TRUCK)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -112,6 +113,7 @@ class TerminalEnv(ContainerTerminalEnv):
         )
         self._s_stride: int = DEFAULT_S_STRIDE
         self._s_down: int = self.dims.n_splits // self._s_stride
+        self._step_crane_durations: list = []
 
         # Optional CSV move logger (activated when log_dir is provided)
         self._log_dir = log_dir
@@ -192,25 +194,52 @@ class TerminalEnv(ContainerTerminalEnv):
 
         # Track containers moved this step to prevent crane-to-crane reversals
         self._step_blacklist: set = set()
+        # Collect per-crane durations for parallel time advancement
+        self._step_crane_durations: list = []
 
         for crane in idle_cranes:
-            result = self._step_unified(agent, crane.id, state)
-            state = result.next_state
-            total_reward += result.reward
+            # Free actions (e.g. PARK_TRUCK) don't occupy the crane —
+            # let it keep acting until it does a real move or idles.
+            MAX_FREE = 10  # safety cap to prevent infinite loops
+            for _free_iter in range(MAX_FREE + 1):
+                result = self._step_unified(agent, crane.id, state)
+                state = result.next_state
+                total_reward += result.reward
 
-            all_info["crane_results"].append({
-                "crane_id": crane.id,
-                "reward": result.reward,
-                "was_valid": result.was_valid_move,
-            })
-            all_info["executed"].extend(result.info.get("executed", []))
+                cr_entry = {
+                    "crane_id": crane.id,
+                    "reward": result.reward,
+                    "was_valid": result.was_valid_move,
+                    "idle_reason": result.info.get("idle_reason"),
+                    "retries": result.info.get("retries", 0),
+                    "retry_reasons": result.info.get("retry_reasons", []),
+                }
+                # Propagate no_source diagnostics
+                for _k in ("no_source_yard", "no_source_rail", "no_source_trucks"):
+                    if _k in result.info:
+                        cr_entry[_k] = result.info[_k]
+                all_info["crane_results"].append(cr_entry)
+                all_info["executed"].extend(result.info.get("executed", []))
 
-            if result.transition is not None:
-                all_info["transitions"].append(result.transition)
+                if result.transition is not None:
+                    all_info["transitions"].append(result.transition)
+
+                if not result.free_action:
+                    break  # real action taken — crane is now busy
 
             if result.done:
                 done = True
                 break
+
+        # Parallel time advance: cranes work simultaneously, so advance by
+        # the longest individual crane duration (not the sum).
+        if self._step_crane_durations:
+            self._advance_time(max(self._step_crane_durations))
+
+        # Train departure details (populated by _handle_arrivals_departures)
+        train_dep = getattr(self, "_last_train_departures", [])
+        if train_dep:
+            all_info.setdefault("train_departures", []).extend(train_dep)
 
         truck_events = self._collect_truck_departures()
         all_info["truck_departures"] = truck_events
@@ -255,10 +284,21 @@ class TerminalEnv(ContainerTerminalEnv):
             if blacklist:
                 self._apply_source_blacklist(source_mask, blacklist)
             if not source_mask.any():
-                log.debug(
-                    "crane=%d retry=%d | NO_SOURCE (sources=%d blacklist=%d)",
-                    crane_id, retry, 0, len(blacklist),
+                yard_n = self.yard.container_count
+                rail_n = sum(
+                    t.get_container_count() for t in self.trains.values()
                 )
+                truck_n = len(self.trucks)
+                log.debug(
+                    "crane=%d retry=%d | NO_SOURCE (sources=%d blacklist=%d "
+                    "yard=%d rail=%d trucks=%d)",
+                    crane_id, retry, 0, len(blacklist),
+                    yard_n, rail_n, truck_n,
+                )
+                info["idle_reason"] = "no_source"
+                info["no_source_yard"] = yard_n
+                info["no_source_rail"] = rail_n
+                info["no_source_trucks"] = truck_n
                 break  # nothing to do
 
             dest_mask_fn = self._make_dest_mask_fn(state_np)
@@ -274,8 +314,8 @@ class TerminalEnv(ContainerTerminalEnv):
                     "crane=%d retry=%d | IDLE chosen (penalty=%.1f)",
                     crane_id, retry, IDLE_PENALTY,
                 )
-                # Deliberate idle — flat penalty every time
-                self._advance_time()
+                # Deliberate idle — record duration for parallel advance
+                self._step_crane_durations.append(IDLE_TICK_SECONDS)
                 next_state = self._encode_state()
                 done = self._check_day_end()
                 transition = Transition(
@@ -287,6 +327,7 @@ class TerminalEnv(ContainerTerminalEnv):
                     done=done,
                 )
                 info["idle"] = True
+                info["idle_reason"] = "idle_chosen"
                 return StepResult(
                     next_state=next_state,
                     reward=total_penalty + IDLE_PENALTY,
@@ -304,6 +345,11 @@ class TerminalEnv(ContainerTerminalEnv):
                     action.source_pos, action.source_region,
                     action.move_type, action.dest_pos,
                 )
+                info["idle_reason"] = "empty_dest_mask"
+                info["empty_dest_source"] = {
+                    "region": action.source_region,
+                    "pos": action.source_pos,
+                }
                 break  # no valid action — idle
 
             # Log the attempt
@@ -358,11 +404,13 @@ class TerminalEnv(ContainerTerminalEnv):
             )
 
         # All retries exhausted or nothing to do — idle advance
+        if "idle_reason" not in info:
+            info["idle_reason"] = "retries_exhausted"
         log.debug(
-            "crane=%d | FALLTHROUGH retries=%d total_penalty=%.1f",
-            crane_id, info["retries"], total_penalty,
+            "crane=%d | FALLTHROUGH retries=%d total_penalty=%.1f idle_reason=%s",
+            crane_id, info["retries"], total_penalty, info.get("idle_reason"),
         )
-        self._advance_time()
+        self._step_crane_durations.append(IDLE_TICK_SECONDS)
         return StepResult(
             next_state=self._encode_state(),
             reward=total_penalty,
@@ -759,8 +807,8 @@ class TerminalEnv(ContainerTerminalEnv):
                 track_or_bay=str(dst_bay),
             )
 
-        # No crane cost for parking — just advance time
-        self._advance_time()
+        # Parking is instantaneous — trucks drive themselves, no crane needed.
+        # Do NOT advance time; the crane remains available for a real move.
         next_state = self._encode_state()
         done = self._check_day_end()
 
@@ -776,6 +824,7 @@ class TerminalEnv(ContainerTerminalEnv):
         return StepResult(
             next_state=next_state, reward=reward, done=done,
             info=info, transition=transition, was_valid_move=True,
+            free_action=True,
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -849,8 +898,15 @@ class TerminalEnv(ContainerTerminalEnv):
                 )
 
         distance_m = cost.distance_m if cost else 0.0
+        # Resolve train object for urgency-scaled reward
+        train_obj = None
+        if move.type in (MoveType.YARD_TO_TRAIN, MoveType.TRUCK_TO_TRAIN):
+            tid = move.args.get("train_id")
+            if tid:
+                train_obj = self.trains.get(tid)
         reward = self.reward_engine.immediate_reward(
             move.type.value, distance_m, time_s,
+            now=self.current_time, train=train_obj,
         )
 
         container_id = move.args.get("container_id", "")
@@ -880,7 +936,8 @@ class TerminalEnv(ContainerTerminalEnv):
         if blacklist is not None and container_id:
             blacklist.add(container_id)
 
-        self._advance_time(time_s)
+        # Record duration for parallel time advancement in step_all_cranes
+        self._step_crane_durations.append(time_s)
         next_state = self._encode_state()
         done = self._check_day_end()
 
@@ -1206,8 +1263,8 @@ class TerminalEnv(ContainerTerminalEnv):
     # ── Idle / utility ────────────────────────────────────────────────
 
     def _idle_result(self, info: Dict) -> StepResult:
-        """Advance time, return zero-reward result."""
-        self._advance_time()
+        """Record idle duration, return zero-reward result."""
+        self._step_crane_durations.append(IDLE_TICK_SECONDS)
         return StepResult(
             next_state=self._encode_state(), reward=0.0,
             done=self._check_day_end(), info=info, was_valid_move=False,
@@ -1227,10 +1284,9 @@ def _downsample_mask(mask: np.ndarray, stride: int) -> np.ndarray:
 
 
 def _wagon_has_space(wagon) -> bool:
-    """Check if wagon has room for at least one more container."""
-    capacity = getattr(wagon, "capacity", 2)
-    current = len(getattr(wagon, "containers", {}))
-    return current < capacity
+    """Check if wagon has room for at least one more container (length-based)."""
+    from simulation.core.constants import MIN_CONTAINER_LENGTH_M
+    return wagon.get_available_length() >= MIN_CONTAINER_LENGTH_M
 
 
 def _container_n_splits(container, length_map, split_factor: int) -> int:

@@ -206,6 +206,8 @@ class TutorialRunner:
                     last_transition.done = True
                     last_transition.reward += TUTORIAL_REWARD_SUCCESS
                 self.agent.reset_nstep()
+                if hasattr(self.agent, 'reset_hidden'):
+                    self.agent.reset_hidden()
                 passed = scenario.check_pass(env, agent_moves)
                 return TutorialResult(
                     scenario_id=scenario.id,
@@ -233,6 +235,8 @@ class TutorialRunner:
             last_transition.done = True
             last_transition.reward += TUTORIAL_REWARD_TIMEOUT
         self.agent.reset_nstep()
+        if hasattr(self.agent, 'reset_hidden'):
+            self.agent.reset_hidden()
         return TutorialResult(
             scenario_id=scenario.id,
             name=scenario.name,

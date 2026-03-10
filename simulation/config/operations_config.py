@@ -16,16 +16,16 @@ class RewardWeights:
     per_second_cost: float = -0.0005
     
     # EXPORT rewards (agent must learn these are HIGH PRIORITY)
-    reward_yard_to_train: float = 5.0    # Trains have deadlines!
+    reward_yard_to_train: float = 7.0    # Trains have deadlines!
     reward_yard_to_truck: float = 3.0    # Customer service
     
-    # IMPORT rewards (auto-transfer does these)
-    reward_train_to_yard: float = 1.0
+    # IMPORT rewards
+    reward_train_to_yard: float = 2.5
     reward_truck_to_yard: float = 0.8
     
     # Direct transfers (auto-transfer optimization)
-    reward_train_to_truck: float = 4.0   # Skip yard = efficient
-    reward_truck_to_train: float = 4.0   # Skip yard = efficient
+    reward_train_to_truck: float = 5.0   # Skip yard = efficient
+    reward_truck_to_train: float = 7.0   # Skip yard = efficient
     
     # Other moves
     reward_terminal_truck: float = 2.0
@@ -42,7 +42,7 @@ class RewardWeights:
     endday_leftover_weight: float = -0.3  # Leftovers are bad
     
     # Truck wait time shaping
-    waiting_penalty_per_truck_minute: float = 0.01  # Waiting costs
+    waiting_penalty_per_truck_minute: float = 0.0  # Disabled: accumulated over all present trucks per step, overwhelms learning signal
     truck_wait_fast_minutes: float = 60.0
     truck_wait_slow_minutes: float = 180.0
     truck_wait_reward_fast: float = 2.0   # Fast service = good

@@ -442,3 +442,74 @@ class QNetwork(nn.Module):
             "dest_head": _count(self.dest_head),
             "total": _count(self),
         }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Recurrent Q-Network (GRU temporal context)
+# ══════════════════════════════════════════════════════════════════════════
+
+class RecurrentQNetwork(QNetwork):
+    """QNetwork with GRU temporal context on global features.
+
+    Overrides ``encode_state()`` to pass the pooled global feature vector
+    through a GRUCell, maintaining hidden state across sequential ``act()``
+    calls within an episode.  At episode boundaries the agent calls
+    ``reset_hidden()`` to zero the state.
+
+    During training (batch of i.i.d. transitions), ``_h`` is ``None`` so
+    ``encode_state`` falls back to the standard feedforward path.  The GRU
+    therefore provides temporal context only at inference time (Phase 1
+    recurrence from the LSTM implementation guide).
+
+    Parameters added: GRUCell(G→H) + Linear(H→G) + LayerNorm(G)
+    With H=64, G=128: ~45 K extra parameters (~31% overhead).
+    """
+
+    def __init__(
+        self,
+        dims: Dims,
+        cnn_cfg: CNNConfig,
+        head_cfg: HeadConfig,
+        gru_hidden: int = 64,
+        **kwargs,
+    ):
+        super().__init__(dims, cnn_cfg, head_cfg, **kwargs)
+        G = cnn_cfg.global_dim  # 128
+        self.gru_cell = nn.GRUCell(G, gru_hidden)
+        self.gru_proj = nn.Linear(gru_hidden, G)
+        self.gru_ln = nn.LayerNorm(G)
+        self._h: Optional[torch.Tensor] = None
+
+    # ── Encoding (overrides QNetwork.encode_state) ─────────────────────
+
+    def encode_state(self, state: torch.Tensor) -> EncodedState:
+        """State → CNN features + GRU-augmented global embedding."""
+        enc = super().encode_state(state)
+        if self._h is not None:
+            h_new = self.gru_cell(enc.global_feat, self._h)
+            self._h = h_new
+            temporal = self.gru_ln(self.gru_proj(h_new))
+            return EncodedState(global_feat=temporal, feat_map=enc.feat_map)
+        return enc  # no hidden → pure feedforward (training / first step)
+
+    # ── Hidden state lifecycle ─────────────────────────────────────────
+
+    def init_hidden(self, device: torch.device) -> None:
+        """Initialize hidden state to zeros (call at episode start)."""
+        self._h = torch.zeros(1, self.gru_cell.hidden_size, device=device)
+
+    def reset_hidden(self) -> None:
+        """Clear hidden state (call at episode boundary)."""
+        self._h = None
+
+    # ── Param counting ─────────────────────────────────────────────────
+
+    def count_parameters(self) -> dict:
+        counts = super().count_parameters()
+        def _count(module):
+            return sum(p.numel() for p in module.parameters() if p.requires_grad)
+        counts["gru"] = (
+            _count(self.gru_cell) + _count(self.gru_proj) + _count(self.gru_ln)
+        )
+        counts["total"] = _count(self)
+        return counts
