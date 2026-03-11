@@ -161,8 +161,19 @@ class StorageYard:
         if not (0 <= row < self.n_rows and 0 <= tier < self.n_tiers):
             raise IndexError("Placement out of bounds (row/tier)")
         if abs_end > self.total_splits:
-            raise IndexError("Placement out of bounds (splits)")
-        
+            raise IndexError(
+                f"Placement out of bounds (splits): container {container.container_id} "
+                f"({container.length_ft}ft, {n_splits} splits) at bay {placement.bay} "
+                f"split {placement.start_split} → abs [{abs_start}:{abs_end}] "
+                f"exceeds total_splits={self.total_splits}"
+            )
+        if np.any(self.occupancy_mask[tier, row, abs_start:abs_end]):
+            raise IndexError(
+                f"Placement conflicts with existing container: "
+                f"{container.container_id} at bay {placement.bay} row {row} "
+                f"tier {tier} splits [{abs_start}:{abs_end}]"
+            )
+
         # Allocate index
         if not self._free_indices:
             raise RuntimeError("Container capacity exceeded")
@@ -366,20 +377,31 @@ class StorageYard:
         bay: int,
         n_splits: int
     ) -> Optional[PlacementResult]:
-        """Find valid placement within a specific bay."""
+        """Find valid placement within a specific bay.
+
+        Handles cross-bay containers (e.g. 45 ft, 23 splits > 20 split_factor)
+        by allowing ``start_split=0`` when the container spans into the next bay,
+        provided the splits don't exceed ``total_splits``.
+        """
         base = bay * self.split_factor
         max_start = self.split_factor - n_splits + 1
-        
+
+        if max_start <= 0:
+            # Container spans multiple bays — only start_split=0 is valid.
+            if base + n_splits > self.total_splits:
+                return None  # would exceed yard boundary
+            max_start = 1
+
         goods_mask = self._get_goods_mask_tier(container, tier)
-        
+
         for start_split in range(max_start):
             abs_start = base + start_split
             abs_end = abs_start + n_splits
-            
+
             for row in range(self.n_rows):
                 if self._is_valid_placement(tier, row, abs_start, abs_end, n_splits, goods_mask):
                     return PlacementResult(row=row, bay=bay, tier=tier, start_split=start_split)
-        
+
         return None
     
     def _is_valid_placement(

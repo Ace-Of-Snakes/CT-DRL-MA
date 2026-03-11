@@ -307,6 +307,73 @@ class TestScenarioSetup(unittest.TestCase):
         total = sum(1 for _ in env.yard.iter_records())
         self.assertEqual(total, 5)  # just the 5 exports
 
+    def test_large_scenario_no_crash_all_fills(self):
+        """60 imp + 60 exp at 0%/25%/50% fill must not crash.
+
+        Regression: 45ft containers (23 splits > 20 split_factor) at the
+        last bay caused IndexError('Placement out of bounds (splits)').
+        """
+        for fill in [0.0, 0.25, 0.50]:
+            for seed in [42, 123, 999]:
+                with self.subTest(fill=fill, seed=seed):
+                    env, sc = self._run_setup(EvalParams(
+                        n_imports=60, n_exports=60,
+                        yard_fill_pct=fill, seed=seed,
+                    ))
+                    # Scenario must set up without crashing
+                    self.assertGreater(
+                        sum(1 for _ in env.yard.iter_records()), 0,
+                    )
+
+    def test_45ft_container_placement(self):
+        """45ft containers (23 splits) can be placed via find_single_placement.
+
+        Regression: _find_in_bay had max_start = split_factor - n_splits + 1
+        which was -2 for 45ft, making range(-2) empty → never placed.
+        """
+        from simulation.core.facilities.yard import StorageYard
+        from simulation.core.containers.container import Container
+        from simulation.core.enums import Direction, GoodsType
+        from datetime import datetime
+
+        yard = StorageYard(
+            n_rows=2, n_bays=58, n_tiers=5,
+            coordinates=[], validate=False,
+        )
+        c45 = Container(
+            container_id="TEST_45FT",
+            direction=Direction.IMPORT,
+            container_type="45G",
+            arrival_date=datetime.now(),
+            departure_date=datetime.now(),
+            goods_type=GoodsType.REGULAR,
+            length_ft=45, length_m=13.7,
+            width_m=2.44, height_m=2.44,
+        )
+
+        # Should find placement near bay 10 (well within bounds)
+        p = yard.find_single_placement(c45, target_bay=10)
+        self.assertIsNotNone(p, "45ft container must be placeable")
+        yard.add_container(c45, p)
+
+        # Should NOT be placeable at last bay (would exceed total_splits)
+        c45b = Container(
+            container_id="TEST_45FT_B",
+            direction=Direction.IMPORT,
+            container_type="45G",
+            arrival_date=datetime.now(),
+            departure_date=datetime.now(),
+            goods_type=GoodsType.REGULAR,
+            length_ft=45, length_m=13.7,
+            width_m=2.44, height_m=2.44,
+        )
+        p_last = yard.find_single_placement(c45b, target_bay=57, max_proximity=0)
+        self.assertIsNone(
+            p_last,
+            "45ft container at last bay (57) should not be placeable "
+            "(would exceed total_splits)",
+        )
+
 
 # ================================================================
 # Grid tests

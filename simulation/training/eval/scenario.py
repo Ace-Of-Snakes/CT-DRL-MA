@@ -26,7 +26,6 @@ from simulation.training.scenarios._base import (
     _make_truck,
     _place_distractors,
     _slot_train,
-    _yard_placement,
 )
 
 # ================================================================
@@ -270,8 +269,8 @@ class ScalableEvalScenario(TutorialScenario):
         truck_idx = 0  # running counter across all truck categories
 
         # ── 1. Export containers in yard (for train pickup) ────
-        #    With fill > 0: placed at tier 0-2 (semi-sorted) and counted
-        #    toward fill.  Without fill: placed at tier 0 (always accessible).
+        #    Always use find_single_placement to handle all container sizes
+        #    (including 45ft that span multiple bays) and avoid out-of-bounds.
         export_ids: List[str] = []
         if p.n_exports > 0:
             export_bays = self._spread_bays(p.n_exports, n_bays, rng)
@@ -282,24 +281,11 @@ class ScalableEvalScenario(TutorialScenario):
                     departure=departure,
                     rng=rng,
                 )
-                if has_fill:
-                    # Semi-sorted: use find_single_placement (tier 0-2)
-                    placement = env.yard.find_single_placement(
-                        c, target_bay=bay,
-                    )
-                    if placement is not None:
-                        env.yard.add_container(c, placement)
-                    else:
-                        # Fallback to tier 0
-                        row = i % n_rows
-                        env.yard.add_container(
-                            c, _yard_placement(bay=bay, row=row, tier=0),
-                        )
-                else:
-                    row = i % n_rows
-                    env.yard.add_container(
-                        c, _yard_placement(bay=bay, row=row, tier=0),
-                    )
+                placement = env.yard.find_single_placement(
+                    c, target_bay=bay,
+                )
+                if placement is not None:
+                    env.yard.add_container(c, placement)
                 export_ids.append(c.container_id)
                 active_bays.add(bay)
 
@@ -315,22 +301,11 @@ class ScalableEvalScenario(TutorialScenario):
                     direction=Direction.IMPORT,
                     rng=rng,
                 )
-                if has_fill:
-                    placement = env.yard.find_single_placement(
-                        c, target_bay=bay,
-                    )
-                    if placement is not None:
-                        env.yard.add_container(c, placement)
-                    else:
-                        row = (i + p.n_exports) % n_rows
-                        env.yard.add_container(
-                            c, _yard_placement(bay=bay, row=row, tier=0),
-                        )
-                else:
-                    row = (i + p.n_exports) % n_rows
-                    env.yard.add_container(
-                        c, _yard_placement(bay=bay, row=row, tier=0),
-                    )
+                placement = env.yard.find_single_placement(
+                    c, target_bay=bay,
+                )
+                if placement is not None:
+                    env.yard.add_container(c, placement)
                 pickup_ids.append(c.container_id)
                 active_bays.add(bay)
 
