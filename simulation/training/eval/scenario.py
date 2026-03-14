@@ -295,6 +295,12 @@ class ScalableEvalScenario(TutorialScenario):
             pickup_bays = self._spread_bays(
                 p.n_pickup_trucks, n_bays, rng, exclude=active_bays,
             )
+            # Fall back to unrestricted bays when too many are excluded
+            # (e.g. 68 exports already claimed all 58 bays).
+            if not pickup_bays:
+                pickup_bays = self._spread_bays(
+                    p.n_pickup_trucks, n_bays, rng,
+                )
             for i, bay in enumerate(pickup_bays):
                 c = _make_container(
                     f"{prefix}_PKP{i}",
@@ -496,13 +502,27 @@ class ScalableEvalScenario(TutorialScenario):
                 "train_to_truck_done", done, p.n_train_to_truck,
             ))
 
-        # Truck-to-train: container is on the assigned train
+        # Truck-to-train: container successfully loaded onto train.
+        # Check is departure-resilient: if the train has departed
+        # (popped from env.trains), we verify that the container is
+        # no longer in the yard AND no longer on any delivery truck.
+        # If absent from both, it must have been loaded before departure.
         if p.n_truck_to_train > 0:
             done = 0
             for cid, train_id in self._tk2t_map.items():
+                # Fast path: train still present → direct check
                 tr = env.trains.get(train_id)
                 if tr is not None and tr.has_container(cid):
                     done += 1
+                    continue
+                # Slow path: train departed → check by exclusion
+                in_yard = env.yard.get_container(cid) is not None
+                on_truck = any(
+                    any(c.container_id == cid for c in tk.containers)
+                    for tk in env.trucks.values()
+                )
+                if not in_yard and not on_truck:
+                    done += 1  # successfully loaded before departure
             progress.append(SubTaskProgress(
                 "truck_to_train_done", done, p.n_truck_to_train,
             ))

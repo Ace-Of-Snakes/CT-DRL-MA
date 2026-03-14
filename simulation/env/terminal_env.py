@@ -57,9 +57,12 @@ PARKING_PROXIMITY_RADIUS_BAYS: int = 5
 _CH_DIRECTION: int = CH.DIRECTION
 _DIRECTION_EXPORT_THRESHOLD: float = 0.5
 
-# Flat IDLE penalty — every deliberate IDLE costs the same small amount so the
-# agent always prefers a productive move over waiting.
-IDLE_PENALTY: float = -1.0
+# Flat IDLE penalty — every deliberate IDLE costs a small amount so the
+# agent prefers a productive move over waiting.  Keep this low: at -1.0
+# the penalty dominated episode reward when the agent idled after
+# completing 95% of tasks, producing a -148 total on a 95%-complete
+# episode and drowning the positive learning signal.
+IDLE_PENALTY: float = -0.1
 
 
 # ── Data classes ─────────────────────────────────────────────────────────
