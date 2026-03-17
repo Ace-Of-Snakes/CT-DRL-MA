@@ -203,22 +203,32 @@ data/
 deprecated_components/
 runs/
 
-# latex
-latex/*
+# latex: track source, figures, bib, and compiled PDF
+!latex/
+!latex/**
+# but exclude build artifacts
+latex/*.aux
+latex/*.bcf
+latex/*.bbl
+latex/*.blg
+latex/*.fdb_latexmk
+latex/*.fls
+latex/*.lof
+latex/*.loa
+latex/*.log
+latex/*.lot
+latex/*.out
+latex/*.run.xml
+latex/*.toc
+latex/*.synctex.gz
+latex/*-SAVE-ERROR
+latex/chapters/*.aux
+latex/figure_specs/
 
-# keep relevant files type
-!latex/*.tex
-!latex/*.pdf
+# exclude some downloaded papers
+reference_pdfs/
 
-# except the directory from exclude
-!latex/chapters/
-# !latex/figures/
-
-# include directory files in exclude
-latex/chapters/*
-
-# excuse some file endings
-!latex/chapters/*.tex
-
+# some other .mds
 .claude/
 CLAUDE.md
+THESIS_STATUS.md

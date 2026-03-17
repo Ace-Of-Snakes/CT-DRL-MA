@@ -1,0 +1,54 @@
+% chapters/01_introduction.tex
+\chapter{Introduction}
+\label{ch:introduction}
+
+\section{Motivation}
+\label{sec:intro:motivation}
+
+Container terminals are complex logistical systems in which freight changes transport mode. Whether at a deep-sea port, a river barge hub, or an inland rail--road facility, the core challenge is the same. Containers arrive on one vehicle, spend time in a storage yard, and depart on another. Between arrival and departure, a shared set of handling equipment, typically gantry cranes, must execute every transfer. How these moves are scheduled determines how quickly vehicles are turned around, how efficiently yard space is used, and whether departure deadlines are met.
+
+The operations research community has long recognised that this scheduling task decomposes into several tightly coupled sub-problems \cite{stahlbock2008operations,vis2003transshipment,boysen2013container}. Storage position assignment, crane-to-container allocation, move sequencing, truck parking, train wagon allocation, pre-marshalling\footnote{Rearranging containers in the yard so that those departing soonest are accessible without additional reshuffling when their vehicle arrives.}, and outbound load planning are only the most prominent examples. Decades of work have produced specialised solvers for each sub-problem in isolation. Mixed-integer programs handle berth allocation, heuristics govern yard stacking, and priority rules drive crane dispatching. Yet integrated approaches that optimise across sub-problems simultaneously remain rare. The reason is combinatorial. The number of feasible joint schedules grows explosively with the number of containers, vehicles, and stacking tiers, making exact optimisation intractable for all but the smallest instances.
+
+In practice, the coupling between sub-problems means that local decisions have non-local consequences. A container placed deep in the yard for efficient space utilisation may later require costly restacking when its pickup truck arrives. Parking a truck far from the relevant yard bay increases travel distance for subsequent loading, and so on. Human planners manage these trade-offs through experience and heuristics, but systematic optimisation of the full joint problem in real time exceeds human cognitive capacity and the capacity of most classical solvers.
+
+\newpage
+This situation presents an opportunity for deep reinforcement learning (DRL). An RL agent can observe the complete terminal state, evaluate thousands of possible moves per decision step, and learn strategies that account for future consequences. Unlike classical optimisation, which requires an explicit mathematical formulation of a single objective, RL discovers effective policies through trial and error in a simulated environment. This makes it naturally suited to domains where the objective is multi-faceted and the dynamics are stochastic.
+
+\section{Problem Statement}
+\label{sec:intro:problem}
+
+This thesis asks a deliberately scoped question. \emph{Is it even possible} for a single reinforcement learning agent to learn the joint coordination of crane moves, truck parking, and train loading in a container terminal? These three tasks are tightly intertwined. Every crane move affects the yard state that future parking and loading decisions depend on.
+
+The goal is not to produce an optimal scheduler but to build the necessary infrastructure and to determine empirically whether a DRL agent can learn to operate within it. This includes a simulation environment, a spatial state representation, a structured action space, and a training curriculum. The ambition is exploratory: to establish what is possible and to lay groundwork for future research.
+
+Formulating the joint problem for reinforcement learning requires three non-obvious design decisions. The state representation must capture the spatial layout of the entire terminal in a form that a neural network can process without destroying geometric relationships. The action space must express the full range of crane operations without enumerating an intractable number of source--destination pairs. Finally, the agent must learn to coordinate these operations under stochastic arrivals and hard departure deadlines, where rewards are delayed and multi-step planning is essential.
+
+Prior work in reinforcement learning for container terminals, surveyed by \textcite{colak2025rl}, has addressed individual sub-problems such as berth allocation, quay crane scheduling, and truck dispatching, but not the joint coordination problem. Most existing approaches use tabular methods or simple policy gradients on low-dimensional state spaces, and nearly all focus on maritime ports. No prior work has applied a convolutional neural network to a volumetric spatial encoding of a container terminal, and none has used curriculum learning to decompose the joint problem into learnable sub-tasks. The research gap is described in detail in \cref{ch:related}.
+\newpage
+\section{Research Questions}
+\label{sec:intro:rqs}
+
+The overarching question is whether a single deep reinforcement learning agent can learn to solve the joint crane scheduling, truck parking, and train loading problem. Three research questions operationalise this investigation.
+
+\textbf{RQ1: Can a single DQN-based agent learn the joint terminal coordination problem?} The state and action spaces are novel, and it is unknown whether any standard DQN variant can learn to coordinate crane moves, truck parking, and train loading within a unified policy. Phase~1 screens seven algorithm variants crossed with six CNN backbones on a tiered tutorial curriculum that progresses from isolated primitives to full joint operations.
+
+\textbf{RQ2: Do the learned skills scale beyond the training distribution?} The tutorials test individual and composed skills on scenarios with at most ${\sim}30$ containers. Phase~2 evaluates top performers on controlled scenarios with 40 to 400 containers, testing whether the agent can coordinate all eight container move types at operational scale.
+
+\textbf{RQ3: How do individual architecture components contribute?} A two-stage design varies the algorithm with a fixed backbone first, then varies the backbone with fixed algorithms. This factored screening isolates each component's marginal contribution and reveals interaction effects.
+
+\section{Contributions}
+\label{sec:intro:contributions}
+
+This thesis makes five contributions.
+
+\begin{enumerate}[label=(\arabic*)]
+  \item \textbf{Simulation environment and spatial state representation.} A simulated terminal with nine move types and stochastic arrivals, paired with a spatial tensor encoding the entire terminal for 3D convolutions (\cref{ch:system,ch:state}).
+
+  \item \textbf{Two-stage spatial action formulation.} A factored source-then-destination action space with dynamic masking, where the move type is inferred from spatial regions rather than predicted explicitly (\cref{ch:agent}).
+
+  \item \textbf{Tiered tutorial curriculum.} 33 scenarios in 14 mastery-gated tiers, serving as both training scaffold and architecture screening tool (\cref{ch:curriculum}).
+
+  \item \textbf{Escape velocity diagnostic.} A small subset of cross-region scenarios acts as a binary gateway for architecture viability, enabling screening in as few as 100 epochs (\cref{ch:results}).
+
+  \item \textbf{Systematic architecture comparison.} A factored evaluation of 7 DQN variants and 6 CNN backbones, producing a ranked selection and characterising algorithm versus backbone importance (\cref{ch:results,ch:discussion}).
+\end{enumerate}

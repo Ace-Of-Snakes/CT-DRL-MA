@@ -1,0 +1,64 @@
+% chapters/appendix_c_reward.tex
+\chapter{Reward Function Specification}
+\label{app:reward}
+
+The immediate move rewards and event-driven rewards are specified in \cref{tab:sys:move_rewards,tab:sys:event_rewards}. A linear distance penalty $r_{\text{dist}} = -0.001 \times d_{\text{metres}} - 0.0005 \times t_{\text{seconds}}$ is applied to every executed move, where $d_{\text{metres}}$ is the Manhattan distance the crane travels and $t_{\text{seconds}}$ is the estimated travel time. This penalty is small relative to the type bonuses but accumulates over many moves, providing a gradient signal toward compact container placement.
+
+\section{Reward Design Rationale}
+\label{app:reward:rationale}
+
+The reward function balances three competing objectives:
+
+\begin{enumerate}
+  \item \textbf{Throughput:} High rewards for productive moves and train completions incentivise maximising container flow through the terminal.
+  \item \textbf{Service quality:} Truck fast-service bonuses reward timely dispatch without penalising the agent for factors outside its control.
+  \item \textbf{Yard order:} Restack penalties and EOD blocking penalties discourage short-sighted moves that create future problems.
+\end{enumerate}
+
+The magnitudes were calibrated empirically during development. The train departure bonus ($+10.0$) is the largest single reward, reflecting the irrecoverable nature of missed train loads. The IDLE penalty ($-0.1$) is large enough to prevent the agent from learning an ``always idle'' policy but small enough that the agent can learn to wait when no productive action is available. The restack penalty ($-0.2$) is deliberately mild: some restacking is operationally necessary, and a large penalty would prevent the agent from learning multi-step restack-then-load sequences.
+
+\subsection{Reward Shaping Corrections}
+\label{app:reward:corrections}
+
+During Phase~2 evaluation, two reward shaping defects were identified that systematically punished the agent for correct behaviour, preventing effective learning at scale:
+
+\begin{enumerate}
+  \item \textbf{End-of-day leftover penalty (all containers $\to$ missed only).}
+    The original implementation penalised \emph{every} container remaining in the yard at end of day ($-0.3$ each), including legitimate carryover inventory awaiting future pickup.
+    At 100+ containers per day, the yard naturally accumulates 100--200 containers whose departure dates lie days or weeks in the future; penalising all of them produced $-30$ to $-60$ of unearned negative reward per day.
+    The corrected penalty counts only containers whose \texttt{departure\_date} is on or before the current day---i.e.\ containers that \emph{should have left} but did not.
+
+  \item \textbf{Continuous truck waiting penalty (removed).}
+    A per-truck-per-minute penalty ($-0.01 \times n_\text{trucks} \times \Delta t_\text{min}$) was applied on every simulation step where all cranes were busy.
+    Because truck count ($n_\text{trucks}$) includes already-parked and actively-served trucks---not only those genuinely waiting---this penalty accumulated to $-100$ to $-200$ per day at 100 containers, far exceeding the positive reward from productive moves.
+    The penalty was removed; the truck departure reward ($+2.0$ for fast service, $+0.0$ for slow) provides a sufficient outcome-based incentive without punishing the agent for throughput limitations of the crane system.
+\end{enumerate}
+
+Together, these two corrections shifted the expected daily reward from deeply negative (even for competent policies) to a range where positive reward is achievable, enabling meaningful gradient signal during Phase~2 training.
+
+\subsection{Missed Container Removal}
+\label{app:reward:missed-removal}
+
+Containers whose \texttt{departure\_date} has passed are removed from the yard at the end of each simulated day, after the EOD penalty has been applied.
+This design decision is motivated by three considerations:
+
+\begin{enumerate}
+  \item \textbf{Operational realism.}
+    In a real intermodal terminal, containers that miss their scheduled departure are not left to occupy prime stacking positions indefinitely.
+    The terminal's dispatch team reschedules them on the next available train or truck, relocates them to a holding area, or flags them for customer intervention.
+    The simulation abstracts this exception handling process as removal at end of day.
+
+  \item \textbf{Agent scope.}
+    The agent controls crane movements within a single day.
+    It is already penalised for a missed departure at the moment the train leaves ($-3.0$ per container, \cref{tab:sys:event_rewards}).
+    Retaining the missed container in the yard penalises the agent \emph{again} on every subsequent day for a failure it can no longer correct.
+    An agent should only receive penalties for outcomes it can still influence; compounding irrecoverable penalties distorts the learning signal without providing actionable information.
+
+  \item \textbf{Markov property.}
+    DQN assumes that the current state contains sufficient information for optimal future decisions.
+    Accumulated dead inventory violates this assumption: the agent cannot distinguish a container awaiting a future train from one that missed its train three days ago and will never leave.
+    Removing missed containers ensures that every container in the state tensor is one the agent can meaningfully act on, preserving the representational integrity of the Markov state.
+\end{enumerate}
+
+Without removal, missed containers compound across days: they consume yard capacity (causing destination masks to become empty and move attempts to fail), accumulate EOD penalties on every subsequent day, and create stacking inversions with newly arrived containers.
+In testing, this compounding effect caused daily rewards to drop from $+35$ on Day~1 to $-1{,}479$ by Day~4 despite improving operational metrics, because the yard filled with irrecoverable dead inventory.

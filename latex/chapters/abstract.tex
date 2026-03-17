@@ -1,0 +1,38 @@
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+Intermodal container terminals coordinate the transfer of containers between
+rail, road and storage. Jointly scheduling crane operations, truck parking and
+train loading is a combinatorial problem that operations research has
+traditionally decomposed into narrowly defined sub-problems. This thesis
+investigates whether a single deep reinforcement learning (DRL) agent can
+instead learn to coordinate these tightly coupled tasks jointly. The objective
+is not to outperform existing terminal operations, but to establish whether
+such joint coordination is feasible.
+
+The agent represents the terminal as a multi-channel spatial tensor processed
+by a 3D convolutional neural network. Actions are expressed in a factored
+source--destination space with dynamic masking to enforce physical validity.
+Learning is guided by a curriculum of 33 tutorial scenarios progressing from
+primitives to full logistics workflows. All experiments are grounded in
+operational data from an intermodal terminal in N\"urnberg, Germany.
+Candidate architectures are first screened on the tutorial curriculum before
+deployment in controlled scalability experiments. The screening reveals that
+compact convolutional backbones outperform larger alternatives and that
+rankings reverse under operational time constraints; multi-seed validation
+confirms the robustness of the final selection. In scalability experiments,
+agents continue learning online as workload size increases. Task completion remains $\geq 99\%$ for workloads up to
+200~containers (factor 10 scale-up from tutorial) while a priority-based heuristic 
+baseline achieves only 52.4\%. A mixed-operation stress test further demonstrates 
+simultaneous coordination of all eight container move types with $\geq 99.7\%$ completion, 
+indicating that the agents acquire meaningful spatial reasoning over terminal operations.
+
+These results provide a qualified \emph{yes}: a single DRL agent can learn the
+joint coordination problem when supported by a structured spatial
+representation, a factored action space and a progressive curriculum.
+However, the learned policy behaves primarily as a \emph{reactive dispatcher},
+making effective local decisions but lacking the ability to maintain
+multi-step plans or perform proactive yard rearrangement. Rather than claiming
+operational optimality, this work establishes the feasibility of DRL-based
+joint coordination and lays groundwork for future research on more strategic,
+planning-capable agents.

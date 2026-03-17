@@ -1,0 +1,246 @@
+% system_architecture.tex — Four-layer system architecture diagram (comprehensive)
+% \input from Ch.4
+
+\definecolor{SteelBlue}{HTML}{4682B4}
+\definecolor{LayerTraining}{HTML}{4472C4}
+\definecolor{LayerEnv}{HTML}{548235}
+\definecolor{LayerOps}{HTML}{2E7D32}
+\definecolor{LayerAgent}{HTML}{BF8F00}
+\definecolor{LayerData}{HTML}{757575}
+\definecolor{TrainingBg}{HTML}{D6E4F0}
+\definecolor{EnvBg}{HTML}{E2EFDA}
+\definecolor{AgentBg}{HTML}{FFF2CC}
+\definecolor{DataBg}{HTML}{E8E8E8}
+\definecolor{CoreBg}{HTML}{F0E6F6}
+\definecolor{LayerCore}{HTML}{7B1FA2}
+
+\begin{tikzpicture}[
+    font=\small,
+    % Box styles
+    tbox/.style={rectangle, rounded corners=3pt, draw=LayerTraining!80!black,
+        fill=LayerTraining, text=white, font=\small\bfseries,
+        minimum height=0.7cm, minimum width=2.8cm, align=center},
+    tbox2/.style={rectangle, rounded corners=3pt, draw=LayerTraining!60!black,
+        fill=LayerTraining!65, text=white, font=\footnotesize\bfseries,
+        minimum height=0.55cm, minimum width=2.0cm, align=center},
+    ebox/.style={rectangle, rounded corners=3pt, draw=LayerEnv!80!black,
+        fill=LayerEnv, text=white, font=\small\bfseries,
+        minimum height=0.7cm, minimum width=2.8cm, align=center},
+    ebox2/.style={rectangle, rounded corners=3pt, draw=LayerEnv!60!black,
+        fill=LayerEnv!70, text=white, font=\footnotesize\bfseries,
+        minimum height=0.6cm, minimum width=2.2cm, align=center},
+    ebox3/.style={rectangle, rounded corners=3pt, draw=LayerOps!50!black,
+        fill=LayerOps!55, text=white, font=\scriptsize\bfseries,
+        minimum height=0.5cm, minimum width=1.8cm, align=center},
+    abox/.style={rectangle, rounded corners=3pt, draw=LayerAgent!80!black,
+        fill=LayerAgent!90, text=white, font=\small\bfseries,
+        minimum height=0.7cm, minimum width=2.6cm, align=center},
+    abox2/.style={rectangle, rounded corners=3pt, draw=LayerAgent!60!black,
+        fill=LayerAgent!65, text=white, font=\footnotesize\bfseries,
+        minimum height=0.55cm, minimum width=2.2cm, align=center},
+    abox3/.style={rectangle, rounded corners=3pt, draw=LayerAgent!50!black,
+        fill=LayerAgent!45, text=white, font=\scriptsize\bfseries,
+        minimum height=0.45cm, minimum width=1.6cm, align=center},
+    dbox/.style={rectangle, rounded corners=3pt, draw=LayerData!80!black,
+        fill=LayerData, text=white, font=\small\bfseries,
+        minimum height=0.7cm, minimum width=2.4cm, align=center},
+    dbox2/.style={rectangle, rounded corners=3pt, draw=LayerData!60!black,
+        fill=LayerData!60, text=white, font=\footnotesize\bfseries,
+        minimum height=0.55cm, minimum width=2.0cm, align=center},
+    cbox/.style={rectangle, rounded corners=3pt, draw=LayerCore!60!black,
+        fill=LayerCore!55, text=white, font=\footnotesize\bfseries,
+        minimum height=0.55cm, minimum width=1.8cm, align=center},
+    % Grouping
+    grp/.style={rectangle, rounded corners=2pt, draw=gray!40, dashed,
+        inner sep=4pt},
+    grplabel/.style={font=\tiny\itshape, text=gray!60!black},
+    % Arrow styles
+    dep/.style={-Stealth, gray!55, line width=0.5pt},
+    dataflow/.style={-Stealth, dashed, SteelBlue!80!black, line width=0.9pt},
+]
+
+% ══════════════════════════════════════════════════════════════════
+% Layer backgrounds
+% ══════════════════════════════════════════════════════════════════
+\fill[TrainingBg, rounded corners=5pt] (-7.5,  8.8) rectangle (7.5, 6.4);
+\fill[EnvBg, rounded corners=5pt]      (-7.5,  5.9) rectangle (7.5, -0.2);
+\fill[AgentBg, rounded corners=5pt]    (-7.5, -0.7) rectangle (7.5, -4.8);
+\fill[DataBg, rounded corners=5pt]     (-7.5, -5.3) rectangle (7.5, -7.8);
+
+% Layer labels (left margin)
+\node[rotate=90, font=\footnotesize\bfseries, text=LayerTraining!80!black,
+    anchor=south] at (-7.9, 7.6) {Training};
+\node[rotate=90, font=\footnotesize\bfseries, text=LayerEnv!80!black,
+    anchor=south] at (-7.9, 2.85) {Environment};
+\node[rotate=90, font=\footnotesize\bfseries, text=LayerAgent!80!black,
+    anchor=south] at (-7.9, -2.75) {Agent};
+\node[rotate=90, font=\footnotesize\bfseries, text=LayerData!80!black,
+    anchor=south] at (-7.9, -6.55) {Data};
+
+% ══════════════════════════════════════════════════════════════════
+% TRAINING LAYER
+% ══════════════════════════════════════════════════════════════════
+\node[tbox, minimum width=3.2cm] (ct) at (-2.5, 8.0) {CurriculumTrainer};
+\node[tbox, minimum width=2.6cm] (tr) at (2.0, 8.0) {TutorialRunner};
+\node[tbox2] (ml) at (5.5, 8.0) {MetricsLogger};
+\node[tbox2] (tt) at (-2.5, 7.0) {TutorialTier};
+
+\draw[dep] (ct) -- (tr);
+\draw[dep] (ct) -- (tt);
+\draw[dep] (ct) -- (ml);
+
+% Scenario group
+\node[tbox2, minimum width=2.4cm] (sc) at (2.0, 7.0) {TutorialScenario};
+\node[grplabel, anchor=west] at (3.6, 7.0) {\texttimes\,33 implementations};
+\draw[dep] (tr) -- (sc);
+
+% ══════════════════════════════════════════════════════════════════
+% ENVIRONMENT LAYER
+% ══════════════════════════════════════════════════════════════════
+
+% Main env
+\node[ebox, minimum width=3.2cm] (env) at (0, 5.2) {TerminalEnv};
+\draw[dep] (ct.south) -- ++(0,-0.3) -| (env.north);
+
+% Core components row
+\node[ebox2, minimum width=2.2cm] (se) at (-5.5, 3.7) {StateEncoder};
+\node[ebox2, minimum width=2.2cm] (re) at (-2.2, 3.7) {RewardEngine};
+\node[ebox2, minimum width=3.0cm] (fc) at (1.5, 3.7) {FacilityCoordinator};
+\node[ebox2, minimum width=2.4cm] (cc) at (5.2, 3.7) {CraneController};
+
+\draw[dep] (env) -- (se);
+\draw[dep] (env) -- (re);
+\draw[dep] (env) -- (fc);
+\draw[dep] (env.east) -| (cc);
+
+% Facilities sub-row
+\node[ebox3, minimum width=2.0cm] (sy) at (-0.2, 2.4) {StorageYard};
+\node[ebox3, minimum width=1.6cm] (ry) at (1.9, 2.4) {RailYard};
+\node[ebox3, minimum width=2.0cm] (pa) at (3.8, 2.4) {ParkingArea};
+\draw[dep] (fc) -- (sy);
+\draw[dep] (fc) -- (ry);
+\draw[dep] (fc) -- (pa);
+
+% Operations sub-group
+\node[ebox3, minimum width=2.8cm] (tlm) at (-4.5, 1.3) {TerminalLogisticsManager};
+\node[ebox3, minimum width=2.0cm] (rmgc) at (-1.0, 1.3) {TerminalRMGC};
+\node[ebox3, minimum width=1.8cm] (gate) at (1.5, 1.3) {TerminalGate};
+\draw[dep] (env.south) ++(0,0) -- ++(0,-0.3) -| (tlm.north);
+\draw[dep] (env.south) -- ++(0,-0.3) -| (rmgc.north);
+\draw[dep] (env.south) -- ++(0,-0.3) -| (gate.north);
+
+% Domain objects group
+\node[ebox3, minimum width=1.6cm] (cont) at (3.5, 0.5) {Container};
+\node[ebox3, minimum width=1.2cm] (train) at (5.0, 0.5) {Train};
+\node[ebox3, minimum width=1.2cm] (truck) at (6.3, 0.5) {Truck};
+\node[ebox3, minimum width=1.2cm] (wagon) at (5.0, -0.0) {Wagon};
+\draw[dep] (train.south) -- (wagon.north);
+
+\node[grplabel] at (5.0, 1.0) {core domain};
+
+% ══════════════════════════════════════════════════════════════════
+% AGENT LAYER
+% ══════════════════════════════════════════════════════════════════
+
+% Main agent
+\node[abox, minimum width=3.4cm] (agent) at (-4.0, -1.5) {BaseSpatialDQNAgent};
+
+% Variant agents (grouped)
+\node[abox2, minimum width=1.8cm] (dqna) at (-6.0, -2.7) {DQNAgent};
+\node[abox2, minimum width=1.8cm] (duel) at (-3.8, -2.7) {Dueling};
+\node[abox2, minimum width=1.8cm] (noisy) at (-1.6, -2.7) {NoisyNet};
+\node[abox3, minimum width=1.5cm] (qrdqn) at (-6.0, -3.5) {QR-DQN};
+\node[abox3, minimum width=1.3cm] (iqn) at (-4.5, -3.5) {IQN};
+\node[abox3, minimum width=1.7cm] (munch) at (-2.8, -3.5) {Munchausen};
+\node[abox3, minimum width=1.8cm] (ks) at (-1.1, -3.5) {KitchenSink};
+
+\draw[dep] (agent) -- (dqna);
+\draw[dep] (agent) -- (duel);
+\draw[dep] (agent) -- (noisy);
+\draw[dep] (agent.south) ++(0,0) -- ++(0, -0.35) -| (qrdqn);
+\draw[dep] (agent.south) -- ++(0, -0.35) -| (iqn);
+\draw[dep] (agent.south) -- ++(0, -0.35) -| (munch);
+\draw[dep] (agent.south) -- ++(0, -0.35) -| (ks);
+
+\node[grplabel] at (-3.5, -4.2) {7 DQN variants};
+
+% Network components
+\node[abox2, minimum width=3.2cm] (qnet) at (3.5, -1.5)
+    {QNetwork};
+\node[abox3, minimum width=2.6cm] (cnn) at (1.8, -2.5) {CNNBackbone};
+\node[abox3, minimum width=1.8cm] (src) at (4.0, -2.5) {SourceHead};
+\node[abox3, minimum width=1.6cm] (dst) at (5.8, -2.5) {DestHead};
+\node[abox3, minimum width=2.2cm] (idle) at (4.0, -3.3) {IdleSourceWrapper};
+
+\draw[dep] (qnet) -- (cnn);
+\draw[dep] (qnet) -- (src);
+\draw[dep] (qnet) -- (dst);
+\draw[dep] (src) -- (idle);
+
+\node[abox2, minimum width=2.2cm] (rb) at (3.5, -4.2) {ReplayBuffer};
+\draw[dep] (agent.east) -- ++(0.5,0) |- (qnet.west);
+\draw[dep] (agent.east) -- ++(0.5,0) |- (rb.west);
+
+\node[grplabel] at (1.8, -3.2) {6 backbone variants};
+
+% ══════════════════════════════════════════════════════════════════
+% DATA LAYER
+% ══════════════════════════════════════════════════════════════════
+
+% Scheduling and generation
+\node[dbox, minimum width=2.4cm] (tsch) at (-4.5, -5.9) {TrainScheduler};
+\node[dbox2, minimum width=2.2cm] (tload) at (-4.5, -6.9) {TrainLoader};
+\node[dbox, minimum width=2.4cm] (lm) at (-1.0, -5.9) {LogisticsManager};
+\node[dbox2, minimum width=1.8cm] (dp) at (-1.0, -6.9) {DayPlan};
+
+\draw[dep] (tsch) -- (tload);
+\draw[dep] (lm) -- (dp);
+
+% Generators
+\node[dbox, minimum width=2.4cm] (tgen) at (2.8, -5.9) {TruckGenerator};
+
+% Factories
+\node[dbox2, minimum width=2.4cm] (cfac) at (5.8, -5.9) {ContainerFactory};
+\node[dbox2, minimum width=2.0cm] (tfac) at (5.8, -6.9) {TruckFactory};
+
+\draw[dep] (tgen) -- ++(0,-0.5) -| (tfac);
+
+\node[grplabel] at (5.8, -7.4) {factories};
+
+% Config
+\node[dbox2, minimum width=2.2cm] (cfg) at (2.8, -6.9) {Config};
+\node[grplabel, anchor=west] at (4.1, -6.9) {\scriptsize (12 dataclasses)};
+
+% Data → Env connections
+\draw[dep] (tsch.north) -- ++(0, 1.5) -| ([xshift=-1.2cm]env.south);
+\draw[dep] (lm.north) -- ++(0, 1.0) -| ([xshift=-0.3cm]env.south);
+\draw[dep] (tgen.north) -- ++(0, 0.5) -| ([xshift=0.6cm]env.south);
+
+% ══════════════════════════════════════════════════════════════════
+% DATA FLOW ARROWS (dashed blue)
+% ══════════════════════════════════════════════════════════════════
+
+% State tensor: StateEncoder → Agent
+\draw[dataflow]
+    (se.south) -- ++(0,-1.2)
+    -| node[pos=0.20, below, font=\scriptsize, text=SteelBlue!70!black,
+        fill=white, inner sep=1pt, fill opacity=0.85, text opacity=1]
+        {state tensor $(14,\!15,\!1160,\!5)$}
+    ([xshift=0.8cm]agent.north);
+
+% Masks: Env → Agent
+\draw[dataflow]
+    ([xshift=-1.2cm]env.south) -- ++(0,-0.5)
+    -| node[pos=0.12, left, font=\scriptsize, text=SteelBlue!70!black,
+        fill=white, inner sep=1pt, fill opacity=0.85, text opacity=1] {masks}
+    ([xshift=-0.5cm]agent.north);
+
+% Action: Agent → Env (going right and up)
+\draw[dataflow]
+    ([xshift=1.5cm]agent.north) -- ++(0,0.6)
+    -| node[pos=0.20, above, font=\scriptsize, text=SteelBlue!70!black,
+        fill=white, inner sep=1pt, fill opacity=0.85, text opacity=1]
+        {action (src, dest)}
+    ([xshift=1.5cm]env.south);
+
+\end{tikzpicture}

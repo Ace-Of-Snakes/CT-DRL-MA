@@ -1,0 +1,92 @@
+% chapters/11_conclusion.tex
+\chapter{Conclusion}
+\label{ch:conclusion}
+
+This thesis asked whether a single deep reinforcement learning agent can learn to coordinate crane scheduling, truck parking, and train loading jointly at an intermodal container terminal. To answer this, it developed a simulation environment, formulated the joint problem as a spatial Markov decision process, and systematically evaluated seven DQN algorithm variants and six CNN backbone architectures through a two-stage screening design. The evaluation used a two-phase methodology: tutorial screening on 33 controlled scenarios, followed by scalability testing with 40 to 400 containers. This chapter summarises the contributions, answers the research questions, and outlines directions for future work.
+
+\section{Summary of Contributions}
+\label{sec:concl:summary}
+
+The thesis makes five main contributions, summarised here and detailed in the chapters indicated.
+
+First, the \textbf{14-channel spatial state representation} (\cref{ch:state}) encodes the entire terminal into a single $(14, 15, 1{,}160, 5)$ tensor that standard convolutional networks can process without task-specific feature engineering. The Narrow-Deep backbone's success with only ${\sim}43$K parameters demonstrates that the encoding is sufficiently structured to reduce the representational burden on the function approximator.
+
+Second, the \textbf{two-stage spatial action formulation} (\cref{ch:agent}) decomposes each crane decision into sequential source and destination selections with dynamic masking, reducing the combinatorial action space from $O(n^2)$ to two $O(n)$ selections while ensuring physical executability.
+
+Third, the \textbf{33-scenario tiered tutorial curriculum} (\cref{ch:curriculum}) provides a standardised architecture screening benchmark and, unexpectedly, proved to be a powerful bug-discovery tool (\cref{sec:disc:engineering}).
+
+Fourth, the \textbf{escape velocity finding} (\cref{sec:res:variance:escape}) emerged as an architecture diagnostic: a cheap canary protocol (100 epochs on Tier~0 with 3--5 seeds) reliably classifies algorithms into three tiers before committing to a full curriculum.
+
+Fifth, the \textbf{systematic DQN$\times$CNN comparison} (\cref{sec:res:phase1:cnn}) provides a controlled factored-screening study identifying both successful pairings and structurally incompatible ones, offering practitioners a concrete guide for architecture selection in high-dimensional spatial action spaces.
+
+\section{Answers to Research Questions}
+\label{sec:concl:rqs}
+
+The overarching question, \emph{can a single DRL agent learn the joint crane scheduling, truck parking, and train loading problem?}, receives a qualified \emph{yes}. In Phase~1, a single agent masters all tutorial scenarios across three facility regions (\cref{sec:res:phase1}); in Phase~2, it scales to 10$\times$ the training load with $\geq 99\%$ completion up to 200~containers (\cref{sec:res:phase2}). The three research questions refine this answer.
+
+\textbf{RQ1: Can a single DQN-based agent learn the joint terminal coordination problem?}
+
+Yes, in terms of feasibility. This thesis does not claim that the learned policies are optimal. No operations research baseline establishes a lower bound on crane travel or reshuffle count (\cref{sec:disc:limitations}), so the results demonstrate that the agent \emph{can} learn the joint problem, not that it solves it optimally. Within this feasibility framing, the evidence is clear: four of seven DQN variants master all 33 tutorial scenarios on the reference seed (\cref{sec:res:phase1:dqn}), and when crossed with six CNN backbones, 14 of 24 combinations achieve full mastery (\cref{sec:res:phase1:cnn}). The escape velocity experiment (\cref{sec:res:variance:escape}) further shows that the failures of the remaining variants are architecturally specific rather than evidence that the joint problem is too hard. Notably, the agent learns to \emph{coordinate} sub-tasks, not merely to execute them in isolation, given a structured spatial state and a curriculum that decomposes the joint problem into learnable stages.
+
+\textbf{RQ2: Do the learned skills scale beyond the training distribution?}
+
+Yes, with qualifications. All six DQN agents evaluated in Phase~2 maintain $\geq 99\%$ completion at loads up to 200~containers --- 10$\times$ the tutorial scale (\cref{sec:res:phase2:scaling}). The mixed-operation stress test confirms that skills learned in isolated tutorials compose effectively: the agent coordinates all eight container move types at 100~containers with $\geq 99.7\%$ completion (\cref{sec:res:phase2:stress}). The qualification is that the tutorials predict \emph{viability} more reliably than they predict \emph{capacity ceilings}. The Stage~3 ranking reversal (\cref{sec:res:phase1:stage3}) demonstrates that fast tutorial convergence is necessary but not sufficient for operational robustness.
+
+\textbf{RQ3: How do individual architecture components contribute?}
+
+The factored-screening design (\cref{sec:res:phase1:cnn,sec:res:phase1:ranking}) isolates three dominant factors. \emph{CNN depth} matters more than width: the Narrow-Deep backbone achieves the fastest convergence with the fewest parameters, because its stacked $(3,1,3)$ kernels span adjacent facility regions without excess capacity. \emph{Spectral normalisation} stabilises training across backbone scales. \emph{Munchausen reward augmentation} accelerates convergence by smoothing the optimisation landscape. In contrast, distributional value heads and the Dueling advantage decomposition hurt spatial discrimination. The overarching pattern is that simpler designs outperform complex ones. Narrow-Deep+Baseline, with no algorithmic augmentations, matches or exceeds configurations with three times the parameters.
+
+\section{Future Work}
+\label{sec:concl:future}
+
+\subsection{Temporal Context for Multi-Step Planning}
+\label{sec:concl:future:temporal}
+
+The most significant limitation is the memoryless architecture (\cref{sec:disc:interpretation:scalability}). The agent cannot persist through multi-step restacking sequences or perform pre-marshalling, as evidenced by the failure modes in scenarios S9, S10, and S18.
+
+This thesis explored one lightweight approach: a \textbf{GRU-augmented global feature path} (\cref{sec:agent:gru}) that provides temporal context during inference only.  The Phase~2 evaluation (\cref{sec:res:phase2}) showed mixed results: the GRU-DQN agent achieved comparable mean completion (95.5\%) but lower pass rates than feedforward variants, suggesting that inference-only recurrence provides insufficient temporal context.  A \textbf{full sequence training} approach in the style of R2D2 \cite{kapturowski2019r2d2} --- with backpropagation through time and a burn-in period --- would allow the recurrent weights to be directly optimised by the TD signal and is the most promising near-term extension.
+
+Beyond recurrence, two simpler alternatives are worth investigating: a \textbf{transformer-based context module} attending over the past $K$ state embeddings, and \textbf{frame stacking} ($14N$ input channels) as a simpler baseline providing a fixed temporal window.
+
+\subsection{Hierarchical Reinforcement Learning}
+\label{sec:concl:future:hierarchical}
+
+The reactive single-step formulation could be extended with an explicit plan representation. A hierarchical agent would decompose terminal operations into high-level goals (``unload wagons 3--7 of Train~2'') and low-level primitives (individual crane moves). The options framework \cite{sutton1999options} or feudal architectures \cite{vezhnevets2017feudal} would allow the high-level policy to set subgoals that persist across multiple low-level steps, directly addressing the plan-persistence limitation. The tutorial curriculum's tiered structure---primitives, chains, full operations---maps naturally onto a hierarchy of temporal abstractions.
+
+\subsection{Multi-Agent Crane Coordination}
+\label{sec:concl:future:marl}
+
+The current multi-crane implementation uses a sequential step-and-blacklist approach: each crane acts in turn within a single environment step, with a per-step blacklist preventing immediate reversals. A multi-agent formulation with separate policies per crane and an explicit communication channel would enable coordinated scheduling. Zone negotiation---where cranes claim spatial regions of the yard---and conflict resolution protocols would be necessary to handle the physical constraint that two cranes sharing a rail cannot pass each other.
+
+\subsection{Transfer to Other Terminal Geometries}
+\label{sec:concl:future:transfer}
+
+The state representation and action formulation are designed around the N\"urnberg terminal's specific geometry: 5 yard rows, 58 bays, 5 tiers, 7 rail tracks. Generalising to terminals with different layouts would require either a variable-size state encoder (e.g., using spatial transformers or graph neural networks that operate on arbitrary node counts) or a domain-randomisation approach that trains on a distribution of terminal geometries. Transfer learning from the N\"urnberg-trained agent to a new layout, with fine-tuning on a small number of terminal-specific tutorials, is a pragmatic intermediate step.
+
+\subsection{Extensibility of the Spatial Representation}
+\label{sec:concl:future:extensibility}
+
+A key architectural advantage of the CNN-over-state-tensor approach is its inherent extensibility. The spatial state representation (\cref{ch:state}) encodes the terminal as a multi-channel tensor where each channel captures a specific aspect of the facility state. Adding new equipment types or facility regions requires extending this tensor along the row or channel dimension and updating the action masks, but does \emph{not} require changes to the learning algorithm, reward structure, or training pipeline.
+
+The most natural expansion would be a \textbf{waterside extension}. A maritime terminal with quay cranes and vessel berths could be incorporated by appending ship-berth rows below the existing rail rows in the unified tensor and adding one or two channels encoding vessel identity and departure urgency. The two-stage action formulation would extend without modification: the source and destination masks would gain entries for quay-side positions, and new move types (e.g., \texttt{SHIP\_TO\_YARD}, \texttt{YARD\_TO\_SHIP}) would be inferred from the spatial regions of the selected positions, exactly as all current move types are. The tutorial curriculum would likewise grow by adding scenarios that teach the agent to handle quay operations before composing them with existing yard and rail skills. Since the agent already controls not just cranes but also truck parking and train loading, adding a fourth facility type should be an incremental step rather than a fundamental redesign.
+
+The CNN backbone operates on the tensor's spatial structure without assumptions about the semantic meaning of individual channels. A network trained on 14~channels can be retrained on 16 or 18~channels with the same architecture. Only the first convolutional layer's input dimension changes, a single parameter adjustment in the backbone factory. The dynamic masking system (\cref{sec:state:masking}) already handles variable numbers of valid source and destination positions per step, so adding new entity types requires only the addition of new scanning rules for the new facility elements.
+
+The natural next step would be to validate this extensibility claim empirically by adding a new facility type and checking whether the agent learns to use it through the existing curriculum methodology.
+
+\subsection{Operations Research Baselines}
+\label{sec:concl:future:baselines}
+
+Since the evaluation scenarios are feasibility-constrained (100\% task completion is both the target and the theoretical optimum), the relevant OR comparison is on \emph{efficiency} rather than feasibility. A MILP formulation with perfect foresight would establish a lower bound on crane travel distance and reshuffle count for each scenario, quantifying the operational overhead introduced by the agent's reactive strategy. Simpler dispatching heuristics (nearest-container-first, earliest-deadline-first) would provide intermediate reference points. Developing a fair comparison that accounts for the real-time decision requirement --- OR solvers may take minutes where the agent decides in 5\,ms --- is a non-trivial but important step towards positioning the DRL approach relative to established methods.
+
+\subsection{Extended Objective Functions}
+\label{sec:concl:future:objectives}
+
+The current reward function optimises for throughput and service quality (train completion, truck wait time). Real terminal operations also value energy efficiency, equipment wear, and emission reduction. Multi-objective formulations, for example Pareto-front methods that expose the throughput-versus-energy trade-off, would better capture the full operational picture. Similarly, constrained policy optimisation could enforce hard limits on crane travel distance or idle time. Combined with the OR baselines discussed above, extended objectives would move the evaluation from feasibility towards operational realism.
+
+\section{Closing Remarks}
+\label{sec:concl:closing}
+
+A single deep reinforcement learning agent can learn to coordinate crane scheduling, truck parking, and train loading jointly. It does so not as three separate policies stitched together, but as one unified policy that selects source and destination positions across all facility regions in every decision step. The three ingredients that make this possible are a spatial state representation that preserves geometric relationships, a factored action space with dynamic masking that ensures physical executability, and a curriculum that decomposes the joint problem into learnable stages before composing them.
+
+The learned policies scale beyond the training distribution, and simpler architectures consistently outperform more complex ones. However, the agent remains a \emph{reactive dispatcher}: effective at per-step decisions, but unable to persist multi-step plans or perform proactive yard rearrangement. This thesis establishes that DRL-based joint terminal coordination is \emph{feasible}. The harder question of whether it can be made \emph{operationally sufficient} remains open, and bridging this gap through temporal context, hierarchical planning, and rigorous comparison against established OR methods is the most promising direction for future work.

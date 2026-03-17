@@ -1,0 +1,242 @@
+% chapters/08_experimental_setup.tex
+\chapter{Experimental Setup}
+\label{ch:experiments}
+
+This chapter describes the experimental methodology, which evolved during development from a linear three-phase plan to the two-phase design presented here (\cref{sec:exp:phase2:rationale}). Phase~1 uses a three-stage screening to identify the best-performing agent configuration: Stage~1 varies the DQN algorithm while holding the CNN backbone fixed, Stage~2 crosses the survivors with multiple CNN backbone variants, and Stage~3 tests operational readiness under time pressure. All three screening stages use the tutorial curriculum described in \cref{ch:curriculum} as a cheap proxy for architecture learnability, following the screening rationale established in \cref{sec:curr:screening}. Phase~2 evaluates the selected agents on controlled scalability scenarios that scale container loads from 40 to 400, testing whether the skills learned in tutorials generalise beyond the training distribution. \Cref{fig:exp:overview} provides an overview of the complete pipeline.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{experimental_overview}
+  \caption{Experimental pipeline overview.  Phase~1 progressively narrows 7~DQN variants through three screening stages to 5~confirmed agents.  An escape velocity experiment characterises run-to-run variance.  Phase~2 evaluates scalability on train operations (all 6~agents) and a mixed-operation stress test (Baseline+Baseline only).  Grey boxes indicate which research questions each phase addresses.}
+  \label{fig:exp:overview}
+\end{figure}
+
+\section{Research Questions and Experimental Rationale}
+\label{sec:exp:hypotheses}
+
+The experimental design addresses three research questions.
+
+\textbf{RQ1} (\emph{Can a single DQN-based agent learn the joint problem?}) --- Phase~1 establishes which DQN$\times$CNN combinations master the tutorial suite. Stages~1 and~2 use the 31-scenario, 13-tier curriculum. Stage~3 adds the 14th tier (Operational Readiness, S32--S33) as a final gate.
+
+\textbf{RQ2} (\emph{Do skills scale beyond the training distribution?}) --- Phase~2 evaluates top performers alongside the GRU-augmented variant (\cref{sec:agent:gru}) on controlled scenarios scaling from 40 to 400 containers, testing whether the agent can coordinate all eight container move types at operational scale.
+
+\textbf{RQ3} (\emph{How do individual components contribute?}) --- The factored two-stage design (Stage~1 varies the DQN algorithm with a fixed backbone and Stage~2 varies the backbone with fixed algorithms) isolates each component's marginal contribution and reveals interaction effects.
+
+The full research questions are stated in \cref{sec:intro:rqs}. RQ1 is addressed by the Phase~1 results (\cref{sec:res:phase1}), RQ2 by the Phase~2 evaluation (\cref{sec:res:phase2}), and RQ3 by the cross-combination analysis (\cref{sec:res:phase1:cnn,sec:res:phase1:ranking}).
+
+\section{Architecture Candidates}
+\label{sec:exp:architectures}
+
+The architecture search is decomposed into two orthogonal dimensions: the DQN algorithm (the training objective and exploration mechanism) and the CNN backbone (the convolutional feature extractor). Rather than evaluating the full cross-product of all algorithms and all backbones simultaneously, a sequential screening strategy reduces the total number of training runs.
+
+\subsection{Stage 1: DQN Algorithm Screening}
+\label{sec:exp:architectures:dqn}
+
+Seven DQN algorithm variants are evaluated, all sharing the same baseline CNN backbone (approximately 141K total parameters). The variants span three families of improvements to the standard Double DQN with Prioritised Experience Replay:
+
+\begin{table}[H]
+  \centering
+  \caption{DQN algorithm variants evaluated in Stage~1. All variants use the baseline CNN backbone. Parameter counts differ slightly due to variant-specific network heads.}
+  \label{tab:exp:dqn_variants}
+  \begin{tabularx}{\textwidth}{@{} l l X r @{}}
+    \toprule
+    \textbf{Variant} & \textbf{Family} & \textbf{Key Modification} & \textbf{Params} \\
+    \midrule
+    Baseline       & Value-based & Double DQN + PER \cite{hasselt2016ddqn,schaul2016per} & 140{,}834 \\
+    Munchausen     & Value-based & Adds scaled log-policy to reward: $r + \alpha \tau \log \policy(a|s)$ \cite{vieillard2020munchausen} & 140{,}834 \\
+    Spectral Norm  & Regularisation & Spectral normalisation \cite{miyato2018spectral} on all backbone convolutions & 140{,}834 \\
+    NoisyNet       & Exploration  & Parametric noise layers replace $\varepsilon$-greedy \cite{fortunato2018noisy} & 140{,}900 \\
+    Dueling        & Architecture & Separate value and advantage streams \cite{wang2016dueling} & 145{,}060 \\
+    QR-DQN         & Distributional & Quantile regression with fixed quantile atoms \cite{dabney2018distributional} & 142{,}880 \\
+    IQN            & Distributional & Implicit quantile networks with sampled $\tau$ \cite{dabney2018implicit} & 149{,}414 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The seven variants cover the major directions in post-DQN algorithmic research: reward augmentation (Munchausen), weight regularisation (Spectral Norm), learned exploration (NoisyNet), architectural decomposition (Dueling), and distributional value estimation (QR-DQN, IQN). Each extension is described in \cref{sec:bg:rl:dqn,sec:rw:dqn}. The table above summarises the key modification and parameter overhead for each variant.
+
+\subsection{Stage 2: CNN Backbone Screening}
+\label{sec:exp:architectures:cnn}
+
+Based on the Stage~1 results (presented in \cref{sec:res:phase1:dqn}), the four DQN algorithms that successfully mastered the full tutorial curriculum are selected for the backbone comparison. These are crossed with six CNN backbone variants in a $6 \times 4 = 24$ run grid:
+
+\begin{table}[H]
+  \centering
+  \caption{CNN backbone variants evaluated in Stage~2. Each backbone is paired with the four top DQN algorithms from Stage~1 (Baseline, Munchausen, Spectral Norm, NoisyNet).}
+  \label{tab:exp:cnn_variants}
+  \begin{tabularx}{\textwidth}{@{} l X r @{}}
+    \toprule
+    \textbf{Backbone} & \textbf{Modification} & \textbf{Backbone Params} \\
+    \midrule
+    Baseline      & 4-layer factored CNN (32$\to$64 channels) as described in \cref{sec:agent:unified:cnn} & ${\sim}108$K \\
+    Wider         & Same 4 layers with doubled channel width (64$\to$128 channels) & ${\sim}416$K \\
+    Deeper        & 5th convolutional layer (additional cross-region pass) inserted after Stage~2 & ${\sim}145$K \\
+    Residual      & Skip connections \cite{he2016resnet} around Stages~2 and~3 & ${\sim}108$K \\
+    Narrow-Deep   & Half channel width (16$\to$32), 6 layers total & ${\sim}43$K \\
+    Region-Aware  & Separate per-region convolutions before cross-region fusion & ${\sim}120$K \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{cnn_backbone_variants}
+  \caption{Schematic comparison of the six CNN backbone variants. Each column shows the layer stack, kernel sizes, channel widths, and total parameter count. All variants share the same two-head output structure; only the convolutional feature extractor differs.}
+  \label{fig:exp:cnn_variants}
+\end{figure}
+
+All backbone variants share the same two-head factored architecture, masking logic, and training hyperparameters. The only differences are CNN depth, channel widths, the presence or absence of skip connections, and structural organisation. The complete hyperparameter specification is listed in \cref{app:hyperparameters}.
+
+\section{Phase 1: Tutorial Screening}
+\label{sec:exp:phase1}
+
+\subsection{Protocol}
+\label{sec:exp:phase1:protocol}
+
+Each architecture variant is trained through the 31-scenario tutorial curriculum described in \cref{ch:curriculum} with the following fixed parameters:
+
+\begin{itemize}
+  \small
+  \item \textbf{Random seed:} 42 for all random number generators (Python, NumPy, PyTorch, CUDA).
+  \item \textbf{Maximum epochs:} 800. Training terminates early if all 13 tiers are mastered, or if the agent remains stuck at Tier~2 or below after 120 epochs.
+  \item \textbf{Mastery threshold:} 90\% pass rate over a rolling window of 20 epochs.
+  \item \textbf{Minimum epochs per tier:} 10 before tier advancement is considered.
+  \item \textbf{Progress logging:} every 25 epochs for each variant.
+\end{itemize}
+
+The two screening stages are executed sequentially. Stage~1 (7 DQN variants $\times$ baseline CNN) is run first. The top-performing algorithms are then paired with all 6 CNN backbones in Stage~2 (24 runs). Each run is executed on a single GPU with aggressive memory cleanup between runs to prevent GPU memory accumulation.
+
+\subsection{Evaluation Metrics}
+\label{sec:exp:phase1:metrics}
+
+The primary screening metric is \textbf{epochs to full mastery}: the epoch at which all 13 tiers first achieve $\geq 90\%$ pass rate simultaneously. Variants that exhaust the 800-epoch budget without mastering all tiers are recorded as ``not mastered'' at epoch 800. Variants that fail to progress beyond Tier~2 by epoch 120 are early-stopped to conserve GPU time.
+
+Secondary metrics include the average pass rate (mean per-scenario pass rate at the final epoch over all 31 scenarios), the highest tier reached, wall-clock training time, and per-scenario pass rates for failure mode diagnosis. Scenarios in tiers that were never unlocked receive a 0\% pass rate.
+
+\subsection{Selection Criteria}
+\label{sec:exp:phase1:selection}
+
+For Stage~1, an algorithm is selected for Stage~2 if and only if it achieves full mastery within the 800-epoch budget. This binary criterion reflects the observation from \cref{sec:curr:screening} that algorithms unable to master the tutorial suite are unlikely to produce useful policies at scale.
+
+For Stage~2, the final ranking considers both epoch-to-mastery count and average pass rate. Among variants that achieve full mastery, faster convergence is preferred. Among variants with similar convergence speed, higher final pass rates indicate more robust learning.
+
+\subsection{Run-to-Run Variability}
+\label{sec:exp:phase1:variability}
+
+Although all random seeds are fixed at 42, run-to-run variance arises from both stochastic scenario elements (randomised container sizes and distractor placements in Tier~4 and above) and GPU non-determinism (see \cref{sec:exp:reproducibility}). The Baseline CNN $\times$ Baseline DQN combination, for instance, mastered the curriculum at epoch 320 in Stage~1 and at epoch 310 in Stage~2, a difference of approximately 3\%. This variability is inherent to the training process and should be kept in mind when interpreting small differences between configurations. The ranking is therefore based on consistent patterns across multiple comparisons rather than single-number differences. A dedicated multi-seed escape velocity experiment (\cref{sec:res:variance}) quantifies this variability and reveals that single-seed screening can produce false negatives for algorithms that succeed stochastically but not reliably.
+
+\section{Phase 2: Controlled Scalability Evaluation}
+\label{sec:exp:phase2}
+
+Phase~2 takes the highest-scoring CNN$\times$DQN combinations from the tutorial screening and evaluates their ability to handle container loads far exceeding the training distribution. The tutorials establish that these architectures can learn the component spatial skills on scenarios with at most ${\sim}30$ containers. Phase~2 tests whether these skills generalise to 40--400 containers, with controlled variation of imports, exports, yard fill, and truck operations.
+
+\subsection{From Full Simulation to Controlled Scenarios}
+\label{sec:exp:phase2:rationale}
+
+The original experimental plan envisaged three consecutive phases: Phase~0 would screen DQN algorithm variants on tutorials, Phase~1 would cross the survivors with CNN backbones, and Phase~2 would evaluate the final agent in the full stochastic simulation (a multi-day environment with KDE-based vehicle arrivals, dynamic truck queuing, and multi-day carryover effects).
+
+During development, this linear plan proved impractical. The full simulation's logistics chains contain cascading dependencies: a parking bug silently blocks all subsequent truck unloads, a resolver mismatch prevents any yard-to-truck delivery, and a sequential crane timing error makes feasible departure windows appear physically impossible (\cref{sec:disc:engineering}). In the stochastic environment, these bugs were indistinguishable from agent limitations. When an agent fails to export 50\% of scheduled containers, the failure could reflect insufficient capability, an unlucky arrival pattern, a simulation defect, or a reward design flaw. Days of troubleshooting in the full simulation yielded ambiguous results. The same bugs became immediately visible once the \texttt{ScalableEvalScenario} class was built. The class enabled controlled scenarios with known expected outcomes, deterministic initial conditions, and independently variable parameters.
+
+Three properties make controlled scenarios the stronger evaluation methodology.
+
+\textbf{Confounding variables.} The full simulation couples stochastic arrival timing, yard carryover state, concurrent train conflicts, and reward dynamics into a single observation. The controlled scenarios isolate each factor, making it possible to attribute performance changes to specific causes.
+
+\textbf{Reproducibility.} The KDE-based arrival model produces different vehicle schedules on each run because the kernel density estimate is sensitive to the resampling order. The controlled scenarios use deterministic container placement and physics-based departure windows, producing identical initial conditions across runs.
+
+\textbf{Parameter isolation.} The full simulation varies all factors simultaneously: more containers per day means more trains, more trucks, more concurrent operations, and higher yard congestion. The controlled evaluation grid independently varies imports, exports, yard fill percentage, and truck operations, revealing which specific parameter combination causes degradation.
+
+The controlled scenarios therefore serve as the primary scalability evaluation. They answer the core question --- ``can the agent handle $N$ containers at fill level $F\%$?'' --- with high signal-to-noise ratio. What they do not test is sustained multi-day performance with carryover effects, stochastic arrival handling, and yard congestion buildup over time. These aspects --- which relate primarily to the pre-marshalling and long-horizon planning capabilities that the memoryless architecture is structurally unable to provide (\cref{sec:disc:interpretation:scalability}) --- remain directions for future work with temporal architectures.
+
+\subsection{Scalable Evaluation Scenarios}
+\label{sec:exp:phase2:scenarios}
+
+The evaluation uses a parameterised scenario system (\texttt{ScalableEvalScenario}) that generates terminal configurations from a small set of parameters: number of imports, exports, delivery trucks, pickup trucks, direct transfers, and yard fill percentage. Each scenario is a self-contained episode that proceeds as follows:
+
+\begin{enumerate}
+  \small
+  \item \textbf{Yard fill.} If \texttt{yard\_fill\_pct} $> 0$, distractor containers are placed in the yard to simulate a partially filled terminal. These are inert containers that are not assigned to any vehicle but may need to be reshuffled to access target containers beneath them.
+  \item \textbf{Export containers.} Export containers are placed in the yard at positions determined by \texttt{find\_single\_placement}, which validates bounds, occupancy, and goods-zone constraints for all seven container sizes (20ft--45ft). Each export is assigned to a departing train.
+  \item \textbf{Import trains.} Trains are created with import containers loaded into wagons, distributed across rail tracks. The number of trains is computed from the container count and wagon capacity (${\sim}1.5$ containers per wagon for mixed sizes).
+  \item \textbf{Trucks.} Delivery trucks carry containers to be unloaded into the yard. Pickup trucks arrive to collect specific import containers. Direct-transfer containers (train-to-truck, truck-to-train) exercise cross-modal paths.
+  \item \textbf{Departure window.} A physics-based timing model computes the minimum feasible time for all required crane moves, accounting for trapezoidal motion profiles (gantry, trolley, hoist), parallel crane execution, and a configurable safety factor for agent inefficiency. Train departures are scheduled at this computed time, ensuring the scenario is physically feasible but not overly generous.
+\end{enumerate}
+
+Success requires completing all scheduled operations before train departure: all imports unloaded to yard, all exports loaded onto trains, all trucks served. The scenario reports granular sub-task progress (imports done, exports done, trucks served) for diagnostic analysis.
+
+\subsection{Evaluation Grid}
+\label{sec:exp:phase2:grid}
+
+The primary evaluation matrix varies the total container load across six levels and crosses each with three yard fill percentages:
+
+\begin{table}[H]
+  \centering
+  \caption{Primary evaluation grid: container loads $\times$ yard fill levels.  Imports and exports are split evenly (e.g., 200 total $=$ 100 imports $+$ 100 exports).  Each cell is run across 30~warmup epochs with cumulative training.}
+  \label{tab:exp:eval_grid}
+  \begin{tabular}{@{} l r r r r r r @{}}
+    \toprule
+    \textbf{Fill \textbackslash{} Total} & \textbf{40} & \textbf{80} & \textbf{120} & \textbf{200} & \textbf{300} & \textbf{400} \\
+    \midrule
+    0\%   & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+    25\%  & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+    50\%  & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+This yields 18 parameter combinations per agent, each run for 30~warmup epochs, producing 540~evaluation episodes per agent.  The primary grid tests \textbf{train operations only}: imports (TRAIN\_TO\_YARD) and exports (YARD\_TO\_TRAIN), with yard reshuffles (YARD\_TO\_YARD) as needed.  Truck operations (PARK\_TRUCK, TRUCK\_TO\_YARD, YARD\_TO\_TRUCK) and direct transfers (TRAIN\_TO\_TRUCK, TRUCK\_TO\_TRAIN) are reserved for a secondary mixed-operation stress test (\cref{sec:res:phase2:stress}), run on the Baseline+Baseline agent to establish whether the simplest DQN architecture can coordinate all eight move types at scale.
+
+\subsection{Agent Selection}
+\label{sec:exp:phase2:selection}
+
+Rather than committing to a single agent, Phase~2 evaluates the five CNN$\times$DQN combinations that passed the Stage~3 operational-readiness gate (\cref{sec:res:phase1:stage3}), plus one additional exploratory variant:
+
+\begin{enumerate}
+  \item \textbf{Baseline + Baseline} (Stage~3 rank~5, 310 epochs, 98.6\%)
+  \item \textbf{Baseline + Narrow-Deep} (Stage~3 rank~1, 293 epochs, 99.2\%)
+  \item \textbf{NoisyNet + Narrow-Deep} (Stage~3 rank~10, 349 epochs, 99.4\%)
+  \item \textbf{Spectral Norm + Deeper} (Stage~3 rank~3, 305 epochs, 99.2\%)
+  \item \textbf{Munchausen + Baseline} (Stage~3 rank~7, 319 epochs, 98.6\%)
+  \item \textbf{GRU-DQN + Narrow-Deep} (exploratory --- not in Phase~1).  This recurrent variant, described in \cref{sec:agent:gru}, augments the feedforward path with a GRU cell that maintains a persistent hidden state across decision steps within an episode, adding approximately 45.8K parameters (32\% overhead).  The GRU variant was developed between Phase~1 and Phase~2 as one of two exploratory temporal extensions (alongside an LSTM burn-in approach inspired by R2D2 \cite{kapturowski2019r2d2}) to probe whether temporal context improves scalability.  Neither temporal variant was included in Phase~1 screening. The GRU is included in Phase~2 as an exploratory probe independent of the Phase~1 ranking.
+\end{enumerate}
+
+Evaluating multiple agents allows a direct comparison of how different training algorithms and backbone architectures scale to loads far beyond the tutorial distribution, rather than relying on a single agent's performance.  A priority-based \textbf{heuristic baseline} provides a non-learned reference point (\cref{sec:exp:phase2:baselines}).
+
+\subsection{Evaluation Protocol}
+\label{sec:exp:phase2:config}
+
+The evaluation uses the same terminal geometry as Phase~1 (5 yard rows $\times$ 58 bays $\times$ 5 tiers, 7 rail tracks, split factor 20).  Each agent processes the 18~parameter combinations sequentially.  For each combination, the agent runs 30~warmup episodes with $\varepsilon = 0.10$ exploration and 4~gradient steps per episode, recording per-epoch metrics.  Training is cumulative across combinations --- weights and replay buffer carry over --- allowing the agent to adapt progressively to increasing scenario scale.  The final warmup epoch (epoch~29) serves as the measured evaluation for that combination.
+
+This cumulative protocol is a deliberate extension of the curriculum learning philosophy into the evaluation phase.  The tutorials provide a strong weight initialisation; the warmup episodes are the next curriculum stage, where the agent encounters operational-scale workloads for the first time and adapts its policy online.  This mirrors a realistic deployment scenario: a terminal operator would train an agent on tutorials, then deploy it on real workloads while allowing continued learning.  The agent faces a \emph{continuous} problem. This means that workload characteristics shift as container counts, fill levels, and traffic patterns change. This makes online adaptation a core reinforcement learning capability rather than a methodological artefact.  Freezing weights after tutorials and evaluating zero-shot performance would test memorisation. Cumulative training tests the agent's ability to \emph{generalise and adapt}, which is the more operationally relevant question.
+
+\subsection{Evaluation Metrics}
+\label{sec:exp:phase2:metrics}
+
+Each scenario run produces:
+
+\begin{enumerate}
+  \small  
+  \item \textbf{Pass/Fail:} Binary outcome --- did the agent complete all scheduled operations before train departure?
+  \item \textbf{Sub-task progress:} Fraction of imports unloaded, exports loaded, and trucks served. A scenario may fail overall but achieve 90\% of imports, pinpointing the bottleneck.
+  \item \textbf{Move counts:} Per-move-type tallies (TRAIN\_TO\_YARD, YARD\_TO\_TRAIN, PARK\_TRUCK, etc.) reveal the agent's operational strategy.
+  \item \textbf{Total reward:} Accumulated reward validates that the reward function scales sensibly with container count.
+\end{enumerate}
+
+\subsection{Baselines}
+\label{sec:exp:phase2:baselines}
+
+A priority-based \textbf{heuristic agent} provides a non-learned reference.  The heuristic evaluates sources in a fixed priority order --- (1)~YARD\_TO\_TRAIN, (2)~TRAIN\_TO\_YARD, (3)~PARK\_TRUCK, (4)~TRUCK\_TO\_YARD, (5)~YARD\_TO\_TRUCK, (6)~YARD\_TO\_YARD --- and for each priority level scans the source mask deterministically, selecting the first valid source--destination pair.  It uses no exploration, no replay buffer, and no gradient updates.  This provides a lower-bound reference: performance that a hand-coded dispatcher achieves without any learning.
+
+Additionally, the evaluation grid itself serves as an internal baseline: each agent's performance is compared across parameter combinations to identify the container count and yard fill level at which performance degrades.
+
+\section{Hardware and Software Environment}
+\label{sec:exp:hardware}
+
+All experiments were conducted on a workstation with an NVIDIA GeForce RTX 2060 Super GPU (8\,GB VRAM), running Ubuntu under WSL2. The software environment uses Python~3.12, PyTorch~2.10 with CUDA~12.8, and scikit-learn~1.8. The Stage~1 DQN screening (7 runs) completed in approximately 3.5 hours of wall-clock time. The Stage~2 CNN$\times$DQN grid (24 runs) required approximately 22 hours. All training was performed in Jupyter notebooks with automated logging for reproducibility.
+
+\section{Reproducibility}
+\label{sec:exp:reproducibility}
+
+All random seeds are fixed at 42 across Python, NumPy, PyTorch, and CUDA backends. The tutorial scenario definitions, hyperparameter configurations, and agent factory functions are version-controlled in the project repository. Training logs are parsed into structured JSON results files that can be reloaded to reproduce all figures and tables in \cref{ch:results} without re-running the training.
+
+\paragraph{GPU non-determinism.}
+Run-to-run variance was observed even with identical random seeds. This is attributable to non-deterministic CUDA operations --- in particular, atomic floating-point reductions (\texttt{atomicAdd}) in the \texttt{Conv3d} backward passes, where the parallel summation order varies between runs, producing different rounding errors that compound over training \cite{pytorch_reproducibility}. Additional non-determinism arises from cuDNN's benchmark mode, which selects the fastest convolution algorithm at runtime; timing noise can cause a different algorithm to be selected on each run, producing numerically different feature maps. PyTorch provides determinism flags (\texttt{torch.backends.cudnn.deterministic}, \texttt{torch.use\_deterministic\_algorithms}) that suppress these sources, but at a 10--30\% training time penalty and with incomplete coverage of all operations. Rather than imposing this overhead, we characterise the variance empirically through the escape velocity experiment (\cref{sec:res:variance:escape}) and report distributional results where relevant. As shown in that section, the variance is itself informative: it reveals that cross-region primitive acquisition acts as a stochastic bifurcation point in the optimisation landscape, separating stochastic seed-dependent failure from systematic architectural failure.

@@ -1,0 +1,488 @@
+% references.bib — Master's Thesis Bibliography
+
+% ── DQN and Deep RL ──────────────────────────────────────────────
+
+@article{mnih2015dqn,
+  title   = {Human-level control through deep reinforcement learning},
+  author  = {Mnih, Volodymyr and Kavukcuoglu, Koray and Silver, David and others},
+  journal = {Nature},
+  volume  = {518},
+  number  = {7540},
+  pages   = {529--533},
+  year    = {2015},
+  doi     = {10.1038/nature14236},
+}
+
+@inproceedings{hasselt2016ddqn,
+  title     = {Deep reinforcement learning with double {Q}-learning},
+  author    = {van Hasselt, Hado and Guez, Arthur and Silver, David},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  year      = {2016},
+  doi       = {10.1609/aaai.v30i1.10295},
+}
+
+@article{schaul2016per,
+  title   = {Prioritized experience replay},
+  author  = {Schaul, Tom and Quan, John and Antonoglou, Ioannis and Silver, David},
+  journal = {arXiv preprint arXiv:1511.05952},
+  year    = {2016},
+}
+
+% ── Curriculum Learning ──────────────────────────────────────────
+
+@inproceedings{bengio2009curriculum,
+  title     = {Curriculum learning},
+  author    = {Bengio, Yoshua and Louradour, J{\'e}r{\^o}me and Collobert, Ronan and Weston, Jason},
+  booktitle = {Proceedings of the 26th International Conference on Machine Learning},
+  year      = {2009},
+  doi       = {10.1145/1553374.1553380},
+}
+
+% ── DQN Algorithm Variants ────────────────────────────────────
+
+@article{vieillard2020munchausen,
+  title   = {Munchausen Reinforcement Learning},
+  author  = {Vieillard, Nino and Pietquin, Olivier and Geist, Matthieu},
+  journal = {Advances in Neural Information Processing Systems},
+  volume  = {33},
+  pages   = {4235--4246},
+  year    = {2020},
+}
+
+@article{miyato2018spectral,
+      title={Spectral Normalization for Generative Adversarial Networks}, 
+      author={Takeru Miyato and Toshiki Kataoka and Masanori Koyama and Yuichi Yoshida},
+      year={2018},
+      eprint={1802.05957},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/1802.05957}, 
+}
+
+@inproceedings{fortunato2018noisy,
+  title={Noisy Networks for Exploration}, 
+  author={Meire Fortunato and Mohammad Gheshlaghi Azar and Bilal Piot and Jacob Menick and Ian Osband and Alex Graves and Vlad Mnih and Remi Munos and Demis Hassabis and Olivier Pietquin and Charles Blundell and Shane Legg},
+  year={2019},
+  eprint={1706.10295},
+  archivePrefix={arXiv},
+  primaryClass={cs.LG},
+  url={https://arxiv.org/abs/1706.10295}, 
+}
+
+@inproceedings{dabney2018distributional,
+  title = 	 {Implicit Quantile Networks for Distributional Reinforcement Learning},
+  author =       {Dabney, Will and Ostrovski, Georg and Silver, David and Munos, Remi},
+  booktitle = 	 {Proceedings of the 35th International Conference on Machine Learning},
+  pages = 	 {1096--1105},
+  year = 	 {2018},
+  editor = 	 {Dy, Jennifer and Krause, Andreas},
+  volume = 	 {80},
+  series = 	 {Proceedings of Machine Learning Research},
+  month = 	 {10--15 Jul},
+  publisher =    {PMLR},
+  pdf = 	 {http://proceedings.mlr.press/v80/dabney18a/dabney18a.pdf},
+  url = 	 {https://proceedings.mlr.press/v80/dabney18a.html},
+  abstract = 	 {In this work, we build on recent advances in distributional reinforcement learning to give a generally applicable, flexible, and state-of-the-art distributional variant of DQN. We achieve this by using quantile regression to approximate the full quantile function for the state-action return distribution. By reparameterizing a distribution over the sample space, this yields an implicitly defined return distribution and gives rise to a large class of risk-sensitive policies. We demonstrate improved performance on the 57 Atari 2600 games in the ALE, and use our algorithm’s implicitly defined distributions to study the effects of risk-sensitive policies in Atari games.},
+}
+
+@inproceedings{dabney2018implicit,
+  title     = {Implicit Quantile Networks for Distributional Reinforcement Learning},
+  author    = {Dabney, Will and Ostrovski, Georg and Silver, David and Munos, R{\'e}mi},
+  booktitle = {Proceedings of the 35th International Conference on Machine Learning},
+  pages     = {1096--1105},
+  year      = {2018},
+}
+
+% ── Architecture Components ────────────────────────────────────
+
+@inproceedings{he2016resnet,
+  title     = {Deep Residual Learning for Image Recognition},
+  author    = {He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+  booktitle = {Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition},
+  pages     = {770--778},
+  year      = {2016},
+  doi       = {10.1109/CVPR.2016.90},
+}
+
+@inproceedings{wang2016dueling,
+  title     = {Dueling network architectures for deep reinforcement learning},
+  author    = {Wang, Ziyu and Schaul, Tom and Hessel, Matteo and van Hasselt, Hado and Lanctot, Marc and de Freitas, Nando},
+  booktitle = {Proceedings of the 33rd International Conference on Machine Learning},
+  pages     = {1995--2003},
+  year      = {2016},
+  doi       = {10.48550/arXiv.1511.06581},
+}
+
+@article{wu2020groupnorm,
+  title   = {Group normalization},
+  author  = {Wu, Yuxin and He, Kaiming},
+  journal = {International Journal of Computer Vision},
+  volume  = {128},
+  number  = {3},
+  pages   = {742--755},
+  year    = {2020},
+  doi     = {10.1007/s11263-019-01198-w},
+}
+
+@article{sutton1988td,
+  title   = {Learning to predict by the methods of temporal differences},
+  author  = {Sutton, Richard S},
+  journal = {Machine Learning},
+  volume  = {3},
+  number  = {1},
+  pages   = {9--44},
+  year    = {1988},
+  doi     = {10.1007/BF00115009},
+}
+
+% ── Recurrent / Hierarchical / Temporal RL ───────────────────
+
+@inproceedings{cho2014gru,
+  title     = {Learning Phrase Representations using {RNN} Encoder-Decoder for Statistical Machine Translation},
+  author    = {Cho, Kyunghyun and van Merrienboer, Bart and Gulcehre, Caglar and Bahdanau, Dzmitry and Bougares, Fethi and Schwenk, Holger and Bengio, Yoshua},
+  booktitle = {Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  pages     = {1724--1734},
+  year      = {2014},
+  doi       = {10.3115/v1/D14-1179},
+}
+
+@article{kapturowski2019r2d2,
+  title   = {Recurrent Experience Replay in Distributed Reinforcement Learning},
+  author  = {Kapturowski, Steven and Ostrovski, Georg and Quan, John and Munos, R{\'e}mi and Dabney, Will},
+  journal = {International Conference on Learning Representations},
+  year    = {2019},
+}
+
+@article{sutton1999options,
+title = {Between MDPs and semi-MDPs: A framework for temporal abstraction in reinforcement learning},
+journal = {Artificial Intelligence},
+volume = {112},
+number = {1},
+pages = {181-211},
+year = {1999},
+issn = {0004-3702},
+doi = {https://doi.org/10.1016/S0004-3702(99)00052-1},
+url = {https://www.sciencedirect.com/science/article/pii/S0004370299000521},
+author = {Richard S. Sutton and Doina Precup and Satinder Singh},
+keywords = {Temporal abstraction, Reinforcement learning, Markov decision processes, Options, Macros, Macroactions, Subgoals, Intra-option learning, Hierarchical planning, Semi-Markov decision processes},
+abstract = {Learning, planning, and representing knowledge at multiple levels of temporal abstraction are key, longstanding challenges for AI. In this paper we consider how these challenges can be addressed within the mathematical framework of reinforcement learning and Markov decision processes (MDPs). We extend the usual notion of action in this framework to include options—closed-loop policies for taking action over a period of time. Examples of options include picking up an object, going to lunch, and traveling to a distant city, as well as primitive actions such as muscle twitches and joint torques. Overall, we show that options enable temporally abstract knowledge and action to be included in the reinforcement learning framework in a natural and general way. In particular, we show that options may be used interchangeably with primitive actions in planning methods such as dynamic programming and in learning methods such as Q-learning. Formally, a set of options defined over an MDP constitutes a semi-Markov decision process (SMDP), and the theory of SMDPs provides the foundation for the theory of options. However, the most interesting issues concern the interplay between the underlying MDP and the SMDP and are thus beyond SMDP theory. We present results for three such cases: (1) we show that the results of planning with options can be used during execution to interrupt options and thereby perform even better than planned, (2) we introduce new intra-option methods that are able to learn about an option from fragments of its execution, and (3) we propose a notion of subgoal that can be used to improve the options themselves. All of these results have precursors in the existing literature; the contribution of this paper is to establish them in a simpler and more general setting with fewer changes to the existing reinforcement learning framework. In particular, we show that these results can be obtained without committing to (or ruling out) any particular approach to state abstraction, hierarchy, function approximation, or the macro-utility problem.}
+}
+
+@inproceedings{vezhnevets2017feudal,
+  title = 	 {{F}e{U}dal Networks for Hierarchical Reinforcement Learning},
+  author =       {Alexander Sasha Vezhnevets and Simon Osindero and Tom Schaul and Nicolas Heess and Max Jaderberg and David Silver and Koray Kavukcuoglu},
+  booktitle = 	 {Proceedings of the 34th International Conference on Machine Learning},
+  pages = 	 {3540--3549},
+  year = 	 {2017},
+  editor = 	 {Precup, Doina and Teh, Yee Whye},
+  volume = 	 {70},
+  series = 	 {Proceedings of Machine Learning Research},
+  month = 	 {06--11 Aug},
+  publisher =    {PMLR},
+  pdf = 	 {http://proceedings.mlr.press/v70/vezhnevets17a/vezhnevets17a.pdf},
+  url = 	 {https://proceedings.mlr.press/v70/vezhnevets17a.html},
+  abstract = 	 {We introduce FeUdal Networks (FuNs): a novel architecture for hierarchical reinforcement learning. Our approach is inspired by the feudal reinforcement learning proposal of Dayan and Hinton, and gains power and efficacy by decoupling end-to-end learning across multiple levels – allowing it to utilise different resolutions of time. Our framework employs a Manager module and a Worker module. The Manager operates at a slower time scale and sets abstract goals which are conveyed to and enacted by the Worker. The Worker generates primitive actions at every tick of the environment. The decoupled structure of FuN conveys several benefits – in addition to facilitating very long timescale credit assignment it also encourages the emergence of sub-policies associated with different goals set by the Manager. These properties allow FuN to dramatically outperform a strong baseline agent on tasks that involve long-term credit assignment or memorisation.}
+}
+
+
+% ── Action Masking ───────────────────────────────────────────
+
+@inproceedings{huang2022masking,
+   title={A Closer Look at Invalid Action Masking in Policy Gradient Algorithms},
+   volume={35},
+   ISSN={2334-0762},
+   url={http://dx.doi.org/10.32473/flairs.v35i.130584},
+   DOI={10.32473/flairs.v35i.130584},
+   journal={The International FLAIRS Conference Proceedings},
+   publisher={University of Florida George A Smathers Libraries},
+   author={Huang, Shengyi and Ontañón, Santiago},
+   year={2022},
+}
+% ── 3D Convolutions ─────────────────────────────────────────
+
+@article{ji20133dcnn,
+  title   = {{3D} Convolutional Neural Networks for Human Action Recognition},
+  author  = {Ji, Shuiwang and Xu, Wei and Yang, Ming and Yu, Kai},
+  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  volume  = {35},
+  number  = {1},
+  pages   = {221--231},
+  year    = {2013},
+  doi     = {10.1109/TPAMI.2012.59},
+}
+
+% ── Container Terminal RL ─────────────────────────────────────
+
+@article{jin2024container,
+  title   = {Container port truck dispatching optimization using {Real2Sim} based deep reinforcement learning},
+  author  = {Jin, Jiahuan and Cui, Tianxiang and Bai, Ruibin and Qu, Rong},
+  journal = {European Journal of Operational Research},
+  volume  = {315},
+  number  = {1},
+  pages   = {161--175},
+  year    = {2024},
+  doi     = {10.1016/j.ejor.2023.11.038},
+}
+
+@article{colak2025rl,
+  title   = {Reinforcement learning in the context of container terminals},
+  author  = {Colak, Merve and Heilig, Leonard and Vo{\ss}, Stefan},
+  journal = {Flexible Services and Manufacturing Journal},
+  year    = {2025},
+  publisher = {Springer},
+  doi     = {10.1007/s10696-025-09643-4},
+}
+
+% ── Combinatorial RL ─────────────────────────────────────────
+
+@inproceedings{nazari2018vrp,
+  title={Reinforcement Learning for Solving the Vehicle Routing Problem}, 
+  author={Mohammadreza Nazari and Afshin Oroojlooy and Lawrence V. Snyder and Martin Takáč},
+  year={2018},
+  eprint={1802.04240},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  url={https://arxiv.org/abs/1802.04240},
+}
+
+% ── Spatial RL ───────────────────────────────────────────────
+
+@article{silver2016go,
+  title   = {Mastering the game of {Go} with deep neural networks and tree search},
+  author  = {Silver, David and Huang, Aja and Maddison, Chris J and Guez, Arthur and Sifre, Laurent and van den Driessche, George and Schrittwieser, Julian and Antonoglou, Ioannis and Panneershelvam, Veda and Lanctot, Marc and Dieleman, Sander and Grewe, Dominik and Nham, John and Kalchbrenner, Nal and Sutskever, Ilya and Lillicrap, Timothy and Leach, Madeleine and Kavukcuoglu, Koray and Graepel, Thore and Hassabis, Demis},
+  journal = {Nature},
+  volume  = {529},
+  pages   = {484--489},
+  year    = {2016},
+  doi     = {10.1038/nature16961},
+}
+
+% ── Rainbow ──────────────────────────────────────────────────
+
+@inproceedings{hessel2018rainbow,
+  title     = {Rainbow: Combining Improvements in Deep Reinforcement Learning},
+  author    = {Hessel, Matteo and Modayil, Joseph and van Hasselt, Hado and Schaul, Tom and Ostrovski, Georg and Dabney, Will and Horgan, Dan and Piot, Bilal and Azar, Mohammad and Silver, David},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  year      = {2018},
+  doi       = {10.1609/aaai.v32i1.11796},
+}
+
+% ── Curriculum RL Survey ─────────────────────────────────────
+
+@article{narvekar2020curriculum,
+      title={Curriculum Learning for Reinforcement Learning Domains: A Framework and Survey}, 
+      author={Sanmit Narvekar and Bei Peng and Matteo Leonetti and Jivko Sinapov and Matthew E. Taylor and Peter Stone},
+      year={2020},
+      eprint={2003.04960},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2003.04960}, 
+}
+
+@inproceedings{jiang2021plr,
+      title={Replay-Guided Adversarial Environment Design}, 
+      author={Minqi Jiang and Michael Dennis and Jack Parker-Holder and Jakob Foerster and Edward Grefenstette and Tim Rocktäschel},
+      year={2022},
+      eprint={2110.02439},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2110.02439}, 
+}
+
+% ── Container Terminal Operations ────────────────────────────────
+
+@article{vis2003transshipment,
+  title   = {Transshipment of containers at a container terminal: An overview},
+  author  = {Vis, Iris F A and de Koster, Ren{\'e}},
+  journal = {European Journal of Operational Research},
+  volume  = {147},
+  number  = {1},
+  pages   = {1--16},
+  year    = {2003},
+  doi     = {10.1016/S0377-2217(02)00293-X},
+}
+
+@article{stahlbock2008operations,
+  title   = {Operations research at container terminals: a literature update},
+  author  = {Stahlbock, Robert and Vo{\ss}, Stefan},
+  journal = {OR Spectrum},
+  volume  = {30},
+  number  = {1},
+  pages   = {1--52},
+  year    = {2008},
+  publisher = {Springer},
+  doi     = {10.1007/s00291-007-0100-9},
+}
+
+@article{boysen2013container,
+  title   = {A Survey on Container Processing in Railway Yards},
+  author  = {Boysen, Nils and Fliedner, Malte and Jaehn, Florian and Pesch, Erwin},
+  journal = {Transportation Science},
+  volume  = {47},
+  number  = {3},
+  pages   = {312--329},
+  year    = {2013},
+  doi     = {10.1287/trsc.1120.0415},
+}
+
+@article{bish2001dispatching,
+  title = {A multiple-crane-constrained scheduling problem in a container terminal},
+  journal = {European Journal of Operational Research},
+  volume = {144},
+  number = {1},
+  pages = {83-107},
+  year = {2003},
+  issn = {0377-2217},
+  doi = {https://doi.org/10.1016/S0377-2217(01)00382-4},
+  url = {https://www.sciencedirect.com/science/article/pii/S0377221701003824},
+  author = {Ebru K. Bish},
+  keywords = {Logistics, Transportation, Modeling, Assignment, Heuristics},
+  abstract = {We consider a container terminal loading and unloading containers to and from a set of ships, and storing the containers in the terminal yard. Each ship is served by multiple quay cranes, which load and unload containers to and from ships. Containers are moved between the ships and the yard using a fleet of vehicles, each with unit capacity. The problem is (i) to determine a storage location for each unloaded container, (ii) to dispatch vehicles to containers, and (iii) to schedule the loading and unloading operations on the cranes, so as to minimize the maximum time it takes to serve a given set of ships. This problem is NP-hard, and therefore we develop a heuristic algorithm based on formulating the problem as a transshipment problem. The effectiveness of the heuristic is analyzed from both worst-case and computational points of view.},
+  doi     = {10.1016/S0377-2217(01)00382-4},
+}
+
+% ── Recent Container Terminal ML/DRL ─────────────────────────
+
+@article{jin2023stacking,
+  title   = {Container stacking optimization based on Deep Reinforcement Learning},
+  author  = {Jin, Xin and Duan, Zhentang and Song, Wen and Li, Qiqiang},
+  journal = {Engineering Applications of Artificial Intelligence},
+  volume  = {123},
+  pages   = {106508},
+  year    = {2023},
+  doi     = {10.1016/j.engappai.2023.106508},
+}
+
+@article{li2023twin,
+  AUTHOR = {Jin, Xin and Mi, Nan and Song, Wen and Li, Qiqiang},
+  TITLE = {Deep Reinforcement Learning for Dynamic Twin Automated Stacking Cranes Scheduling Problem},
+  JOURNAL = {Electronics},
+  VOLUME = {12},
+  YEAR = {2023},
+  NUMBER = {15},
+  ARTICLE-NUMBER = {3288},
+  URL = {https://www.mdpi.com/2079-9292/12/15/3288},
+  ISSN = {2079-9292},
+  ABSTRACT = {Effective dynamic scheduling of twin Automated Stacking Cranes (ASCs) is essential for improving the efficiency of automated storage yards. While Deep Reinforcement Learning (DRL) has shown promise in a variety of scheduling problems, the dynamic twin ASCs scheduling problem is challenging owing to its unique attributes, including the dynamic arrival of containers, sequence-dependent setup and potential ASC interference. A novel DRL method is proposed in this paper to minimize the ASC run time and traffic congestion in the yard. Considering the information interference from ineligible containers, dynamic masked self-attention (DMA) is designed to capture the location-related relationship between containers. Additionally, we propose local information complementary attention (LICA) to supplement congestion-related information for decision making. The embeddings grasped by the LICA-DMA neural architecture can effectively represent the system state. Extensive experiments show that the agent can learn high-quality scheduling policies. Compared with rule-based heuristics, the learned policies have significantly better performance with reasonable time costs. The policies also exhibit impressive generalization ability in unseen scenarios with various scales or distributions.},
+  DOI = {10.3390/electronics12153288}
+}
+@article{naeem2023integrated,
+  title   = {A comprehensive review and directions for future research on the integrated scheduling of quay cranes and automated guided vehicles and yard cranes in automated container terminals},
+  author  = {Naeem, Doaa and Gheith, Mohamed and Eltawil, Amr},
+  journal = {Computers \& Industrial Engineering},
+  volume  = {179},
+  pages   = {109149},
+  year    = {2023},
+  doi     = {10.1016/j.cie.2023.109149},
+}
+
+@article{xu2021integrated,
+  title = {Integrated scheduling optimization of U-shaped automated container terminal under loading and unloading mode},
+  journal = {Computers \& Industrial Engineering},
+  volume = {162},
+  pages = {107695},
+  year = {2021},
+  issn = {0360-8352},
+  doi = {https://doi.org/10.1016/j.cie.2021.107695},
+  url = {https://www.sciencedirect.com/science/article/pii/S0360835221005994},
+  author = {Bowei Xu and Depei Jie and Junjun Li and Yongsheng Yang and Furong Wen and Haitao Song},
+  keywords = {U-shaped automated container terminals, Reinforcement learning, Integrated scheduling, AGVs path planning, Hyper-heuristic algorithm},
+  abstract = {This paper proposes an integrated scheduling optimization model based on mixed integer programming to analytically characterize the U-shaped automated container terminal layout and handling technology. We focus on dual trolley quay cranes, conflict-free automated guided vehicles (AGVs) and dual cantilever rail cranes under loading and unloading mode, which have rarely been simultaneously studied in the literature, as most prior research has addressed traditional container terminals. We eliminate the waiting time during the interaction between AGV and dual cantilever rail crane to realize spatiotemporal synchronization and minimize the completion time of all tasks. We employ a reinforcement learning based hyper-heuristic genetic algorithm to solve the model, specifically, better solution results for reward and punishment mechanism incorporating reinforcement learning, higher versatility independent of specific problems, stronger scalability of low-level algorithms. We investigate which algorithm is better by comparing the proposed algorithm with bi-level genetic algorithm, adaptive genetic algorithm, hybrid genetic algorithm and cuckoo search algorithm. We conduct small-sized and large-sized experiments to validate the performance of the proposed model and algorithm. The results show that the proposed model and algorithm can not only avoid the conflicts among AGVs but also significantly improve handling efficiency.}
+}
+
+% ── RL in Transportation ────────────────────────────────────────
+
+@article{lai2024rl,
+  title   = {Reinforcement learning in transportation research: Frontiers and future directions},
+  author  = {Lai, Xiongfei and Yang, Zhenyu and Xie, Jiaohong and Liu, Yang},
+  journal = {Multimodal Transportation},
+  volume  = {3},
+  pages   = {100164},
+  year    = {2024},
+  doi     = {10.1016/j.multra.2024.100164},
+}
+
+@inproceedings{caserta2009binary,
+  author="Caserta, Marco
+  and Schwarze, Silvia
+  and Vo{\ss}, Stefan",
+  editor="Cotta, Carlos
+  and Cowling, Peter",
+  title="A New Binary Description of the Blocks Relocation Problem and Benefits in a Look Ahead Heuristic",
+  booktitle="Evolutionary Computation in Combinatorial Optimization",
+  year="2009",
+  publisher="Springer Berlin Heidelberg",
+  address="Berlin, Heidelberg",
+  pages="37--48",
+  abstract="We discuss the blocks relocation problem (BRP), a specific problem in storing and handling of uniform blocks like containers. The BRP arises as an important subproblem of major logistic processes, like container handling on ships or bays, or storing of palettes in a stacking area. Any solution method for the BRP has to work with the stacking area and needs to draw relevant information from there. The strength of related approaches may rely on the extensive search of neighborhood structures. For an efficient implementation, fast access to data of the current stacking area and an efficient transformation into neighboring states is needed. For this purpose, we develop a binary description of the stacking area that fulfills the aforementioned requirements. We implement the binary representation and use it within a look ahead heuristic. Comparing our results with those from literature, our method outperforms best known approaches in terms of solution quality and computational time.",
+  isbn="978-3-642-01009-5",
+
+  doi       = {10.1007/978-3-642-01009-5_4},
+}
+
+% ── Foundational RL ────────────────────────────────────────────
+
+@book{suttonbarto2018,
+  title     = {Reinforcement Learning: An Introduction},
+  author    = {Sutton, Richard S and Barto, Andrew G},
+  edition   = {2},
+  publisher = {MIT Press},
+  year      = {2018},
+}
+
+@book{bellman1957,
+  title     = {Dynamic Programming},
+  author    = {Bellman, Richard},
+  publisher = {Princeton University Press},
+  year      = {1957},
+}
+
+@article{watkinsdayan1992,
+  title   = {{Q}-learning},
+  author  = {Watkins, Christopher J C H and Dayan, Peter},
+  journal = {Machine Learning},
+  volume  = {8},
+  number  = {3--4},
+  pages   = {279--292},
+  year    = {1992},
+  doi     = {10.1007/BF00992698},
+}
+
+@article{lin1992,
+  title   = {Self-improving reactive agents based on reinforcement learning, planning and teaching},
+  author  = {Lin, Long-Ji},
+  journal = {Machine Learning},
+  volume  = {8},
+  number  = {3--4},
+  pages   = {293--321},
+  year    = {1992},
+  doi     = {10.1007/BF00992699},
+}
+
+% ── Deep Learning Foundations ──────────────────────────────────
+
+@article{lecun1998,
+  title   = {Gradient-based learning applied to document recognition},
+  author  = {LeCun, Yann and Bottou, L{\'e}on and Bengio, Yoshua and Haffner, Patrick},
+  journal = {Proceedings of the IEEE},
+  volume  = {86},
+  number  = {11},
+  pages   = {2278--2324},
+  year    = {1998},
+  doi     = {10.1109/5.726791},
+}
+
+@book{goodfellow2016,
+  title     = {Deep Learning},
+  author    = {Goodfellow, Ian and Bengio, Yoshua and Courville, Aaron},
+  publisher = {MIT Press},
+  year      = {2016},
+}
+
+@misc{pytorch_reproducibility,
+  title        = {Reproducibility --- {PyTorch} Documentation},
+  author       = {{PyTorch Contributors}},
+  year         = {2024},
+  howpublished = {\url{https://pytorch.org/docs/stable/notes/randomness.html}},
+  note         = {Accessed 2026-03-04},
+}

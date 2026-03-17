@@ -1,0 +1,88 @@
+% chapters/07_curriculum_training.tex
+\chapter{Curriculum Training}
+\label{ch:curriculum}
+
+A full terminal simulation with up to 220 import containers per day, stochastic truck arrivals, and multi-crane coordination is too complex for tabula rasa reinforcement learning. Random exploration yields almost no successful workflows during early training, leaving the agent without a useful gradient signal. Curriculum learning \cite{bengio2009curriculum} addresses this by presenting tasks in order of increasing difficulty: the agent masters atomic skills before composing them into multi-step strategies. The design takes inspiration from video game tutorials: just as a game teaches movement before combat and combat before boss fights, the curriculum teaches single-move primitives before multi-step chains and chains before full logistics workflows.
+
+This chapter describes 33 tutorial scenarios organised into 14 mastery-gated tiers. Each tier adds a new dimension of complexity, testing whether the agent can compose previously mastered sub-tasks into increasingly joint operations. The curriculum also serves as a systematic debugging tool: by isolating each move type, tutorials act as unit tests for the simulation, state encoder, and reward engine. Bugs invisible in full-simulation noise become immediately apparent when a single-move scenario consistently fails (\cref{sec:disc:engineering}).
+
+\section{Scenario Design}
+\label{sec:curr:scenarios}
+
+Each scenario implements the \texttt{TutorialScenario} interface: \texttt{setup(env)} places entities into a cleared environment, \texttt{check\_success(env)} tests the goal, and \texttt{max\_steps} defines the episode budget. The environment is fully reset before each run. Tutorial rewards are binary ($+5.0$ success, $-5.0$ timeout). \Cref{tab:curr:scenarios} lists all scenarios.
+
+\begin{table}[H]
+\centering
+\caption{The 33 tutorial scenarios organised into 14 mastery-gated tiers ($\geq 90\%$ pass rate required to advance). Difficulty increases top to bottom.}
+\label{tab:curr:scenarios}
+\small
+\begin{tabular}{@{} c l l p{6.8cm} @{}}
+\toprule
+\textbf{Tier} & \textbf{IDs} & \textbf{Theme} & \textbf{Key Challenge} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Atomic Skills}} \\
+\addlinespace[2pt]
+0 & S1--S4 & Primitive operations
+  & One move each: PARK\_TRUCK, TRAIN\_TO\_YARD, YARD\_TO\_TRUCK, YARD\_TO\_TRAIN \\
+1 & S5--S6, S26--S27 & Two-action chains
+  & Ordered pairs: import+export, park+unload, direct transfers \\
+2 & S7--S8 & Full chains
+  & Three-move pipelines: container passes through queue $\to$ yard $\to$ vehicle \\
+3 & S9--S10 & Restack and load
+  & YARD\_TO\_YARD prerequisite: unbury a blocked container, then deliver it \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Generalisation and Multi-Step Planning}} \\
+\addlinespace[2pt]
+4 & S11--S12 & Random generalisation
+  & Randomised sizes, variable distractors, no fixed seed --- forces attention to channel values \\
+5 & S13--S14 & Multi-step hard
+  & 3-truck matching (demand channels) and deep unbury (2 sequential restacks) \\
+6 & S22--S25 & Terminal truck
+  & Internal dispatch rules: when to use terminal trucks vs.\ regular trucks \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Multi-Vehicle Coordination}} \\
+\addlinespace[2pt]
+7 & S15--S16 & Multi-vehicle
+  & Batch parking + importing; multi-truck-to-train pipeline \\
+8 & S17 & Bidirectional train
+  & Bridge scenario: 1 import + 1 export on same train (added after learning gap observed) \\
+9 & S18--S19 & Concurrent operations
+  & All eight move types in one episode; competing priorities under time pressure \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Operational Scale}} \\
+\addlinespace[2pt]
+10 & S20--S21 & Full complexity
+  & Cluttered yard (12+ distractors); capstone mini-day with 5 trucks + 1 bidirectional train \\
+11 & S28--S29 & Full train operations
+  & Complete train unload / load at near-production scale \\
+12 & S30--S31 & Cross-modal orchestration
+  & Multi-truck-to-train feed; final capstone combining all sub-tasks \\
+13 & S32--S33 & Operational readiness
+  & Tight departure deadlines; 10+ containers under time pressure. Eliminated 5 of 10 Stage~2 top combinations (\cref{sec:res:phase1:stage3}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Anchor labels for cross-references from other chapters
+\label{sec:curr:scenarios:tier0}%
+\label{sec:curr:scenarios:tier4}%
+\label{sec:curr:scenarios:tier8}%
+\label{sec:curr:scenarios:tier9}%
+\label{sec:curr:scenarios:structure}%
+\label{sec:curr:scenarios:overview}%
+
+Three design decisions merit brief comment. Tier~3 introduces restacking (\texttt{YARD\_TO\_YARD}), which carries a negative immediate reward ($-0.2$), teaching the agent that short-term cost can unlock higher-value moves. Tier~8 was added iteratively after observing that agents could not generalise from single-direction tiers to bidirectional flows without a bridge scenario. Tier~13 was added after the Stage~2 screening revealed that all 14 successful combinations mastered S31 yet diverged under operational-scale pressure.
+
+\section{Progression Mechanism}
+\label{sec:curr:tiers}
+\label{sec:curr:tiers:mastery}
+
+Tier advancement requires $\geq 90\%$ pass rate across all scenarios in the current tier, measured over a rolling window of 20 epochs, with a minimum of 10 epochs per tier to prevent premature advancement from lucky streaks. Each epoch runs every scenario in the current tier once, followed by maintenance replays of all previously mastered tiers (one run per scenario every 3 epochs) to prevent catastrophic forgetting. Optimisation steps are performed after each scenario and in bulk at epoch end (\cref{sec:agent:training:loss}). The exploration rate decays from 0.9 to 0.05 over 80 epochs.
+
+\label{sec:curr:tiers:epochs}
+
+\section{Screening and Transfer}
+\label{sec:curr:screening}
+\label{sec:curr:transition}
+
+The tutorial phase doubles as a cheap architecture screening tool. Running 500 epochs takes minutes on a single GPU, while a full evaluation takes hours. By comparing epoch-to-mastery counts across architecture variants, underperforming designs can be eliminated early, reducing total compute by an estimated factor of 5 to 10. After screening, the agent's tutorial-trained weights transfer directly to the scalability evaluation harness without modification. The screening protocol is described in \cref{ch:experiments}. Results are reported in \cref{ch:results}.

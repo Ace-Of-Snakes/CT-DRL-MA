@@ -1,0 +1,151 @@
+% chapters/10_discussion.tex
+\chapter{Discussion}
+\label{ch:discussion}
+
+\section{Interpretation of Results}
+\label{sec:disc:interpretation}
+
+The central question (\cref{sec:intro:rqs}) receives a qualified \emph{yes}. Phase~1 demonstrates that compositional mastery of sub-tasks, built through the tiered curriculum, produces agents capable of joint terminal operations in controlled settings (\cref{sec:res:phase1}). Phase~2 confirms that this compositional skill scales well beyond the training distribution (\cref{sec:res:phase2}), and the mixed-operation stress test shows that all eight move types can be coordinated simultaneously at operational scale (\cref{sec:res:phase2:stress}). The following sections examine what the agent has and has not learned, and where the methodology's limits lie.
+
+\subsection{What the Agent Learned}
+\label{sec:disc:interpretation:learned}
+
+The Phase~1 results (\cref{sec:res:phase1}) show that the spatial DQN agents learn correct spatial reasoning for single-step decisions: selecting the right source container, choosing an appropriate destination, and coordinating movements across facility regions. Four CNN$\times$DQN combinations master all 33 tutorial scenarios, including cross-region transfers that require the CNN to extract features spanning multiple regions of the state tensor. The escape velocity experiment (\cref{sec:res:variance:escape}) further suggests that IQN may also be viable, as it escapes Tier~0 in 9 of 10 multi-seed runs despite its single-seed failure.
+
+Beyond correct execution, two emergent strategies appear in the learned policies that were never explicitly rewarded. First, agents learn \emph{proximity-aware placement}: when importing containers from trains, they prefer yard positions near the rail region, reducing crane travel for future exports. This behaviour is visible in the destination Q-value heat maps, where Q-values peak in yard rows adjacent to the rail tracks. Second, agents develop a preference for keeping the yard ``flat'' by distributing containers across bays rather than stacking to maximum tier, which reduces future restacking. Both strategies emerge from the combination of the distance penalty in the reward function (\cref{app:reward}) and the multi-step return, which propagates the cost of future reshuffles back to the placement decision that caused them.
+
+Early in training, agents exhibit excessive YARD\_TO\_YARD shuffling on restacking scenarios such as S9 and S10, sometimes executing 40--60 reshuffles without transitioning to the actual delivery move. This behaviour largely disappears as training progresses and the policy internalises the correct sequencing. The scenarios where it persists in greedy evaluation (\cref{sec:res:phase1:dqn}) point to a structural limitation: without temporal context, the agent has no mechanism to encode a multi-step intention such as ``restack to access container~X for Train~2.'' Each decision is made from a static snapshot, making the agent reactive rather than strategic.
+
+The heuristic baseline (\cref{sec:res:phase2:scaling}) provides evidence that the learned policies reflect genuine spatial skill rather than reward exploitation. The heuristic follows the same priority ordering that the reward function encodes, yet achieves only 52.4\% mean completion compared to the Munchausen agent's 97.4\%. Both have access to identical objective priorities, but the heuristic lacks the spatial reasoning to navigate yard congestion or coordinate multi-step transfers. This 45-percentage-point gap demonstrates that the DQN agents have learned substantive logistic decision-making.
+
+\subsection{Scalability and Reactive Decision-Making}
+\label{sec:disc:interpretation:scalability}
+
+Phase~2 shows that the agents maintain reliable performance well beyond the tutorial training range, handling 100--300 containers despite tutorials never exceeding approximately 30 (\cref{sec:res:phase2}). This scalability follows naturally from the reactive nature of the learned policy. At each step, the agent observes the current state tensor and selects the locally best source-destination pair. Whether there are 20 containers or 300, each individual decision is structurally identical to what the agent practised during training. The task scales linearly in the number of moves, but the decision complexity does not.
+
+This reactive competence has a clear ceiling. The agent operates as a memoryless dispatcher: it responds effectively to the current situation but cannot perform \textbf{pre-marshalling}, the proactive rearrangement of containers in anticipation of future arrivals. Pre-marshalling requires maintaining a goal state across many decisions, which is impossible with the single-frame DQN architecture. The $n$-step return ($n = 3$) provides roughly three crane moves of lookahead, sufficient for immediate restacking but far too short for the multi-hour anticipation that pre-marshalling demands. Future arrival knowledge is partially available through the departure urgency and export pickup demand channels (\cref{ch:state}), but these provide coarse temporal signals rather than precise schedules. Even with finer temporal features, the memoryless architecture would remain the bottleneck. Closing this gap would require combining precise temporal features with a recurrent or attention-based architecture (\cref{sec:concl:future:temporal}).
+
+The strong scalability results therefore confirm that a reactive, memoryless strategy is sufficient for the dispatch component of terminal operations. What remains untested is whether the agent can optimise yard layout over time horizons spanning hours or days.
+
+\subsection{Effectiveness of Spatial State Representation}
+\label{sec:disc:interpretation:spatial}
+
+The spatial tensor design (\cref{ch:state}) successfully encodes all information needed for spatial logistics decisions. The strongest evidence comes from the escape velocity experiment (\cref{sec:res:variance:escape}): the cross-region primitives S3 and S4 probe whether the CNN can extract meaningful features from the spatial relationship between yard, rail, and parking regions. Variants that fail these primitives fail on different ones, confirming that S3 and S4 test distinct spatial relationships in the CNN's feature hierarchy.
+
+That the compact Narrow-Deep backbone achieves the fastest convergence (\cref{sec:res:phase1:cnn}) despite having the fewest parameters suggests that the channel design is doing much of the representational work. By encoding occupancy, container attributes, accessibility, and temporal urgency as separate channels, the state tensor pre-processes information that a larger model would need to learn to extract from raw data. This is consistent with a well-known principle in RL: domain-specific state engineering reduces the burden on the function approximator.
+
+The representation's limitation is temporal, not spatial. The state captures the current terminal configuration but carries no memory of previous actions or ongoing plans. This gap explains the reactive nature of the learned policy discussed above.
+
+\subsection{Value of Curriculum Training}
+\label{sec:disc:interpretation:curriculum}
+
+The tiered tutorial curriculum serves three functions that emerged during development, only one of which was originally intended.
+
+\textbf{Architecture screening.} The intended function. The 14-tier curriculum provides a standardised benchmark with sufficient discriminative power to separate viable from non-viable architectures (\cref{sec:res:phase1}).
+
+\textbf{Bug discovery.} The tutorials' greatest engineering value was systematic bug discovery. By isolating each move type into a controlled scenario with a binary pass/fail outcome, tutorials convert opaque simulation failures into reproducible test cases (\cref{sec:disc:engineering}).
+
+\textbf{Escape velocity diagnosis.} The Tier~0 primitives turned out to act as a gateway that diagnoses architectural compatibility with the spatial action formulation (\cref{sec:res:variance:escape}). The multi-seed experiment refined single-seed pass/fail into a three-tier classification (robust, fragile, incompatible) and corrected the Phase~1 false negative for IQN. The practical implication is that a cheap canary run (100 epochs on Tier~0 with 3--5 seeds, approximately 8 minutes per run) can reliably classify algorithm viability before committing to a full curriculum.
+
+\section{Two-Phase Evaluation Methodology}
+\label{sec:disc:methodology}
+
+The two-phase design (tutorial screening followed by controlled scalability testing, \cref{sec:exp:phase2:rationale}) has both strengths and blind spots worth examining.
+
+\textbf{Predictive validity.} The tutorial screening correctly identifies which architectures can learn the spatial logistics task. Its main weakness is that single-seed screening cannot distinguish \emph{fragile} algorithms from truly incompatible ones (\cref{sec:res:variance:escape}). Multi-seed validation at the primitive tier is a necessary complement.
+
+\textbf{The screening's blind spot.} Tutorials test skills in isolation, but operational scenarios demand skill composition under concurrent pressure. The tutorial system cannot predict the capacity ceiling at which composed execution breaks down, because tutorials reset after each short episode. Phase~2 fills this gap by independently varying container count and yard fill (\cref{sec:res:phase2}).
+
+\textbf{Continuous learning in Phase~2.} The warmup protocol (\cref{sec:exp:phase2:config}) allows the agent to continue learning during evaluation. This is deliberate. Terminal operations are non-stationary, and online adaptation is a core reinforcement learning capability. The warmup episodes represent a natural continuation of the curriculum at larger workload scales, testing \emph{adaptability} rather than frozen-weight memorisation.
+
+\textbf{Cost-benefit.} The screening eliminated 42\% of combinations at a cost of approximately 25 GPU-hours. The full pipeline, from architecture selection through scalability evaluation, completes in under 26 hours on a single consumer GPU.
+
+\section{Practical Implications}
+\label{sec:disc:practical}
+
+\textbf{Inference cost and deployment feasibility.}
+A forward pass completes in approximately 5\,ms on the RTX~2060~Super used throughout this work. In a real RMGC scheduling context, decisions are made on minute-scale intervals because the crane must physically complete each move before the next decision is needed. The inference latency is negligible relative to this decision cycle, and the computational requirements are well within the capability of edge hardware already present in modern terminal control rooms.
+
+\textbf{Training cost.}
+A full tutorial curriculum run completes in approximately 25 minutes on a single consumer GPU. The canary run (\cref{sec:disc:interpretation:curriculum}) takes approximately 8 minutes, and the Phase~2 evaluation grid completes in approximately 30 minutes per agent. These timescales make the approach accessible without high-performance computing infrastructure.
+
+\textbf{Human--AI collaboration.}
+The agent is best suited as a \emph{decision support tool} rather than a fully autonomous controller. The spatial Q-value maps produced by the destination head form a heat map of the agent's preference landscape for each source container. An operator can inspect this visualisation, accept the recommendation, or override it based on domain knowledge that the state representation does not capture (e.g.\ a customer arriving early, a crane undergoing maintenance). The two-stage action structure (\cref{sec:agent:unified:heads}) naturally supports this workflow: the operator can accept the source selection but choose a different destination, or vice versa. This represents a lower-friction integration path than requiring operators to trust an opaque end-to-end controller.
+
+\textbf{Generalisability to other terminals.}
+The state representation is parameterised by terminal geometry (yard rows, bays, tiers, rail tracks, split factor). Adapting the system to a different intermodal terminal requires updating these parameters and retraining. The CNN backbone and DQN variant can be reused without modification, as they operate on the spatial tensor format rather than terminal-specific features. However, the tutorial curriculum would need adjustment: the 33 scenarios encode the move type repertoire of the N\"urnberg terminal, and a terminal with different facility types (e.g.\ barge berths, automated guided vehicles) would need corresponding scenario definitions. The architectural insight that a compact CNN with cross-region receptive fields suffices for spatial logistics is likely transferable, but this has not been empirically validated on alternative layouts.
+
+\section{Bugs and Engineering Insights}
+\label{sec:disc:engineering}
+
+Over ten months and 182 commits, the most impactful progress came not from algorithmic improvements but from discovering bugs in the simulation, state encoder, and reward engine. Thirteen bugs were identified in total; the most instructive are summarised here.
+
+\textbf{Tutorials as unit tests.} Eight of the thirteen bugs were discovered through specific tutorial scenarios. The source mask determined container direction by checking the train's pickup list, which changed as containers were loaded. Tutorial S4 (\cref{sec:curr:scenarios:tier0}) exposed this immediately: an Export container was offered as an Import source after loading. The fix was to use the container's immutable \texttt{direction} attribute. Similarly, a shared NumPy array backing multiple goods-type masks caused containers to vanish when a different type was placed elsewhere; tutorial S11 (\cref{sec:curr:scenarios:tier4}), which mixes goods types, made the failure reproducible. Without isolated scenarios, these bugs would have appeared as unexplained training stalls in the full simulation.
+
+\textbf{Multi-crane reversal.} When two cranes acted within the same step, one could reverse the other's move. Bidirectional train scenarios S17--S19 (\cref{sec:curr:scenarios:tier8,sec:curr:scenarios:tier9}) triggered this reliably. The solution was the per-step blacklist (\cref{sec:state:masking:blacklist}).
+
+\textbf{Sequential crane timing.} The simulation clock advanced by the \emph{sum} of crane durations rather than their \emph{maximum}, effectively running time at double speed. Train departure windows assumed parallel operation, so trains departed before the agent could finish. The symptom (8 of 10 imports completed at 50\% fill) appeared mechanical rather than algorithmic, and was diagnosed only by tracing Q-values step by step.
+
+\textbf{Silent capacity bugs.} Three bugs each capped train loading at roughly 50\% of capacity. A wagon space check used \texttt{getattr(wagon, "capacity", 2)}, silently defaulting to 2 containers regardless of actual length. An anchor formula placed outer-track trains beyond the yard boundary, making their wagons invisible to the mask. And a spatial-agnostic export assignment routinely sent containers 40 bays across the yard, wasting crane throughput on travel.
+
+\textbf{Reward shaping defects.} The end-of-day leftover penalty was applied to \emph{all} yard containers rather than only overdue ones, producing $-30$ to $-60$ of unearned penalty at scale. A continuous truck waiting penalty accumulated $-100$ to $-200$ per day by counting already-served trucks. Both bugs effectively punished the agent for operating at higher throughput. The corrections are detailed in \cref{app:reward:corrections}.
+
+\textbf{GPU acceleration attempt.} A three-week effort to port the simulation to NVIDIA WARP (6,800 lines) was abandoned. The terminal's deeply nested conditional logic resists GPU SIMD parallelism. However, the preparatory restructuring of the yard as a pure-tensor storage system eliminated Python dictionary lookups and yielded a 3--5$\times$ CPU speedup. Algorithmic data structure improvement outperformed hardware acceleration for this class of problem.
+
+\textbf{Data structure convergence.} The yard storage system went through five iterations, from GPU bitmap arrays through segment trees to the final boolean-mask design, before settling on the simplest variant: plain NumPy boolean arrays with a sliding-window placement algorithm. Each iteration added complexity that proved unnecessary once the core operations (occupancy check, contiguous-space search, accessibility scoring) were reduced to vectorised array operations.
+
+Across all of these bugs, the same lesson repeated itself: for applied RL in logistics, what matters most is correct simulation, domain-encoded state representations, and systematic testing via curricula. Architecture novelty was the least productive investment of development time.
+
+\section{Architecture Evolution}
+\label{sec:disc:architecture_evolution}
+
+Over ten months and 182 commits, eight distinct architecture versions were explored, each exposing a limitation that motivated the next iteration. \Cref{tab:disc:arch_evolution} summarises the progression.
+
+\begin{table}[ht]
+\centering
+\caption{Architecture evolution across eight versions. Each version's failure mode motivated the design of its successor.}
+\label{tab:disc:arch_evolution}
+\small
+\begin{tabular}{@{} c l l p{5.5cm} @{}}
+\toprule
+\textbf{Ver.} & \textbf{Name} & \textbf{Action Space} & \textbf{Why Replaced} \\
+\midrule
+1 & QMIX Multi-Agent & 4D joint & Multi-agent coordination harder than single-agent; 1{,}662-dim flat state fragile \\
+2 & Dual-Head DQN & 3D tuples & Heuristic head selection undermined RL; manual state flattening brittle \\
+3 & Dueling DQN & Flat \texttt{Discrete(10K)} & Variable-size action space (move count changes each step) \\
+3b & Transferable Framework & Flat (shared) & GNN and hierarchical-attention agents never confirmed to learn; only Dueling DQN worked \\
+4 & CNN + Move Scorer & Flat (scored) & Enumerate-and-score paradigm: each move needs separate featurisation \\
+5 & Two-Stage Hierarchical & Featurised lists & Still relied on explicit entity featurisation; superseded after 2~days \\
+6 & 6-Head Multi-Head & 6 sequential & Too many heads, complex training dynamics, unclear credit assignment \\
+7 & Two-Head Spatial & 2 spatial & \emph{Current version} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The pivotal transition was from version~4's \emph{enumerate-and-score} paradigm, where the environment generates a list of valid moves and the agent scores each one, to version~7's \emph{spatial selection} paradigm, where the agent directly selects source and destination positions in the unified state tensor. This shift was conceived during a four-month development hiatus spent conducting a scoping review of 411 CNN/GNN+DRL papers (\cref{ch:related}), and was motivated by two findings: (1)~multi-head architectures are rare in the literature, and (2)~the separate representations for trucks, rails, and yard in versions~1--4 prevented the CNN from learning cross-region spatial relationships. Encoding the entire terminal as a single tensor and reducing the agent to two spatial heads resolved both issues.
+
+The current version~7 combines spatial insight with the simplicity of a factored two-decision formulation. Compared to the six-head design, it has fewer hyperparameters, clearer credit assignment (two losses instead of six), and better gradient flow because each head receives a direct spatial supervision signal. Across all iterations, simpler designs outperformed complex ones. This matches the Phase~1 finding that the compact Narrow-Deep backbone outperforms larger alternatives (\cref{sec:res:phase1:cnn}).
+
+\section{Limitations}
+\label{sec:disc:limitations}
+
+Several limitations constrain the generalisability and completeness of the results.
+
+\textbf{Memoryless architecture and no pre-marshalling.} As discussed in \cref{sec:disc:interpretation:scalability}, the single-frame DQN cannot persist multi-step plans or perform proactive yard rearrangement. This is likely the primary bottleneck for sustained multi-day operations.
+
+\textbf{Single terminal layout.} The simulation models the N\"urnberg intermodal terminal with its specific geometry: 5 yard rows, 58 bays, 5 tiers, 7 rail tracks. The learned policies are not tested on alternative layouts. Generalisation to terminals with different geometries would require the state encoder to handle variable-size tensors or a transfer learning approach.
+
+\textbf{Simplified crane physics.} The crane model abstracts travel time as a distance-proportional cost but does not model physical constraints such as crane-to-crane collision avoidance, container weight limits, or spreader lock/unlock delays. In a real terminal, two cranes sharing a yard row cannot pass each other, creating blocking constraints that would significantly affect scheduling decisions.
+
+\textbf{No operations research baselines.} The results are not compared against established OR methods such as mixed-integer linear programming (MILP) schedulers or rule-based heuristic dispatchers. The evaluation metric is feasibility-constrained: 100\% completion is both the target and the theoretical optimum, so an OR solver would aim for the same ceiling. The more informative comparison would be on \emph{efficiency} metrics such as total crane travel distance, number of reshuffles, and idle time, where a MILP solver with perfect foresight could quantify how much overhead the agent's reactive strategy introduces. Developing such a comparison was beyond the scope of this thesis, which focused on establishing whether DRL-based coordination is possible at all.
+
+\textbf{Reward engineering sensitivity.} The reward function (\cref{app:reward}) uses hand-tuned magnitudes (e.g., $+7.0$ for YARD\_TO\_TRAIN, $-0.1$ for IDLE). No systematic sensitivity analysis was performed to determine how the relative magnitudes affect learned behaviour. The reward values were calibrated iteratively through tutorial debugging.
+
+\textbf{Single-seed Phase~1 results.} The CNN$\times$DQN screening used a single seed per combination. The escape velocity experiment (\cref{sec:res:variance:escape}) validated that the four algorithms carried forward to Phase~2 are robust across seeds, but the limitation applies to the failed variants. IQN escapes in 9 of 10 runs and QR-DQN in 2 of 10, meaning single-seed screening produced false negatives for fragile but potentially viable algorithms. Some combinations classified as failed on seed~42 may be fragile rather than truly incompatible.
+
+\textbf{KDE approximation for stochastic arrivals.} The simulation uses kernel density estimation fitted to historical arrival data to generate stochastic vehicle schedules. The KDE model captures the distributional shape of the training data but cannot extrapolate to patterns outside its fitted range. A scikit-learn version mismatch warning during model loading indicates fragility in the serialisation approach.
+
+\section{Ethical Considerations}
+\label{sec:disc:ethical}
+
+The system is designed as a decision support tool (\cref{sec:disc:practical}), not as a replacement for human operators. Any deployment would require a safety layer: an independent rule-based system that validates each proposed action against physical and regulatory constraints (weight limits, crane collision avoidance, personnel exclusion zones) before execution. The two-stage action formulation offers a degree of interpretability, since the operator can inspect the source and destination selections and override them based on domain knowledge. Nevertheless, the Q-value function itself is not inherently explainable, and the agent should recommend rather than dictate.

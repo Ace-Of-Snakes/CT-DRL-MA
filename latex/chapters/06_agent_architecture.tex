@@ -1,0 +1,173 @@
+% chapters/06_agent_architecture.tex
+\chapter{Agent Architecture}
+\label{ch:agent}
+
+This chapter describes the neural network architecture that processes the unified spatial tensor (\cref{ch:state}) and produces container move decisions. The design centres on three components: a CNN backbone that extracts spatial features from the state tensor, a two-head decision structure that selects source and destination positions sequentially, and a Double DQN training procedure with prioritised experience replay.
+
+\Cref{fig:agent:action_pipeline} provides an overview of the full pipeline. The state tensor enters the CNN backbone, which produces a shared spatial feature map. The source head scores every valid source position; after masking, the highest-scoring position is selected. Its feature vector is then injected into the destination head, which scores every valid destination position conditioned on the selected source. The move type (e.g.\ YARD\_TO\_TRAIN, TRAIN\_TO\_YARD) is inferred deterministically from the spatial regions of the two selected positions. This means that no explicit move-type prediction is needed.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{action_selection_pipeline}
+  \caption{The two-stage action selection pipeline. Stage~1 selects a source position (or IDLE) from the masked source Q-values. Stage~2 conditions on the source context and selects a destination from the masked destination Q-values. The move type is inferred deterministically from the source and destination regions.}
+  \label{fig:agent:action_pipeline}
+\end{figure}
+
+The remainder of this section describes each component in detail: the CNN backbone (\cref{sec:agent:unified:cnn}), the two decision heads (\cref{sec:agent:unified:heads}), and the Q-value computation that ties them together (\cref{sec:agent:unified:qvalue}).
+
+\section{Unified DQN Agent}
+\label{sec:agent:unified}
+
+\subsection{CNN Backbone}
+\label{sec:agent:unified:cnn}
+
+The \texttt{FactoredCNNBackbone} processes the $(14, 15, 1160, 5)$ state tensor through four convolutional stages, each followed by GroupNorm\footnote{Group normalisation divides channels into groups and normalises within each group, providing stable training with small batch sizes where batch normalisation degrades.} \cite{wu2020groupnorm} with 8 groups and a ReLU activation. The kernel shapes are specifically chosen to match the terminal's spatial structure, and each stage has a distinct purpose.
+
+\textbf{Stages 1a--1b: Bay-level feature extraction.} Stage~1a applies a $(1, 21, 1)$ kernel that spans exactly one bay (20 splits) plus one boundary position along the split axis. This acts as a \emph{container profile detector}: it learns to recognise the occupancy, type, urgency, and direction patterns within a single bay from all 14 input channels, producing 32 feature channels. Stage~1b applies the same $(1, 21, 1)$ kernel with a stride of $(1, 4, 1)$, reducing the split dimension from 1{,}160 to 290 while expanding to 64 channels. The four-fold downsampling compresses the action space from $15 \times 1{,}160 \times 5 = 87{,}000$ positions to $15 \times 290 \times 5 = 21{,}750$ positions per head. The downsampling is a deliberate trade-off to enable training on consumer hardware (8\,GB VRAM). Crucially, the downsampling is \emph{lossless} for this domain: it limits the agent's pointing precision but not its placement precision. Each downsampled position maps to a window of 4 full-resolution splits (8\,ft), and a per-step resolver searches this window to find the exact container (for sources) or the first contiguous free space that fits the container's actual size (for destinations). Since the smallest container in the simulation is 20\,ft (10 splits) --- well above the 4-split stride --- two adjacent containers always occupy distinct downsampled positions and can be independently targeted. Individual bays are still resolved (each bay spans 5 downsampled positions), and the resolver ensures that containers are packed at full resolution with no wasted space.
+
+\textbf{Stage 2: Cross-region association.} A $(3, 1, 3)$ kernel spans 3 rows and 3 tiers simultaneously, bridging adjacent facility regions (e.g.\ rail row~6 and parking row~7, or parking row~7 and yard row~8) and adjacent tiers (detecting stacking relationships). This is the primary mechanism through which the CNN learns cross-modal spatial associations --- for instance, the proximity between a train wagon and a yard container that needs to be loaded onto it.
+
+\textbf{Stage 3: Neighbourhood refinement.} A $(1, 5, 1)$ kernel scans along the downsampled split axis, where 5 positions span roughly 1.25 bays. This allows the network to compare containers across adjacent bays and learn local placement preferences. After all four stages the output is a feature map of shape $(64, 15, 290, 5)$ that serves as the shared representation for both decision heads.
+
+The factored kernel design --- bay-level, then cross-region, then neighbourhood --- mirrors the decision structure of the task itself. The agent first needs to understand what is inside each bay, then how bays in different regions relate to each other, and finally how neighbouring bays compare. Two stacked $(3, 1, 3)$ kernels provide a $7 \times 3$ effective receptive field across the row dimension, large enough to span from any rail track through the parking row into the yard.
+
+\subsection{Two-Head Decision Structure}
+\label{sec:agent:unified:heads}
+
+The agent makes two sequential decisions per simulation step. The \textbf{source head} selects an entity to move from the unified spatial grid. The \textbf{destination head}, conditioned on the selected source, selects a target position for that entity. The move type is inferred deterministically from the spatial regions of the source and destination positions (\cref{sec:sys:actions:types}), eliminating four prediction heads from the prior six-head architecture (\cref{sec:disc:architecture_evolution}).
+
+Each head operates over the $21{,}750$ positions of the downsampled feature map. The sequential factorisation with masking keeps the effective action count small at each step: rather than choosing from $21{,}750^2 \approx 473$ million source--destination pairs, the agent makes two masked selections of at most a few hundred valid positions each. The destination head receives explicit source context (the source feature vector extracted from the CNN feature map), enabling it to learn source-dependent placement preferences. For example, placing an import container near the truck that will eventually collect it.
+
+The two-head design also improves credit assignment: the training signal is concentrated into two spatial prediction problems rather than diluted across six separate heads, making learning dynamics more stable and easier to diagnose.
+
+\subsection{Q-Value Computation}
+\label{sec:agent:unified:qvalue}
+
+The \texttt{OccupiedPooling} module produces a global feature vector by combining max-pooling and mean-pooling over occupied positions in the feature map, followed by a linear projection to 128 dimensions. Pooling is restricted to positions where the occupancy mask is non-zero, preventing empty space from diluting the aggregated signal. The resulting 128-dimensional vector summarises the global state of the terminal.
+
+\textbf{Source scoring.} The source head applies two pointwise convolutions (\texttt{Conv3d(64, 32, 1)} followed by \texttt{Conv3d(32, 1, 1)}) with a ReLU activation between them, producing a scalar Q-value at each spatial position. The output is flattened to a vector of length 21{,}750 and masked so that invalid source positions receive $-\infty$. Under greedy action selection the agent picks the position with the highest Q-value; under epsilon-greedy exploration it samples uniformly from valid positions with probability $\varepsilon$.
+
+\textbf{Destination scoring.} The destination head first constructs a query vector by projecting the concatenation of the global feature (128-d) and the source feature (64-d, extracted at the selected source position) through a linear layer to 64 dimensions. This query is broadcast-added to every position of the feature map (\emph{additive fusion}), creating an augmented feature map that encodes source-dependent context at every spatial location. The augmented map is scored with the same pointwise convolution pattern as the source head. Additive fusion allows the destination scoring to be source-conditioned without requiring a separate forward pass through the backbone for each possible source.
+
+\Cref{alg:action_selection} formalises the two-stage action selection procedure.
+
+\begin{algorithm}[H]
+\caption{Two-Stage Spatial Action Selection}
+\label{alg:action_selection}
+\DontPrintSemicolon
+\KwIn{State tensor $\mathbf{s} \in \mathbb{R}^{14 \times 15 \times 1160 \times 5}$, source mask $\mathbf{m}_\text{src}$, destination mask function $\texttt{dest\_mask\_fn}$, exploration rate $\varepsilon$}
+\KwOut{Source position $p_\text{src}$, destination position $p_\text{dst}$, move type $t$}
+
+$\mathbf{F} \leftarrow \texttt{CNN\_backbone}(\mathbf{s})$ \tcp*{shared feature map $(64, 15, 290, 5)$}
+$\mathbf{g} \leftarrow \texttt{OccupiedPooling}(\mathbf{F})$ \tcp*{global feature vector $\in \mathbb{R}^{128}$}
+
+\BlankLine
+\tcp{Stage 1: Source selection}
+$\mathbf{Q}_\text{src} \leftarrow \texttt{SourceHead}(\mathbf{F})$ \tcp*{Q-values $\in \mathbb{R}^{21750}$}
+$\mathbf{Q}_\text{src}[\neg\,\mathbf{m}_\text{src}] \leftarrow -\infty$ \tcp*{mask invalid sources}
+\uIf{$\text{uniform}(0,1) < \varepsilon$}{
+  $p_\text{src} \leftarrow \text{uniform\_sample}(\{i : \mathbf{m}_\text{src}[i] = 1\})$\;
+}
+\Else{
+  $p_\text{src} \leftarrow \arg\max\, \mathbf{Q}_\text{src}$\;
+}
+
+\lIf{$p_\text{src} = \texttt{IDLE}$}{\Return{$(\texttt{IDLE}, \texttt{null}, \texttt{IDLE})$}}
+
+\BlankLine
+\tcp{Stage 2: Destination selection}
+$\mathbf{f}_\text{src} \leftarrow \mathbf{F}[p_\text{src}]$ \tcp*{source feature $\in \mathbb{R}^{64}$}
+$\mathbf{q} \leftarrow \texttt{Linear}([\mathbf{g} \,\|\, \mathbf{f}_\text{src}])$ \tcp*{query vector $\in \mathbb{R}^{64}$}
+$\mathbf{F}' \leftarrow \mathbf{F} + \mathbf{q}$ \tcp*{additive fusion (broadcast)}
+$\mathbf{Q}_\text{dst} \leftarrow \texttt{DestHead}(\mathbf{F}')$\;
+$\mathbf{m}_\text{dst} \leftarrow \texttt{dest\_mask\_fn}(p_\text{src})$\;
+$\mathbf{Q}_\text{dst}[\neg\,\mathbf{m}_\text{dst}] \leftarrow -\infty$\;
+$p_\text{dst} \leftarrow \arg\max\, \mathbf{Q}_\text{dst}$ \tcp*{greedy; $\varepsilon$-greedy analogous}
+
+\BlankLine
+$t \leftarrow \texttt{infer\_move\_type}(\text{region}(p_\text{src}),\, \text{region}(p_\text{dst}))$\;
+\Return{$(p_\text{src},\, p_\text{dst},\, t)$}\;
+\end{algorithm}
+
+\section{Experience Replay}
+\label{sec:agent:replay}
+
+\subsection{Unified Transition Format}
+\label{sec:agent:replay:transition}
+
+Each transition contains the tuple (state, source\_pos\_down, dest\_pos\_down, reward, next\_state, done), where positions are recorded at the downsampled resolution ($S_\text{down} = 290$) for direct indexing into the Q-value tensors. States are compressed to float16 on storage and decompressed to float32 on sampling, with a copy-on-sample pattern to prevent in-place mutation of buffer entries.
+
+\subsection{Prioritised Replay Buffer}
+\label{sec:agent:replay:prioritised}
+
+The prioritised variant follows \cite{schaul2016per}, assigning sampling probability proportional to $|\delta_i|^\alpha$ ($\alpha = 0.6$). Importance-sampling weights $(N \cdot p_i)^{-\beta}$ correct the distribution bias, with $\beta$ annealing from 0.4 to 1.0 over 100{,}000 frames. Priorities are clamped to a finite maximum to prevent overflow from early-training TD errors.
+
+The buffer capacity is 3{,}000 transitions. This relatively small size reflects two constraints. First, each state tensor at float16 occupies approximately 2.3 megabytes, making large buffers memory-prohibitive. Second, terminal episodes produce highly correlated transitions within a single simulated day, and a small buffer ensures that outdated experience from previous curriculum stages is replaced quickly as the traffic intensity increases.
+
+\section{Training Algorithm}
+\label{sec:agent:training}
+
+\subsection{Double DQN with Target Network}
+\label{sec:agent:training:ddqn}
+
+The agent uses Double DQN (\cref{sec:bg:rl:dqn}) to reduce overestimation bias. The decoupling of action selection (online network) from evaluation (target network) is particularly important in the container terminal domain because the masked action space can create spurious high Q-values at boundary positions where only one or two actions are valid, amplifying the overestimation problem.
+
+The target network is updated via Polyak averaging (soft update) with coefficient $\tau = 0.005$ after every optimisation step. This provides smoother target evolution than periodic hard updates, which matters when the small replay buffer means the agent sees rapid distributional shift between curriculum stages. The soft update also avoids the instability spikes that hard target replacement can cause when the online network has drifted substantially between update intervals.
+
+\subsection{Exploration Strategy}
+\label{sec:agent:training:exploration}
+
+Epsilon-greedy exploration is used during training, with schedules adapted to each training phase: a fast decay (0.9 to 0.05 over 80 epochs) for the short tutorial episodes, and a per-stage reset (1.0 to 0.05 over 50{,}000 steps) during full simulation to enable renewed exploration under new traffic conditions. Because all exploration is constrained by validity masks (\cref{sec:state:masking}), every random action produces a meaningful transition so that the agent never wastes experience on impossible moves. The NoisyNet variant replaces epsilon-greedy with learned parametric noise, enabling state-dependent exploration that adapts to local state complexity.
+
+\subsection{Loss Function and Optimisation}
+\label{sec:agent:training:loss}
+
+The source head is trained with the standard smooth L1 (Huber) loss between the predicted Q-value of the taken source action and the bootstrapped target $r + \gamma (1 - d) \max_{a'} Q_\text{target}(s', a')$, using a discount factor of $\gamma = 0.99$ and $n$-step returns \cite{sutton1988td} with $n = 3$. The destination head uses an auxiliary loss formulation where it is trained as a reward predictor rather than a Q-value estimator. Its target is the immediate reward $r$ without bootstrapping, weighted at 0.5 relative to the source loss. This asymmetric design reflects the sequential decision structure. The source decision determines the trajectory (which entity to move), while the destination decision refines the immediate outcome (where to place it). Training the destination head on immediate rewards rather than bootstrapped returns prevents it from inheriting the source head's value estimation noise.
+
+The optimiser is Adam with a learning rate of $3 \times 10^{-4}$, batch size of 32, and gradient clipping at a maximum norm of 1.0. The total loss per update is $\mathcal{L} = \mathcal{L}_\text{src} + 0.5 \cdot \mathcal{L}_\text{dst}$. Up to 10 additional optimisation passes are performed at the end of each tutorial epoch, proportional to the number of transitions collected during that epoch, ensuring that the network extracts maximum learning from the small replay buffer. The full set of training hyperparameters is given in \cref{app:hyperparameters}.
+
+\Cref{alg:training_update} summarises the Double DQN parameter update with the asymmetric source--destination loss.
+
+\begin{algorithm}[H]
+\caption{Double DQN Training Update (Single Batch)}
+\label{alg:training_update}
+\DontPrintSemicolon
+\KwIn{Replay buffer $\mathcal{B}$, online network $Q_\theta$, target network $Q_{\theta^-}$, batch size $B$, discount $\gamma$, Polyak coefficient $\tau$, $n$-step horizon $n$}
+
+Sample batch $\{(s_i, a^\text{src}_i, a^\text{dst}_i, r_i, R^{(n)}_i, s'_i, d_i)\}_{i=1}^{B} \sim \mathcal{B}$\;
+
+\BlankLine
+\tcp{Source head: Double DQN with $n$-step returns}
+$a^*_i \leftarrow \arg\max_a\, Q_\theta^\text{src}(s'_i,\, a)$ \tcp*{online selects}
+$y_i^\text{src} \leftarrow R^{(n)}_i + \gamma^n (1 - d_i)\, Q_{\theta^-}^\text{src}(s'_i,\, a^*_i)$ \tcp*{target evaluates}
+$\mathcal{L}_\text{src} \leftarrow \frac{1}{B} \sum_i w_i \cdot \text{SmoothL1}\!\bigl(Q_\theta^\text{src}(s_i, a_i^\text{src}),\; y_i^\text{src}\bigr)$\;
+
+\BlankLine
+\tcp{Destination head: immediate-reward auxiliary loss}
+$y_i^\text{dst} \leftarrow r_i$ \tcp*{no bootstrapping}
+$\mathcal{L}_\text{dst} \leftarrow \frac{1}{B} \sum_i w_i \cdot \text{SmoothL1}\!\bigl(Q_\theta^\text{dst}(s_i, a_i^\text{src}, a_i^\text{dst}),\; y_i^\text{dst}\bigr)$\;
+
+\BlankLine
+$\mathcal{L} \leftarrow \mathcal{L}_\text{src} + 0.5 \cdot \mathcal{L}_\text{dst}$\;
+$\theta \leftarrow \theta - \alpha \cdot \text{Adam}(\nabla_\theta \mathcal{L})$ \tcp*{gradient clipped at norm 1.0}
+$\theta^- \leftarrow \tau\, \theta + (1 - \tau)\, \theta^-$ \tcp*{Polyak soft update}
+Update priorities $|\delta_i|$ in $\mathcal{B}$\;
+\end{algorithm}
+
+\section{Architecture Variants for Comparison}
+\label{sec:agent:variants}
+
+To evaluate the sensitivity of training performance to CNN capacity, six backbone variants are defined that differ in depth, channel width, and structural features (e.g.\ skip connections, per-region convolutions). All variants share the same two-head factored structure, the same masking logic, and the same training hyperparameters. This controlled variation allows the tutorial screening phase described in \cref{sec:curr:screening} to isolate the effect of backbone capacity on learnability, independent of other design choices. The full specification of all six backbones, including parameter counts, is given in \cref{sec:exp:architectures:cnn}.
+
+The development history of the architecture, including the eight versions explored over ten months and the lessons they yielded, is discussed in \cref{sec:disc:architecture_evolution}.
+
+\section{Recurrent Variant: GRU-Augmented Global Features}
+\label{sec:agent:gru}
+
+A recurrent variant of the architecture inserts a Gated Recurrent Unit (GRU) \cite{cho2014gru} between the occupied pooling layer and the action heads, providing temporal context across sequential decisions within an episode. The motivation is to address the plan-persistence limitation of the feedforward architecture: without memory of previous actions, the agent cannot encode ongoing operational context such as ``I am restacking to access a specific container'' across decision steps.
+
+The \texttt{RecurrentQNetwork} extends the base network with three additional layers. A \texttt{GRUCell} with input size 128 (matching the global feature dimension) and hidden size 64 processes the pooled global feature vector at each step, producing a compressed temporal summary. A linear projection maps the 64-dimensional hidden state back to 128 dimensions, and a LayerNorm stabilises the projected output. The resulting temporal feature vector replaces the static global feature in the destination head's query construction, so that destination Q-values are conditioned on the agent's recent action history. The source head operates directly on the spatial feature map and is not affected by the recurrent path.
+
+The recurrent variant uses an \emph{inference-only} training strategy. During online action selection, the hidden state is initialised to zeros at each episode boundary and updated at every decision step, providing a running temporal context that persists across the episode. During training, transitions are sampled independently from the replay buffer (not as sequences), and the hidden state is set to \texttt{None}, causing the network to fall back to the standard feedforward path. This design avoids the complexity of sequence replay buffers and backpropagation through time while still allowing the GRU to provide temporal context at inference. The GRU weights receive gradient signal only through the online action selection path, not through the TD loss.
+
+The parameter overhead is moderate: the GRUCell contributes approximately 37K parameters, the linear projection 8.3K, and the LayerNorm 256, totalling approximately 45.8K additional parameters --- a 33\% increase over the baseline's ${\sim}141$K. The hidden state occupies only $(1, 64)$ floats per agent, adding negligible memory overhead.

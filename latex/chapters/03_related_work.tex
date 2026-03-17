@@ -1,0 +1,76 @@
+% chapters/03_related_work.tex
+\chapter{Related Work}
+\label{ch:related}
+
+This chapter surveys the most relevant prior work across four areas: operations research for container terminal optimisation, reinforcement learning for container terminal operations, CNN-based spatial state representations in RL, and curriculum learning for RL. It concludes by identifying the research gap that this thesis addresses.
+
+\section{Operations Research at Container Terminals}
+\label{sec:rw:or}
+
+The dominant approach to container terminal optimisation has historically been operations research. \textcite{vis2003transshipment} classify the decision problems that arise at container terminals --- berth allocation, crane scheduling, vehicle dispatching, and stacking --- and survey the quantitative models available for each. They identify the joint vehicle-scheduling-location problem as NP-hard \cite{bish2001dispatching} and note that most practical approaches rely on decomposition heuristics rather than exact methods. \textcite{stahlbock2008operations} provide a comprehensive literature update on container terminal optimisation, organising the work by subsystem (berth allocation, storage and stacking logistics, horizontal transport) and by solution methodology (analytical models, simulation, heuristics). Both surveys conclude that integrative approaches addressing multiple terminal subsystems simultaneously remain rare, with most work targeting a single sub-problem in isolation.
+
+For rail--road terminals specifically, \textcite{boysen2013container} survey the decision problems arising in railway yards: train scheduling (assigning trains to tracks), parking position assignment (positioning containers in the yard), load planning (positioning containers on outbound trains), crane-area assignment, and crane sequencing. They distinguish direct moves (container transferred straight from train to truck) from split moves (routed through intermediate storage) and note that the operational process must address all five sub-problems jointly. The existing OR literature, however, treats them independently, using mixed-integer programming for storage and loading decisions and heuristic rules for crane scheduling. No prior OR approach solves all five jointly, which is the gap that the DRL agent in this thesis attempts to fill with a single learned policy.
+
+\section{Reinforcement Learning for Container Terminals}
+\label{sec:rw:rl}
+
+\textcite{lai2024rl} provide a bibliometric analysis of 1{,}030 RL papers in transportation research (1996--2023), categorising them into seven application areas. Freight transportation accounts for only 5\% of the total, far behind vehicle motion planning (28\%), energy-efficient driving (20\%), and adaptive traffic signal control (19\%). Within the freight category, most work addresses autonomous ship or autonomous train path tracking rather than terminal-internal container handling. The survey identifies DQN as the most commonly used algorithm for discrete action spaces in transportation, supporting the algorithm family choice in this thesis, and highlights the sim-to-real gap as a key open challenge.
+
+\textcite{colak2025rl} provide a more focused survey of 71 studies applying RL specifically to container terminal operations. The surveyed work spans berth allocation, quay crane scheduling, yard management, and horizontal transport. The majority of approaches use tabular Q-learning or simple policy gradient methods, and nearly all address a single operational sub-problem in isolation. The survey identifies a lack of work on jointly optimising multiple terminal operations within a single agent and highlights inland intermodal terminals as underrepresented compared to maritime ports.
+
+\textcite{jin2024container} apply deep RL to truck dispatching in a container port, using a spatial-attention-based agent trained via a Real2Sim pipeline grounded in real port data. Their work demonstrates that DRL can handle the stochastic, real-time nature of vehicle dispatching in a terminal setting, but their scope is limited to a single operational task (truck assignment) rather than the joint crane--truck--train coordination addressed in this thesis.
+
+In the broader logistics domain, \textcite{nazari2018vrp} apply RL with an attention-based encoder to the capacitated vehicle routing problem, removing the recurrent component of the original Pointer Network in favour of a simpler element-wise embedding. Their work demonstrates that end-to-end RL can match or exceed classical heuristics on combinatorial logistics tasks. The use of a learned encoder over spatial inputs is conceptually similar to the CNN-based state representation developed here, though their domain lacks the stacking and restacking dynamics that characterise container yards.
+
+\section{Spatial State Representations in RL}
+\label{sec:rw:cnn}
+
+The use of CNNs as spatial feature extractors for RL was established by \textcite{mnih2015dqn}, who demonstrated human-level Atari performance by processing raw pixel frames through convolutional layers. AlphaGo \cite{silver2016go} extended this principle to a structured board game, encoding the $19 \times 19$ Go board as a multi-channel spatial tensor where each channel represents a different game-state feature (stone positions, liberties, capture history). The CNN then extracts spatial patterns that inform both policy and value prediction.
+
+The container terminal state representation developed in this thesis follows the same multi-channel spatial paradigm. Rather than pixels or board positions, each channel encodes a semantic yard attribute (occupancy, container type, departure urgency, demand) at every spatial position across a 3D grid of rows, bays, and tiers (\cref{ch:state}). The key architectural difference is the use of 3D convolutions \cite{ji20133dcnn} to capture the volumetric stacking structure, whereas Atari and Go use 2D convolutions over flat grids.
+
+\section{DQN Algorithm Variants}
+\label{sec:rw:dqn}
+
+Since the original DQN, several algorithmic improvements have been proposed. Double DQN \cite{hasselt2016ddqn} reduces overestimation bias. Prioritised experience replay \cite{schaul2016per} focuses training on surprising transitions. Dueling networks \cite{wang2016dueling} separate state-value and advantage estimation. NoisyNet \cite{fortunato2018noisy} replaces $\varepsilon$-greedy exploration with learned parametric noise. QR-DQN \cite{dabney2018distributional} and IQN \cite{dabney2018implicit} model the full return distribution. Munchausen DQN \cite{vieillard2020munchausen} adds a scaled log-policy bonus to the reward, implicitly regularising the policy. Spectral normalisation \cite{miyato2018spectral}, originally proposed for GANs, constrains weight matrix norms and has been adopted in RL to stabilise training.
+
+\textcite{hessel2018rainbow} combine six of these extensions into a single Rainbow agent and perform ablation studies showing that no single extension dominates across all Atari games. This finding motivates the empirical variant screening conducted in this thesis (\cref{ch:experiments}), where seven algorithm variants are evaluated on the domain-specific tutorial curriculum rather than relying on benchmark rankings from unrelated domains.
+
+\section{Curriculum Learning in RL}
+\label{sec:rw:curriculum}
+
+\textcite{bengio2009curriculum} introduced curriculum learning as a training strategy that presents examples in order of increasing difficulty. \textcite{narvekar2020curriculum} survey its application to RL, categorising approaches by how the curriculum is generated (hand-designed vs.\ automatic), what is sequenced (tasks, environments, reward shaping), and how transfer between stages is achieved. They note that hand-designed curricula are effective when domain knowledge is available to define a meaningful difficulty ordering, which is the case for container terminal operations where atomic moves are strictly simpler than multi-step logistics chains.
+
+More recent work has explored automatic curriculum generation, where the training environment co-evolves with the agent. Prioritised Level Replay \cite{jiang2021plr} selectively revisits training levels based on estimated learning potential, while adversarial environment design methods generate progressively harder configurations without manual specification. These approaches are most effective in domains with parametric environment generators (e.g.\ procedural maze generation), where the difficulty space is continuous and high-dimensional. In contrast, the container terminal domain has a small, discrete set of operationally meaningful task types (nine move types, each with clear prerequisites), making a hand-designed curriculum both feasible and interpretable. The curriculum in this thesis is hand-designed with 33 scenarios across 14 difficulty tiers (\cref{ch:curriculum}), leveraging domain knowledge to define a difficulty ordering that mirrors real operational training. It additionally serves as an architecture screening tool, exploiting the correlation between tutorial learnability and full-simulation performance to reduce the computational cost of architecture search.
+
+\section{Research Gap}
+\label{sec:rw:gap}
+
+The central question of this thesis --- whether joint terminal control is learnable by a single DRL agent (\cref{sec:intro:rqs}) --- is unanswered by any prior work. \Cref{tab:rw:gap} summarises the positioning. The OR surveys \cite{vis2003transshipment,stahlbock2008operations,boysen2013container} document extensive work on individual terminal sub-problems but no integrated solution. Recent DRL work has begun addressing individual terminal sub-problems: \textcite{jin2023stacking} apply self-attention-based DRL to container stacking optimisation, \textcite{li2023twin} use DRL with dynamic masked self-attention for twin automated stacking crane scheduling, and \textcite{jin2024container} combine Real2Sim transfer with DRL for truck dispatching. On the integration front, \textcite{naeem2023integrated} provide a comprehensive review of joint quay crane, AGV, and yard crane scheduling, while \textcite{xu2021integrated} combine RL-based hyper-heuristics with genetic algorithms for multi-equipment scheduling. However, all of these address maritime port operations, and none jointly optimises crane scheduling, truck parking, and train loading with a single agent.
+
+The RL surveys \cite{lai2024rl,colak2025rl} confirm that freight terminal RL remains a nascent area (5\% of RL-transport publications) and that joint multi-task optimisation has not been attempted for inland terminals. No prior work uses a volumetric CNN encoding for inland terminal state representation, and no prior approach employs a tiered tutorial curriculum both for agent training and architecture screening in this domain. The curriculum design is directly motivated by this gap: by decomposing the joint problem into learnable sub-tasks and then recombining them, the curriculum tests whether compositional mastery of sub-problems translates into joint-problem competence.
+
+\begin{table}[H]
+  \centering
+  \caption{Positioning of this thesis relative to prior work. Checkmarks indicate features present in each approach.}
+  \label{tab:rw:gap}
+  \begin{tabular}{@{} l c c c c @{}}
+    \toprule
+    & \textbf{Joint ops} & \textbf{CNN state} & \textbf{Curriculum} & \textbf{Inland} \\
+    \midrule
+    \textcite{vis2003transshipment}    & --   & --   & --   & -- \\
+    \textcite{stahlbock2008operations} & --   & --   & --   & -- \\
+    \textcite{boysen2013container}     & --   & --   & --   & \checkmark \\
+    \textcite{colak2025rl} (survey)    & --   & --   & --   & partial \\
+    \textcite{lai2024rl} (survey)      & --   & --   & --   & -- \\
+    \textcite{jin2024container}        & --   & \checkmark & --   & -- \\
+    \textcite{jin2023stacking}         & --   & \checkmark & --   & -- \\
+    \textcite{li2023twin}              & --   & \checkmark & --   & -- \\
+    \textcite{naeem2023integrated}     & partial & --   & --   & -- \\
+    \textcite{xu2021integrated}        & partial & --   & --   & -- \\
+    \textcite{nazari2018vrp}           & --   & --   & --   & -- \\
+    \textcite{mnih2015dqn}             & n/a  & \checkmark & --   & n/a \\
+    \textbf{This thesis}               & \checkmark & \checkmark & \checkmark & \checkmark \\
+    \bottomrule
+  \end{tabular}
+\end{table}

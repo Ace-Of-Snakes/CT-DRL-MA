@@ -1,0 +1,198 @@
+% terminal_layout.tex — Bird's-eye schematic of the container terminal
+% Standalone TikZ figure, \input from Ch.4
+
+% ── Colour definitions ──
+\definecolor{SteelBlue}{HTML}{4682B4}
+\definecolor{Crimson}{HTML}{DC143C}
+\definecolor{TruckOrange}{HTML}{FF8C00}
+\definecolor{RailBg}{HTML}{DBEAF9}
+\definecolor{ParkBg}{HTML}{E8F5E9}
+\definecolor{YardBg}{HTML}{FFF8E1}
+\definecolor{QueueBg}{HTML}{F3E5F5}
+\definecolor{ReeferZone}{HTML}{B3D9FF}
+\definecolor{DGZone}{HTML}{FFECB3}
+\definecolor{OverlapAmber}{HTML}{FFE0B2}
+
+\begin{tikzpicture}[
+    x=0.26cm, y=0.6cm,
+    font=\footnotesize,
+    every node/.style={inner sep=1pt},
+    container20/.style={fill=SteelBlue, draw=SteelBlue!70!black,
+        minimum height=0.38cm, minimum width=2.6cm, inner sep=0pt},
+    container40/.style={fill=Crimson!85, draw=Crimson!70!black,
+        minimum height=0.38cm, minimum width=5.2cm, inner sep=0pt},
+    truck/.style={fill=TruckOrange!80, draw=TruckOrange!60!black,
+        minimum height=0.32cm, minimum width=1.56cm, inner sep=0pt,
+        rounded corners=1pt},
+    train/.style={fill=gray!45, draw=gray!65!black,
+        minimum height=0.38cm, minimum width=10.4cm, inner sep=0pt},
+]
+
+% ── Dimensions ──
+\def\nbays{58}
+\def\baystart{0}
+
+% ══════════════════════════════════════════════════════════════════
+% Background region bands
+% ══════════════════════════════════════════════════════════════════
+
+% Rail region (rows 0–6, y inverted: row 0 at top)
+\fill[RailBg, rounded corners=2pt] (\baystart,-0.5) rectangle (\nbays,-6.5);
+
+% Parking region (row 7)
+\fill[ParkBg, rounded corners=2pt] (\baystart,-7.0) rectangle (\nbays,-8.0);
+
+% Yard region (rows 8–12)
+\fill[YardBg, rounded corners=2pt] (\baystart,-8.5) rectangle (\nbays,-12.5);
+
+% Queue region (rows 13–14)
+\fill[QueueBg, rounded corners=2pt] (\baystart,-13.0) rectangle (\nbays,-14.5);
+
+% ── Special yard zones ──
+% Reefer zones (outer bays, yard rows only)
+\fill[ReeferZone, opacity=0.30] (0,-8.5) rectangle (8,-12.5);
+\fill[ReeferZone, opacity=0.30] (50,-8.5) rectangle (58,-12.5);
+
+% Dangerous goods zone (centre, yard rows only)
+\fill[DGZone, opacity=0.35] (24,-8.5) rectangle (34,-12.5);
+
+% ══════════════════════════════════════════════════════════════════
+% Crane zones (dashed outlines)
+% ══════════════════════════════════════════════════════════════════
+
+% Overlap zone (draw first, behind crane outlines)
+\fill[OverlapAmber, opacity=0.25] (26.5,-0.5) rectangle (30.5,-14.5);
+
+% Crane 1 zone (bays 0–30)
+\draw[SteelBlue, dashed, line width=0.8pt, rounded corners=3pt]
+    (-0.5, 0.0) rectangle (30.5, -14.8);
+\node[SteelBlue, font=\footnotesize\bfseries, anchor=south] at (15, 0.0) {Crane 1};
+
+% Crane 2 zone (bays 27–58)
+\draw[Crimson!80, dashed, line width=0.8pt, rounded corners=3pt]
+    (26.5, 0.0) rectangle (58.5, -14.8);
+\node[Crimson!80, font=\footnotesize\bfseries, anchor=south] at (42, 0.0) {Crane 2};
+
+% Overlap label
+\node[font=\scriptsize, text=TruckOrange!70!black, rotate=90, anchor=south]
+    at (28.5,-6.5) {4-bay overlap};
+
+% ══════════════════════════════════════════════════════════════════
+% Row grid lines
+% ══════════════════════════════════════════════════════════════════
+
+% Rail track lines
+\foreach \r in {0,...,6} {
+    \draw[gray!25] (\baystart, -\r-0.5) -- (\nbays, -\r-0.5);
+}
+
+% Yard row lines
+\foreach \r in {8,...,12} {
+    \draw[gray!20] (\baystart, -\r-0.5) -- (\nbays, -\r-0.5);
+}
+
+% ══════════════════════════════════════════════════════════════════
+% Region labels (right side)
+% ══════════════════════════════════════════════════════════════════
+\node[anchor=west, font=\footnotesize\itshape, text=gray!70!black]
+    at (59.5, -3.5) {Rail};
+\node[anchor=west, font=\scriptsize, text=gray!60!black]
+    at (59.5, -4.2) {rows 0\,--\,6};
+\node[anchor=west, font=\footnotesize\itshape, text=gray!70!black]
+    at (59.5, -7.5) {Parking};
+\node[anchor=west, font=\scriptsize, text=gray!60!black]
+    at (59.5, -8.1) {row 7};
+\node[anchor=west, font=\footnotesize\itshape, text=gray!70!black]
+    at (59.5, -10.5) {Yard};
+\node[anchor=west, font=\scriptsize, text=gray!60!black]
+    at (59.5, -11.2) {rows 8\,--\,12};
+\node[anchor=west, font=\footnotesize\itshape, text=gray!70!black]
+    at (59.5, -13.5) {Queue};
+\node[anchor=west, font=\scriptsize, text=gray!60!black]
+    at (59.5, -14.1) {rows 13\,--\,14};
+
+% ══════════════════════════════════════════════════════════════════
+% Example entities
+% ══════════════════════════════════════════════════════════════════
+
+% Trains on tracks (grey bars)
+\node[train] at (15, -1) {};
+\node[train, minimum width=9.1cm] at (40, -3) {};
+\node[train, minimum width=7.8cm] at (12, -5) {};
+
+% Containers on trains
+\node[container40, minimum height=0.28cm] at (10, -1) {};
+\node[container20, minimum height=0.28cm] at (23, -1) {};
+\node[container40, minimum height=0.28cm] at (35, -3) {};
+\node[container20, minimum height=0.28cm] at (45, -3) {};
+\node[container20, minimum height=0.28cm] at (8, -5) {};
+
+% Trucks in parking (with containers)
+\node[truck] at (8, -7.5) {};
+\node[container20, minimum height=0.22cm, minimum width=1.3cm] at (8, -7.5) {};
+\node[truck] at (35, -7.5) {};
+\node[truck] at (50, -7.5) {};
+\node[container20, minimum height=0.22cm, minimum width=1.3cm] at (50, -7.5) {};
+
+% Containers in yard
+\node[container40] at (4, -9) {};
+\node[container20] at (16, -9) {};
+\node[container40] at (22, -10) {};
+\node[container20] at (38, -9) {};
+\node[container40] at (44, -10) {};
+\node[container20] at (53, -9) {};
+\node[container20] at (14, -11) {};
+\node[container40] at (30, -11) {};
+\node[container40] at (48, -11) {};
+
+% Trucks in queue (lighter)
+\node[truck, fill=TruckOrange!45] at (10, -13.75) {};
+\node[truck, fill=TruckOrange!45] at (25, -13.75) {};
+\node[truck, fill=TruckOrange!45] at (45, -13.75) {};
+
+% ══════════════════════════════════════════════════════════════════
+% Bay axis
+% ══════════════════════════════════════════════════════════════════
+\draw[-Stealth, gray!50] (0,-15.5) -- (58,-15.5);
+\node[font=\footnotesize, gray!70!black, anchor=north] at (29,-15.5) {Bay};
+\foreach \b in {0,10,20,30,40,50,57} {
+    \draw[gray!40] (\b,-15.3) -- (\b,-15.7);
+    \node[font=\tiny, gray!60!black, anchor=north] at (\b,-15.7) {\b};
+}
+
+% ══════════════════════════════════════════════════════════════════
+% Legend (below the figure, horizontal)
+% ══════════════════════════════════════════════════════════════════
+\begin{scope}[shift={(0,-17.0)}]
+    % Row 1
+    \node[container20, minimum width=0.6cm, minimum height=0.22cm,
+        anchor=west] at (0,0) {};
+    \node[font=\scriptsize, anchor=west] at (1.0,0) {20\,ft};
+
+    \node[container40, minimum width=1.0cm, minimum height=0.22cm,
+        anchor=west] at (6,0) {};
+    \node[font=\scriptsize, anchor=west] at (7.3,0) {40\,ft};
+
+    \node[train, minimum width=1.2cm, minimum height=0.22cm,
+        anchor=west] at (13,0) {};
+    \node[font=\scriptsize, anchor=west] at (14.5,0) {Train};
+
+    \node[truck, minimum width=0.6cm, minimum height=0.22cm,
+        anchor=west] at (20,0) {};
+    \node[font=\scriptsize, anchor=west] at (21.0,0) {Truck};
+
+    % Row 2 — zones
+    \fill[ReeferZone, opacity=0.30] (0,-0.55) rectangle (0.6,-0.85);
+    \draw[ReeferZone!60!black, opacity=0.4] (0,-0.55) rectangle (0.6,-0.85);
+    \node[font=\scriptsize, anchor=west] at (1.0,-0.7) {Reefer};
+
+    \fill[DGZone, opacity=0.35] (6,-0.55) rectangle (6.6,-0.85);
+    \draw[DGZone!60!black, opacity=0.4] (6,-0.55) rectangle (6.6,-0.85);
+    \node[font=\scriptsize, anchor=west] at (7.0,-0.7) {Dangerous goods};
+
+    \fill[OverlapAmber, opacity=0.25] (20,-0.55) rectangle (20.6,-0.85);
+    \draw[TruckOrange!50!black, opacity=0.3] (20,-0.55) rectangle (20.6,-0.85);
+    \node[font=\scriptsize, anchor=west] at (21.0,-0.7) {Crane overlap};
+\end{scope}
+
+\end{tikzpicture}

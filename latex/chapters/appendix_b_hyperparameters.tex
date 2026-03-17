@@ -1,0 +1,103 @@
+% chapters/appendix_b_hyperparameters.tex
+\chapter{Hyperparameter Reference}
+\label{app:hyperparameters}
+
+\section{Environment Parameters}
+\label{app:hyper:env}
+
+\begin{table}[H]
+\centering
+\caption{Terminal simulation parameters.}
+\label{tab:hyper:env}
+\begin{tabular}{l l l}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+Yard rows           & 5      & Storage block rows \\
+Yard bays           & 58     & Storage block bays \\
+Yard tiers          & 5      & Maximum stacking height \\
+Split factor        & 20     & Sub-bay resolution \\
+Rail tracks         & 7      & Number of rail tracks \\
+Parking bays        & 58     & Parking area bays \\
+Num cranes          & 2      & RMGC crane count \\
+Crane zone overlap  & 4 bays & Zone boundary overlap \\
+Day end             & 23:59  & Simulation day boundary \\
+Idle tick           & 30s    & Time advance on idle step \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Agent Hyperparameters}
+\label{app:hyper:agent}
+
+\begin{table}[H]
+\centering
+\caption{DQN agent hyperparameters.}
+\label{tab:hyper:agent}
+\begin{tabular}{l l l}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+Learning rate       & $3 \times 10^{-4}$ & Adam optimiser \\
+Batch size          & 32     & Replay sampling \\
+Replay buffer size  & 3{,}000 & Maximum transitions \\
+Target update $\tau$ & 0.005  & Soft (Polyak) target update \\
+Discount factor     & 0.99   & $\gamma$ \\
+$\varepsilon$ start & 1.0    & Initial exploration rate \\
+$\varepsilon$ end   & 0.05   & Minimum exploration rate \\
+$\varepsilon$ decay steps & 50{,}000 & Linear decay schedule \\
+Gradient clip       & 1.0    & Max gradient norm \\
+N-step returns      & 3      & Multi-step TD target \\
+Double DQN          & Yes    & Action selection from online net \\
+Dest. auxiliary weight & 0.5 & Weight for destination loss \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Curriculum Parameters}
+\label{app:hyper:curriculum}
+
+\begin{table}[H]
+\centering
+\caption{Curriculum training parameters.}
+\label{tab:hyper:curriculum}
+\begin{tabular}{l l l}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+Max tutorial epochs  & 800    & Per architecture candidate \\
+Early stop epoch     & 120    & Stop if stuck at Tier~$\leq 2$ \\
+Runs per scenario    & 1      & Attempts per scenario per epoch \\
+Mastery threshold    & 90\%   & Pass rate to advance tier \\
+Rolling window       & 20     & Epochs for pass rate average \\
+Min epochs per tier  & 10     & Before tier advancement \\
+Maintenance interval & 3      & Epochs between tier revisits \\
+Num tiers            & 13     & Stages~1--2 difficulty levels (14 with Stage~3) \\
+Num scenarios        & 31     & Stages~1--2 scenarios (33 with Stage~3) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Variant-Specific Hyperparameters}
+\label{app:hyper:variants}
+
+\begin{table}[H]
+\centering
+\caption{Hyperparameters specific to DQN algorithm variants.}
+\label{tab:hyper:variants}
+\begin{tabular}{l l l}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+\multicolumn{3}{l}{\textit{Munchausen DQN}} \\
+$\alpha$ (scaling)     & 0.9    & Log-policy scaling factor \\
+$\tau$ (temperature)   & 0.03   & Softmax temperature \\
+Clip                   & $-1.0$ & Log-policy clamp lower bound \\
+\midrule
+\multicolumn{3}{l}{\textit{NoisyNet}} \\
+$\sigma_0$             & 0.5    & Initial noise standard deviation \\
+$\sigma_{\min}$        & 0.1    & Minimum noise after annealing \\
+Decay epochs           & 60     & Linear noise annealing period \\
+\bottomrule
+\end{tabular}
+\end{table}

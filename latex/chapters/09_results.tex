@@ -1,0 +1,495 @@
+% chapters/09_results.tex
+\chapter{Results}
+\label{ch:results}
+
+This chapter presents the results of both evaluation phases described in \cref{ch:experiments}. \Cref{sec:res:phase1} reports the three-stage tutorial screening (RQ1, RQ3), including a multi-seed escape velocity experiment that distinguishes systematic from stochastic architectural failures. \Cref{sec:res:phase2} reports the controlled scalability evaluation (RQ2).
+
+% ====================================================================
+\section{Phase 1: Tutorial Screening Results}
+\label{sec:res:phase1}
+% ====================================================================
+
+Phase~1 answers RQ1 and RQ3 simultaneously: the three-stage screening reveals which architectures can learn the joint terminal coordination problem, and the factored design isolates each component's contribution.
+
+\subsection{Stage 1: DQN Algorithm Comparison}
+\label{sec:res:phase1:dqn}
+
+Seven DQN algorithm variants were trained on the tutorial curriculum using the baseline CNN backbone. \Cref{tab:res:dqn_summary} summarises the outcome of each run.
+
+\begin{table}[H]
+  \centering
+  \caption{Stage~1 results: DQN algorithm variants ranked by epochs to mastery. All variants use the baseline CNN backbone (${\sim}141$K parameters). ``Tier'' indicates the highest tier mastered within the 800-epoch budget. Variants that failed to progress beyond Tier~2 by epoch 120 were early-stopped.}
+  \label{tab:res:dqn_summary}
+  \begin{tabular}{@{} l r l r r r @{}}
+    \toprule
+    \textbf{Variant} & \textbf{Epochs} & \textbf{Mastered} & \textbf{Tier} & \textbf{Avg Rate} & \textbf{Wall (s)} \\
+    \midrule
+    Munchausen     & 317 & Yes & 13/13 & 97.7\% & 1{,}649 \\
+    Baseline       & 320 & Yes & 13/13 & 98.9\% & 1{,}561 \\
+    Spectral Norm  & 343 & Yes & 13/13 & 99.2\% & 1{,}627 \\
+    NoisyNet       & 522 & Yes & 13/13 & 97.4\% & 6{,}877 \\
+    \midrule
+    Dueling        & 120 & No  & 0/13  & 8.4\%  & 624 \\
+    QR-DQN         & 120 & No  & 0/13  & 9.7\%  & 596 \\
+    IQN            & 120 & No  & 0/13  & 9.7\%  & 758 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The results (\cref{tab:res:dqn_summary,fig:res:dqn_epochs}) show an apparent binary outcome: four variants achieve full mastery while three are early-stopped at Tier~0. The top three (Munchausen, Baseline, Spectral Norm) form a tight cluster within 26 epochs of each other, while NoisyNet is a clear outlier at 522 epochs --- indicating substantial sensitivity to the training algorithm even with identical network architecture. However, the escape velocity experiment (\cref{sec:res:variance:escape}) reveals that this binary classification is incomplete: IQN escapes Tier~0 in 9 of 10 multi-seed runs and QR-DQN in 2 of 10, so their single-seed failures were at least partially stochastic. Only Dueling fails on all 10 seeds.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{variant_epochs}
+  \caption{Epochs to mastery for all seven DQN algorithm variants. Green bars indicate full mastery; red bars indicate early-stopped variants that failed to progress beyond Tier~2 by epoch 120. Munchausen achieves the fastest convergence at 317 epochs.}
+  \label{fig:res:dqn_epochs}
+\end{figure}
+
+\subsubsection{Per-Scenario Analysis}
+
+\Cref{fig:res:dqn_heatmap} shows the per-scenario pass rates. The four successful variants achieve near-perfect scores across all tiers; the primary differentiator is S21 (\texttt{full\_mini\_day}), which requires all logistics skills simultaneously and drops to 70\% for both Munchausen and NoisyNet. On the single seed, all three failed variants stall at S4 (\texttt{yard\_to\_train}), suggesting a uniform cross-region failure --- but the escape velocity data (\cref{sec:res:variance:escape}) reveals that each variant fails on a \emph{different} primitive: Dueling on S3, QR-DQN on S4, and IQN only occasionally on S4.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{variant_heatmap}
+  \caption{Per-scenario pass rates for all seven DQN variants. Rows represent variants (ordered by convergence speed); columns represent the 31 tutorial scenarios (S1--S31). Green indicates high pass rates; red indicates failure. The three unsuccessful variants all stall at S4 (\texttt{yard\_to\_train}).}
+  \label{fig:res:dqn_heatmap}
+\end{figure}
+
+\subsubsection{Selection for Stage 2}
+
+All four successful variants are selected for Stage~2, following the binary mastery criterion from \cref{sec:exp:phase1:selection}.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Variance Estimation: Escape Velocity}
+\label{sec:res:variance}
+
+Before proceeding to the backbone comparison, we address the single-seed limitation of Stage~1 using the escape velocity protocol described in \cref{sec:exp:phase1:variability}: each of the seven DQN variants is trained for 100~epochs on Tier~0 only (S1--S4) across 10~replicate runs, with variance arising solely from GPU non-determinism (\cref{sec:exp:reproducibility}).
+
+\begin{table}[H]
+  \centering
+  \caption{Escape velocity results: 10-run Tier~0 escape rates per DQN variant. Each run trains for 100 epochs on the four primitive scenarios (S1--S4) with the baseline CNN backbone. All runs use seed~42; variance arises from GPU non-determinism. ``S3'' and ``S4'' columns report median pass rate with [min--max] range across the 10 runs.}
+  \label{tab:res:escape_rates}
+  \begin{tabular}{@{} l r r r r @{}}
+    \toprule
+    \textbf{Variant} & \textbf{Escaped} & \textbf{Escape Rate} & \textbf{S3 (\%)} & \textbf{S4 (\%)} \\
+    \midrule
+    Baseline       & 10/10 & 100\% & 90 [90--90] & 98 [95--100] \\
+    Munchausen     & 10/10 & 100\% & 90 [90--100] & 98 [90--100] \\
+    Spectral Norm  & 10/10 & 100\% & 90 [90--100] & 95 [90--100] \\
+    NoisyNet       & 10/10 & 100\% & 90 [90--100] & 95 [90--100] \\
+    \midrule
+    IQN            &  9/10 &  90\% & 100 [90--100] & 90 [30--100] \\
+    QR-DQN         &  2/10 &  20\% & 50 [0--100] & 0 [0--90] \\
+    Dueling        &  0/10 &   0\% & 35 [0--85] & 93 [15--100] \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{escape_velocity_rates}
+  \caption{Tier~0 escape rates across 10 runs per DQN variant. The four robust variants (Baseline, Munchausen, Spectral Norm, NoisyNet) achieve 100\% escape. IQN escapes in 90\% of runs, QR-DQN in 20\%, and Dueling never escapes.}
+  \label{fig:res:escape_rates}
+\end{figure}
+
+\subsubsection{The Primitives Gateway}
+\label{sec:res:variance:escape}
+
+The results in \cref{tab:res:escape_rates} reveal a more nuanced picture than the binary pass/fail classification suggested by the single-seed screening. The seven DQN variants separate into three tiers of reliability:
+
+\begin{enumerate}
+  \item \textbf{Robust} (100\% escape): Baseline, Munchausen, Spectral Norm, and NoisyNet escape Tier~0 in all 10 runs with tight ranges (S3 and S4 both $\geq 90\%$ on every run). These algorithms reliably learn cross-region spatial coordination within 100 epochs regardless of GPU non-determinism.
+
+  \item \textbf{Fragile} (20--90\% escape): IQN and QR-DQN can learn the cross-region primitives but fail stochastically. IQN is surprisingly strong: it achieves a median of 100\% on S3 (\texttt{yard\_to\_truck}) but occasionally drops S4 (\texttt{yard\_to\_train}) to 30\%, causing 1-in-10 escape failure. QR-DQN is bimodal on S3 (individual runs either achieve 100\% or 0\%) and consistently weak on S4 (median 0\%, range 0--90\%), escaping only 2 of 10 times.
+
+  \item \textbf{Incompatible} (0\% escape): Dueling never escapes on any run. Its bottleneck is S3 (\texttt{yard\_to\_truck}, median 35\%, range 0--85\%) rather than S4, which it partially learns (median 93\%). The advantage decomposition $Q(s,a) = V(s) + A(s,a) - \overline{A}$ is structurally incompatible with the high-dimensional spatial action space: the mean-advantage subtraction over ${\sim}21{,}750$ spatial positions (most masked to $-\infty$) disrupts the fine-grained positional discrimination needed for cross-region moves.
+\end{enumerate}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{escape_velocity_s3_s4_boxplot}
+  \caption{Distribution of cross-region primitive pass rates across 10 runs per variant. Green boxes indicate variants that escape at least once; red indicates Dueling (0\% escape). The orange dashed line marks the 90\% mastery threshold. The boxplots reveal that each failing variant has a \emph{different} bottleneck: Dueling on S3, QR-DQN on S4, and IQN occasionally on S4.}
+  \label{fig:res:s3s4_boxplot}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.75\textwidth]{escape_velocity_scatter}
+  \caption{Each point represents one training run, plotted by its S3 (\texttt{yard\_to\_truck}) and S4 (\texttt{yard\_to\_train}) pass rates. The orange dashed lines mark the 90\% mastery threshold. Runs in the upper-right quadrant escaped Tier~0; those outside did not. The four robust variants form a tight cluster. The fragile and incompatible variants scatter along different failure axes.}
+  \label{fig:res:s3s4_scatter}
+\end{figure}
+
+\Cref{fig:res:s3s4_boxplot} shows the per-scenario pass rate distributions, and \cref{fig:res:s3s4_scatter} plots each run as a point in $(\text{S3}, \text{S4})$ space. The scatter plot is particularly revealing: the four robust variants cluster tightly in the upper-right ``escaped'' quadrant, while the fragile and incompatible variants scatter across the plot, each failing in a distinct direction.
+
+A critical finding is that S3 and S4 test \emph{different} cross-region spatial mappings, and variants fail on different ones:
+
+\begin{itemize}
+  \item \textbf{Dueling} fails primarily on S3 (yard$\to$truck, median 35\%) but partially learns S4 (yard$\to$train, median 93\%). The truck parking region (row~7) is a single row sandwiched between rail (rows~0--6) and yard (rows~8--12), making it the hardest destination for the advantage stream to discriminate.
+  \item \textbf{QR-DQN} is bimodal on S3 (individual runs either 0\% or 100\%) and catastrophically fails on S4 (median 0\%). The 32-quantile output head produces $32 \times 21{,}750$ values per forward pass, overwhelming the spatial gradient signal for the yard$\to$rail mapping.
+  \item \textbf{IQN} reliably masters S3 (median 100\%) but occasionally drops S4 to 30\% (1 of 10 runs). The cosine embedding that conditions on sampled $\tau$ values adds a layer of nonlinearity that can interfere with rail-region feature extraction on unlucky runs.
+\end{itemize}
+
+This three-tier classification corrects the Stage~1 screening result. In particular, IQN was incorrectly classified as systematically incompatible based on a single seed. The escape velocity experiment reveals that IQN is a \emph{fragile} algorithm that succeeds 90\% of the time. The Phase~1 failure was the 1-in-10 stochastic outcome. This demonstrates the false-negative risk of single-seed screening and validates the multi-run methodology as a necessary complement to the curriculum-based evaluation.
+
+The practical implication for training protocol design is that a cheap ``canary'' run --- 100 epochs on Tier~0 only (approximately 8 minutes per run) --- with 3--5 seeds can reliably separate robust from fragile from incompatible architectures before committing to a full 800-epoch curriculum run.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Stage 2: CNN Backbone Comparison}
+\label{sec:res:phase1:cnn}
+
+The four selected DQN algorithms were crossed with six CNN backbone variants, yielding 24 training runs. \Cref{tab:res:cnn_summary} reports the full results.
+
+\begin{table}[H]
+  \centering
+  \caption{Stage~2 results: all 24 DQN$\times$CNN combinations ranked by epochs to mastery. Combinations marked ``No'' in the Mastered column failed to complete all 13 tiers within the 800-epoch budget. Five combinations were early-stopped at epoch 120 for failing to progress beyond Tier~2.}
+  \label{tab:res:cnn_summary}
+  \begin{tabular}{@{} l l r l r r @{}}
+    \toprule
+    \textbf{DQN} & \textbf{CNN} & \textbf{Epochs} & \textbf{Mastered} & \textbf{Tier} & \textbf{Avg Rate} \\
+    \midrule
+    Baseline      & Narrow-Deep   & 293 & Yes & 13/13 & 99.2\% \\
+    Spectral Norm & Wider         & 298 & Yes & 13/13 & 98.9\% \\
+    Spectral Norm & Deeper        & 305 & Yes & 13/13 & 99.2\% \\
+    Munchausen    & Wider         & 307 & Yes & 13/13 & 99.5\% \\
+    Baseline      & Baseline      & 310 & Yes & 13/13 & 98.6\% \\
+    Munchausen    & Narrow-Deep   & 317 & Yes & 13/13 & 98.1\% \\
+    Munchausen    & Baseline      & 319 & Yes & 13/13 & 98.6\% \\
+    NoisyNet      & Region-Aware  & 326 & Yes & 13/13 & 96.0\% \\
+    NoisyNet      & Deeper        & 333 & Yes & 13/13 & 97.7\% \\
+    NoisyNet      & Narrow-Deep   & 349 & Yes & 13/13 & 99.4\% \\
+    Munchausen    & Deeper        & 461 & Yes & 13/13 & 96.3\% \\
+    NoisyNet      & Residual      & 497 & Yes & 13/13 & 95.2\% \\
+    NoisyNet      & Baseline      & 717 & Yes & 13/13 & 95.5\% \\
+    Spectral Norm & Residual      & 754 & Yes & 13/13 & 91.8\% \\
+    \midrule
+    Baseline      & Wider         & 800 & No  & --    & 83.1\% \\
+    Baseline      & Residual      & 800 & No  & --    & 81.0\% \\
+    Munchausen    & Residual      & 800 & No  & --    & 79.8\% \\
+    Baseline      & Deeper        & 800 & No  & --    & 78.9\% \\
+    NoisyNet      & Wider         & 800 & No  & --    & 75.2\% \\
+    Spectral Norm & Baseline      & 120 & No  & --    & 23.7\% \\
+    Spectral Norm & Narrow-Deep   & 120 & No  & --    & 11.6\% \\
+    Munchausen    & Region-Aware  & 120 & No  & --    & 8.1\%  \\
+    Baseline      & Region-Aware  & 120 & No  & --    & 7.1\%  \\
+    Spectral Norm & Region-Aware  & 120 & No  & --    & 6.6\%  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Fourteen of the 24 combinations achieve full mastery. The fastest combination is Baseline+Narrow-Deep at 293 epochs with 99.2\% accuracy, followed by a tight cluster of six combinations within 26 epochs (293--319). Munchausen+Wider achieves the highest average pass rate of any combination (99.5\%) at 307 epochs.
+
+Note that the Baseline+Baseline combination converges at epoch 310 in Stage~2, compared to 320 in Stage~1. As discussed in \cref{sec:exp:phase1:variability}, this approximately 3\% difference reflects the run-to-run variability inherent in stochastic training rather than a systematic effect.
+
+\subsubsection{Convergence Speed}
+
+\Cref{fig:res:cnn_heatmap} presents the epoch-to-mastery results as a heatmap across the $6 \times 4$ grid. Several patterns emerge.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{cnn_dqn_heatmap}
+  \caption{Epochs to mastery for all 24 CNN$\times$DQN combinations. Lower values (lighter colours) indicate faster convergence. Cells marked ``fail'' did not achieve full mastery within the 800-epoch budget or were early-stopped at epoch 120.}
+  \label{fig:res:cnn_heatmap}
+\end{figure}
+
+\textbf{Narrow-Deep dominates on convergence speed.} The smallest backbone (${\sim}43$K params) achieves the fastest mastery with Baseline DQN (293 epochs) and produces three of the ten fastest combinations overall. Contrary to the intuition that larger models learn faster, the Narrow-Deep variant's compact representation appears to regularise learning naturally, avoiding the overfitting or gradient diffusion that plagues larger backbones.
+
+\textbf{The Baseline DQN algorithm shows strong backbone sensitivity.} Baseline DQN achieves the fastest convergence with Narrow-Deep (293 epochs) but fails entirely with Wider (800 epochs), Deeper (800 epochs), and Residual (800 epochs). This suggests that without algorithmic regularisation (Munchausen, Spectral Norm) or adaptive exploration (NoisyNet), the vanilla Baseline algorithm cannot compensate for the optimisation challenges of larger backbones.
+
+\textbf{The Residual backbone is the weakest overall.} Only 2 of 4 combinations achieve mastery, and those require 497 and 754 epochs respectively. The skip connections around the cross-region convolutions appear to dilute the specialised spatial features that the stacked $(3,1,3)$ kernels are designed to extract.
+
+\textbf{Region-Aware succeeds only with NoisyNet.} The structural priors (separate per-region convolutions) help only when paired with NoisyNet's adaptive exploration (326 epochs), failing with all other algorithms. This suggests that the explicit region decomposition constrains the feature space in a way that benefits from noise-driven exploration.
+
+\Cref{fig:res:cnn_bars} shows a grouped bar chart comparing convergence speed across backbones alongside the parameter count for each variant.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{cnn_dqn_comparison}
+  \caption{Left: epochs to mastery grouped by CNN backbone and coloured by DQN algorithm. Bars marked with * did not achieve full mastery. Right: parameter count breakdown showing backbone vs.\ head parameters for each CNN variant.}
+  \label{fig:res:cnn_bars}
+\end{figure}
+
+\subsubsection{Accuracy Comparison}
+
+While convergence speed measures how quickly each combination learns, the average pass rate at the final epoch indicates how robust the learned policy is. \Cref{fig:res:cnn_accuracy} presents the accuracy heatmap across the $6 \times 4$ grid.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{cnn_dqn_accuracy_heatmap}
+  \caption{Average pass rate (\%) across all 31 scenarios for each CNN$\times$DQN combination. Higher values (darker green) indicate more robust final policies. Cells marked ``fail'' did not master all tiers.}
+  \label{fig:res:cnn_accuracy}
+\end{figure}
+
+The accuracy heatmap reveals a complementary perspective to the convergence analysis. Munchausen+Wider achieves the highest average pass rate (99.5\%), closely matched by Spectral Norm+Deeper and Baseline+Narrow-Deep (both 99.2\%) and NoisyNet+Narrow-Deep (99.4\%). Notably, the fastest combination (Baseline+Narrow-Deep, 293 epochs) also achieves near-best accuracy (99.2\%), breaking the speed-accuracy trade-off observed in Stage~1. This suggests that the Narrow-Deep backbone's compact capacity naturally regularises learning, producing both fast convergence and robust policies.
+
+The failed combinations fall into two distinct patterns. The five early-stopped combinations (epoch 120, $< 24\%$ accuracy) represent fundamental incompatibilities between backbone and algorithm: Spectral Norm fails with Baseline and Narrow-Deep backbones, and all non-NoisyNet algorithms fail with Region-Aware. The five 800-epoch failures (75--83\% accuracy) represent capacity-budget mismatches where the backbone has the representational capacity but the algorithm cannot consolidate learning within the epoch budget.
+
+\subsubsection{Per-Scenario Breakdown}
+
+\Cref{fig:res:cnn_scenarios} provides the full per-scenario pass rate matrix for all 24 combinations, enabling detailed diagnosis of scenario-level failure modes.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{cnn_dqn_accuracy_scenarios}
+  \caption{Per-scenario pass rates for all 24 CNN$\times$DQN combinations. Rows are ordered by backbone then algorithm; columns are the 31 scenarios (S1--S31) grouped by tier. Red cells indicate 0\% pass rate on scenarios in tiers that were never unlocked.}
+  \label{fig:res:cnn_scenarios}
+\end{figure}
+
+Several diagnostic observations emerge from the scenario-level data:
+
+\begin{itemize}
+  \item \textbf{Scenarios S1 through S8, S26, S27} (Tiers~1 through~3: primitives, two-action chains, full chains, direct transfers) are mastered by all 14 successful combinations at $\geq 90\%$ pass rate. These basic logistics operations are learnable regardless of the algorithm-backbone pairing.
+
+  \item \textbf{Scenario S21} (\texttt{full\_mini\_day}, Tier~10) remains the hardest scenario across all combinations. Even among the 14 successful combinations, pass rates range from 70\% to 100\%. This capstone scenario, which requires all logistics skills simultaneously, serves as the strongest differentiator between near-production-ready and merely adequate configurations.
+
+  \item \textbf{Scenarios S28--S31} (Tiers~11--13: full train unload/load, multi-truck-to-train, full bidirectional day) are the new high-complexity scenarios added in the expanded curriculum. These scenarios test sustained multi-step operations with concurrent vehicle traffic. Most successful combinations handle them at $\geq 90\%$, but they contribute to the separation between the top-tier and mid-tier performers.
+
+  \item \textbf{Scenario S14} (\texttt{deep\_unbury}, Tier~5) shows persistent difficulty for several combinations. It requires two sequential restack operations before loading, testing the agent's planning depth. Combinations with lower overall pass rates tend to show the weakest performance here, suggesting that restacking depth is a reliable proxy for general policy quality.
+\end{itemize}
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Architecture Ranking}
+\label{sec:res:phase1:ranking}
+
+Combining both stages, the final architecture ranking considers three criteria: whether the combination achieves full mastery, the number of epochs required, and the final average pass rate. \Cref{tab:res:final_ranking} presents the top five configurations.
+
+\begin{table}[H]
+  \centering
+  \caption{Top-5 architecture configurations from the two-stage tutorial screening, ranked by a combination of convergence speed and final accuracy.}
+  \label{tab:res:final_ranking}
+  \begin{tabular}{@{} c l l r r @{}}
+    \toprule
+    \textbf{Rank} & \textbf{CNN} & \textbf{DQN} & \textbf{Epochs} & \textbf{Avg Rate} \\
+    \midrule
+    1 & Narrow-Deep   & Baseline      & 293 & 99.2\% \\
+    2 & Wider         & Spectral Norm & 298 & 98.9\% \\
+    3 & Deeper        & Spectral Norm & 305 & 99.2\% \\
+    4 & Wider         & Munchausen    & 307 & 99.5\% \\
+    5 & Baseline      & Baseline      & 310 & 98.6\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+Given the narrow spread in accuracy (98.6–99.5\%), which is well within the run-to-run variance characterised in \cref{sec:res:variance}, the ranking is determined primarily by convergence speed. Accuracy differences at this level are not reliably distinguishable from stochastic noise.
+
+The top five combinations form a remarkably tight cluster: all master the 13-tier curriculum within 293--310 epochs and achieve $\geq 98.6\%$ average pass rate. This convergence of results across different backbone-algorithm pairings suggests that the tutorial curriculum has a natural difficulty ceiling that multiple architectures can approach from different directions.
+
+The Baseline+Narrow-Deep combination emerges as the strongest candidate, achieving both the fastest convergence (293 epochs) and near-best accuracy (99.2\%) with the smallest backbone (${\sim}43$K parameters). This challenges the assumption that spatial logistics requires large convolutional networks: the compact 6-layer backbone with 16$\to$32 channels apparently captures sufficient spatial features for the task.
+
+Munchausen+Wider achieves the highest absolute accuracy (99.5\%) at only 14 epochs slower, making it the preferred choice when robustness is prioritised over efficiency. The Spectral Norm+Deeper combination matches Narrow-Deep's accuracy (99.2\%) with a larger receptive field, suggesting that cross-region coverage and compact representation are two valid paths to the same outcome.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Stage 3: Extended Scenario Screening (S32--S33)}
+\label{sec:res:phase1:stage3}
+
+Stages~1 and~2 screen architectures on the 31-scenario, 13-tier tutorial curriculum. However, even the highest-tier scenarios (S30--S31: cross-modal orchestration) exercise specific multi-vehicle patterns in relative isolation. To test whether the top-performing combinations can handle \emph{concurrent multi-modal operations under time pressure}, two additional scenarios are introduced as a 14th tier (Operational Readiness):
+
+\begin{itemize}
+  \item \textbf{S32} (\texttt{batch\_train\_loading}): Load 10 export containers onto a train departing in 90~minutes, with 5 import distractors that should be ignored. Tests urgency-driven prioritisation of YARD\_TO\_TRAIN over YARD\_TO\_YARD when the departure window is tight.
+  \item \textbf{S33} (\texttt{mixed\_urgency\_ops}): Simultaneously handle 5 exports to train, 5 imports from train to yard, and 3 delivery truck park-and-unload operations. Tests interleaving of PARK\_TRUCK, TRUCK\_TO\_YARD, TRAIN\_TO\_YARD, and YARD\_TO\_TRAIN without falling into reshuffle loops.
+\end{itemize}
+
+Ten combinations were selected for this extended screening from the 14 Stage~2 successes: those with similar convergence speeds (within approximately 60 epochs of each other), excluding the slowest four that required 461--754~epochs. Each combination was trained on the full 14-tier curriculum (33 scenarios) for up to 150~epochs. \Cref{tab:res:stage3_results} reports the outcomes.
+
+\begin{table}[H]
+  \centering
+  \caption{Stage~3 results: extended screening on the 14-tier curriculum including S32 and S33. ``Stage~2 Rank'' refers to the convergence ranking from \cref{tab:res:cnn_summary}. Failed combinations plateaued at approximately 80\% completion after 150~epochs.}
+  \label{tab:res:stage3_results}
+  \begin{tabular}{@{} c l l l r @{}}
+    \toprule
+    \textbf{Rank} & \textbf{DQN} & \textbf{CNN} & \textbf{S32/S33} & \textbf{Stage~2 Epochs} \\
+    \midrule
+    1  & Baseline       & Narrow-Deep    & Passed & 293 \\
+    3  & Spectral Norm  & Deeper         & Passed & 305 \\
+    5  & Baseline       & Baseline       & Passed & 310 \\
+    7  & Munchausen     & Baseline       & Passed & 319 \\
+    10 & NoisyNet       & Narrow-Deep    & Passed & 349 \\
+    \midrule
+    2  & Spectral Norm  & Wider          & Failed (${\sim}$80\%) & 298 \\
+    4  & Munchausen     & Wider          & Failed (${\sim}$80\%) & 307 \\
+    6  & Munchausen     & Narrow-Deep    & Failed (${\sim}$80\%) & 317 \\
+    8  & NoisyNet       & Region-Aware   & Failed (${\sim}$80\%) & 326 \\
+    9  & NoisyNet       & Deeper         & Failed (${\sim}$80\%) & 333 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Five of the ten combinations master S32 and S33. The five that fail plateau at approximately 80\% completion after 150~epochs --- close to but not reliably above the 90\% mastery threshold. Retries with different seeds occasionally push these closer to 90\%, suggesting that the failures reflect insufficient convergence velocity rather than fundamental incapacity.
+
+The most striking finding is a \textbf{reversal of the Stage~2 ranking}. The Wider backbone, which produced two of the top-5 combinations in Stage~2 (ranks~2 and~4), fails on both entries in Stage~3. Meanwhile, NoisyNet+Narrow-Deep (rank~10) and Munchausen+Baseline (rank~7) --- neither in the original top-5 --- pass comfortably. This indicates that convergence speed on the 13-tier curriculum is a necessary but not sufficient predictor of generalisation to operational-complexity scenarios.
+
+\subsubsection{Backbone-Level Analysis}
+
+The Stage~3 outcomes reveal a clear backbone-level pattern:
+
+\begin{itemize}
+  \item \textbf{Baseline CNN (2/2 pass):} The most robust backbone. The moderate-capacity 4-layer architecture (${\sim}108$K backbone parameters) generalises reliably to multi-modal operations regardless of the DQN algorithm.
+  \item \textbf{Narrow-Deep (2/3 pass):} Succeeds with Baseline DQN and NoisyNet but fails with Munchausen. The compact backbone generalises well overall, though the interaction with Munchausen's reward shaping creates a fragility that was invisible in Stage~2.
+  \item \textbf{Deeper (1/2 pass):} Succeeds with Spectral Norm but fails with NoisyNet. The additional cross-region layer benefits from spectral normalisation's weight constraints under multi-modal time pressure.
+  \item \textbf{Wider (0/2 fail):} Both combinations fail. The doubled channel width (${\sim}416$K backbone parameters) that accelerated Stage~2 convergence now appears to overfit to the component-skill patterns, lacking the flexibility to recompose them under concurrent time pressure. This is the strongest per-backbone signal in the screening.
+  \item \textbf{Region-Aware (0/1 fail):} The structural region priors that enabled Stage~2 success with NoisyNet do not transfer to scenarios requiring fluid cross-region interleaving.
+\end{itemize}
+
+The result reaffirms the value of multi-stage screening: the 13-tier curriculum is necessary to establish component-skill mastery, but an additional operational-complexity gate reveals fragilities that component-skill performance alone cannot predict. The five combinations that pass Stage~3 form the pool from which the Phase~2 agent is selected (\cref{sec:exp:phase2:selection}).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{stage3_results}
+  \caption{Stage~3 operational readiness results. Left: the 10 combinations ranked by Stage~2 convergence speed, with pass/fail indicators. Right: summary by backbone showing the number of surviving combinations. Five of ten combinations pass the operational readiness gate.}
+  \label{fig:res:stage3_results}
+\end{figure}
+
+% ====================================================================
+\section{Phase 2: Train-Operation Scalability Results}
+\label{sec:res:phase2}
+% ====================================================================
+
+Phase~2 addresses RQ2 using the evaluation grid and protocol described in \cref{sec:exp:phase2}.  Six DQN agents and the heuristic baseline (\cref{sec:exp:phase2:selection,sec:exp:phase2:baselines}) are evaluated on the primary train-operation grid (40--400 containers $\times$ three yard fill levels).  A secondary mixed-operation stress test is presented in \cref{sec:res:phase2:stress}.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Scaling Performance}
+\label{sec:res:phase2:scaling}
+% ────────────────────────────────────────────────────────────────
+
+\Cref{tab:res:phase2_summary} summarises the final-epoch performance of all evaluated agents.  All six DQN agents achieve mean task completion above 93\%, with the top five clustered within two percentage points of each other.  The heuristic baseline never passes a single combination, confirming that the scenarios are not trivially solvable and that the DQN agents have learned genuinely useful policies.
+
+\begin{table}[H]
+  \centering
+  \caption{Phase~2 agent summary (final warmup epoch, averaged across all 18 parameter combinations).  Completion is the mean fraction of all sub-tasks completed.  Pass rate is the fraction of combinations where \emph{all} sub-tasks reached 100\%.}
+  \label{tab:res:phase2_summary}
+  \begin{tabular}{@{} l l r r r r @{}}
+    \toprule
+    \textbf{DQN Variant} & \textbf{CNN Backbone} & \textbf{Completion} & \textbf{Pass Rate} & \textbf{Imports} & \textbf{Exports} \\
+    \midrule
+    Munchausen     & Baseline    & 97.4\% & 72.2\% & 95.6\% & 99.1\%  \\
+    NoisyNet       & Narrow-Deep & 96.2\% & 72.2\% & 92.4\% & 100.0\% \\
+    Baseline       & Baseline    & 96.1\% & 55.6\% & 93.9\% & 98.2\%  \\
+    Baseline       & Narrow-Deep & 95.9\% & 77.8\% & 92.9\% & 98.9\%  \\
+    GRU-DQN        & Narrow-Deep & 95.5\% & 55.6\% & 91.0\% & 99.9\%  \\
+    Spectral Norm  & Deeper      & 93.1\% & 33.3\% & 88.8\% & 97.4\%  \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Heuristic baseline}} & 52.4\% & 0.0\%  & 7.2\%  & 97.6\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{scaling_curve}
+  \caption{Task completion versus scenario size (final warmup epoch).  Solid lines show DQN agents; dashed grey shows the heuristic.  Shaded bands indicate min--max variation across yard fill levels.  All DQN agents maintain $\geq 99\%$ completion up to 200~containers and degrade gracefully beyond 300.}
+  \label{fig:res:scaling_curve}
+\end{figure}
+
+The scaling curve (\cref{fig:res:scaling_curve}) reveals a clear pattern.  Up to 200~containers, which is ten times the tutorial training scale, all DQN agents maintain near-perfect completion.  Most agents sustain this level at 300~containers as well.  At 400~containers, all agents experience noticeable degradation, though the decline is gradual rather than catastrophic.  The number of required crane moves simply approaches the physical time budget, creating a throughput bottleneck.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{completion_heatmap}
+  \caption{Completion heatmap by container count and yard fill (final warmup epoch).  The diverging colourmap centres on 85\% to highlight where agents begin to struggle.  All DQN agents are uniformly green up to 200~containers; degradation at 400 is visible across all agents.  The heuristic (rightmost panel) is red across the board.}
+  \label{fig:res:completion_heatmap}
+\end{figure}
+
+The completion heatmap (\cref{fig:res:completion_heatmap}) adds a second dimension by crossing container count with yard fill.  Load size is the dominant performance driver.  Yard fill has a secondary effect that only becomes visible at 300+ containers, where congestion forces additional reshuffles that consume time otherwise spent on productive moves.
+
+\Cref{fig:res:fill_impact} isolates the fill-level effect more precisely.  At 40--200~containers, yard fill has virtually no impact on any agent.  The effect becomes visible at 300~containers and pronounced at 400, where the weaker agents lose up to 10~percentage points when fill increases from 0\% to 50\%.  The mechanism is straightforward: a congested yard forces more reshuffles before the agent can place or retrieve containers, and each reshuffle consumes crane time from a fixed budget.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{fill_impact}
+  \caption{Impact of yard fill level on task completion across load sizes.  Each subplot shows one scenario size; lines represent individual agents.  Fill level has negligible effect up to 200~containers but increasingly degrades performance at 300--400~containers as yard congestion forces additional reshuffles.}
+  \label{fig:res:fill_impact}
+\end{figure}
+
+The direct agent comparison (\cref{fig:res:agent_comparison}) confirms that all DQN agents are effectively indistinguishable up to 200~containers.  Differentiation only emerges under pressure: Spectral Norm+Deeper is the first to degrade at 300~containers, while the remaining five agents stay clustered.  At 400~containers the agents spread further apart, but the gaps between them are small relative to the run-to-run variance characterised in \cref{sec:res:variance}.  As with the Phase~1 ranking, a multi-seed evaluation would be needed to establish statistically significant ordering at this frontier.  The heuristic remains far below all learned agents at every scale.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{agent_comparison}
+  \caption{Agent comparison: final-epoch completion by scenario size (mean across fill levels).  Grouped bars for the four common scenario sizes.  At 400~containers, Baseline+Baseline leads the DQN agents.}
+  \label{fig:res:agent_comparison}
+\end{figure}
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Import--Export Asymmetry and Task Prioritisation}
+\label{sec:res:phase2:asymmetry}
+% ────────────────────────────────────────────────────────────────
+
+The most striking finding of Phase~2 is a consistent \textbf{asymmetry between import and export completion} (\cref{fig:res:import_export}).  Across all scenario sizes, every DQN agent maintains near-perfect export completion.  Even at 400~containers, where overall completion drops noticeably, exports remain at or above 97\%.  The performance degradation is driven entirely by imports.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{import_export_asymmetry}
+  \caption{Import/export asymmetry (final warmup epoch, mean across fills).  Left: imports unloaded; right: exports loaded.  Exports remain at ${\sim}100\%$ for all DQN agents even at 400~containers, while imports degrade progressively.  The heuristic achieves near-perfect exports but fails imports almost entirely ($\leq 17\%$).}
+  \label{fig:res:import_export}
+\end{figure}
+
+In practice, a train would not depart with missing containers.  In the simulation, however, the train departs at its scheduled time regardless, and the agent receives a penalty for every container not loaded.  This design choice makes the asymmetry a rational response: exports are time-critical because they must be loaded before departure, while imports can be processed more flexibly.  The agents consistently prioritise YARD\_TO\_TRAIN moves to meet the departure deadline, then use remaining time for TRAIN\_TO\_YARD import unloading.  When the time budget is insufficient for all operations, imports are the rational casualty.
+
+The heuristic baseline exhibits the same asymmetry in a more extreme form.  Its fixed priority order places YARD\_TO\_TRAIN first, which keeps export completion high.  However, its deterministic scan for import placement positions is too rigid for a partially filled yard.  At higher container counts, over half of the heuristic's moves are unproductive YARD\_TO\_YARD reshuffles because it gets trapped in loops, leaving almost no time for actual imports.  The DQN agents avoid this trap by learning to navigate placement decisions spatially through the Q-value landscape.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Move Efficiency}
+\label{sec:res:phase2:moves}
+% ────────────────────────────────────────────────────────────────
+
+Two efficiency metrics provide insight into how the agents spend their crane time (\cref{fig:res:move_efficiency}).  The \emph{reshuffle ratio} measures what fraction of total moves are YARD\_TO\_YARD reshuffles rather than productive imports or exports.  The \emph{moves per container} ratio measures overall operational efficiency, where the theoretical minimum of 1.0 represents one move per container with no wasted effort.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{move_efficiency}
+  \caption{Move efficiency metrics (final warmup epoch, mean across fills with min--max band).  Left: reshuffle ratio (lower is better).  Right: moves per container (theoretical minimum is 1.0).}
+  \label{fig:res:move_efficiency}
+\end{figure}
+
+At small scenario sizes the agents have ample time, and some use it for speculative reshuffles that do not contribute to task completion.  As the scenario size grows, this slack disappears and the agents converge toward efficient behaviour, spending nearly all their crane time on productive moves.  NoisyNet+Narrow-Deep stands out as the most efficient agent across most sizes, while GRU-DQN and Spectral Norm+Deeper tend toward higher reshuffle rates at mid-range scenarios.  At 200--300~containers, all agents achieve 1.2--1.9~moves per container, indicating only moderate overhead above the theoretical minimum.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Learning Dynamics}
+\label{sec:res:phase2:learning}
+% ────────────────────────────────────────────────────────────────
+
+The warmup learning curves (\cref{fig:res:learning_dynamics}) reveal that the tutorial-learned policies transfer remarkably well to larger scenarios.  Most agents already achieve over 90\% completion on their very first epoch at a new scenario size, and the 30~warmup epochs improve performance by only 1--3 percentage points.  Spectral Norm+Deeper is the sole exception, where cumulative training slightly destabilises its policy.  This pattern validates the Phase~1 curriculum as an effective proxy for scalability: skills learned on 20-container tutorials generalise to 200-container scenarios with minimal adaptation.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{learning_dynamics}
+  \caption{Warmup learning curves for small (40c), medium (200c), and large (400c) scenarios.  Solid lines are DQN agents (mean across fills with min--max band); the dashed grey line is the heuristic.  The DQN agents perform well from the first epoch, indicating strong transfer from tutorials.}
+  \label{fig:res:learning_dynamics}
+\end{figure}
+
+\textbf{Methodological caveat.}  Because the warmup protocol (\cref{sec:exp:phase2:config}) includes gradient steps, the reported results reflect few-shot adaptation rather than strict zero-shot generalisation.  The small warmup improvement confirms that the vast majority of skill originates from the tutorial curriculum, but readers should interpret the reported completion rates as an upper bound on transfer performance.
+
+% ────────────────────────────────────────────────────────────────
+\subsection{Mixed-Operation Stress Test}
+\label{sec:res:phase2:stress}
+% ────────────────────────────────────────────────────────────────
+
+The primary grid exercises only train operations.  A secondary stress test evaluates whether the Baseline+Baseline agent, the simplest architecture without algorithmic enhancements, can coordinate \emph{all eight move types simultaneously} at scale.  The test uses 100, 200, and 300~containers across two operation mixes (balanced and train-heavy) and three yard fill levels.  Since yard fill has no measurable effect on completion rates,\footnote{One-way ANOVA across the three fill levels yields $p = 0.978$, with a maximum spread of 0.5 percentage points.} the results below are averaged across fill levels.
+
+At 100~containers, the agent handles the full multi-modal workload near-perfectly (\cref{fig:res:stress_heatmap}).  Performance remains strong at 200~containers and degrades moderately at 300, where the coordination overhead of managing all eight move types simultaneously becomes the limiting factor regardless of the train/truck split.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{stress_heatmap}
+  \caption{Mixed-operation stress test: completion heatmap for Baseline+Baseline.  Rows represent the two operation mixes (balanced vs.\ train-heavy), columns represent total container count.  Values are averaged across yard fill levels and 30~warmup epochs.}
+  \label{fig:res:stress_heatmap}
+\end{figure}
+
+The scaling curves for both mixes (\cref{fig:res:stress_ratio}) track each other closely up to 200~containers, then diverge slightly at 300.  Distributing load across train and truck pipelines appears marginally easier than concentrating it on trains alone.  Compared to the train-only evaluation (\cref{fig:res:scaling_curve}), the mixed-operation degradation is smoother and begins earlier, reflecting the additional coordination overhead.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{stress_ratio_impact}
+  \caption{Scaling curve for mixed operations: mean task completion versus total container count, separated by operation mix.  Shaded bands indicate the range across yard fill levels.  Both mixes degrade gracefully from ${\sim}100\%$ at 100~containers to ${\sim}91$--$93\%$ at 300.}
+  \label{fig:res:stress_ratio}
+\end{figure}
+
+\textbf{Sub-task bottleneck analysis.}  Decomposing the balanced-mix results into sub-tasks (\cref{fig:res:stress_subtask}) reveals which operations suffer first under pressure.  At 300~containers, train imports and exports remain largely intact, but truck deliveries and pickups degrade noticeably.  Truck operations require a longer coordination chain (PARK\_TRUCK, then TRUCK\_TO\_YARD or YARD\_TO\_TRUCK), making them the capacity-limiting factor when all move types compete for crane time.  The agent implicitly prioritises train operations, which carry higher reward, over truck service.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{stress_subtask_breakdown}
+  \caption{Sub-task completion breakdown for the balanced (${\approx}50/50$) mix.  Train imports remain at 100\% across all sizes; truck deliveries are the primary bottleneck at 300~containers, dropping to 80\%.}
+  \label{fig:res:stress_subtask}
+\end{figure}
+
+The stress test demonstrates two key findings.  First, the agent can successfully coordinate all eight move types simultaneously at operational scale, matching the train-only evaluation at 100~containers.  Second, when capacity is exceeded, the agent degrades gracefully and sheds lower-priority truck operations before sacrificing train throughput.  This prioritisation emerges naturally from the reward hierarchy rather than from explicit programming.  The finding aligns with the reactive dispatcher characterisation from \cref{sec:disc:interpretation:scalability}: the agent handles each individual decision competently, but the accumulated coordination overhead of context-switching between eight move types limits throughput at scale.

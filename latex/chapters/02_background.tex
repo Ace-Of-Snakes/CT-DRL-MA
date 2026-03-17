@@ -1,0 +1,87 @@
+% chapters/02_background.tex
+\chapter{Background}
+\label{ch:background}
+
+This chapter introduces the theoretical foundations that underpin the remainder of the thesis. It provides the domain vocabulary needed to follow the system design in \cref{ch:system}, the reinforcement learning formalism used throughout the agent architecture in \cref{ch:agent}, the convolutional neural network principles that motivate the spatial state representation in \cref{ch:state}, and the curriculum learning framework that structures the training pipeline in \cref{ch:curriculum}.
+
+\section{Intermodal Container Terminals}
+\label{sec:bg:terminals}
+
+An intermodal container terminal is a logistics facility where freight containers are transferred between transport modes, typically rail and road. \textcite{vis2003transshipment} classify the decision problems at container terminals into three planning levels: strategic (layout and equipment selection), tactical (storage strategies), and operational (real-time scheduling). The physical layout comprises a storage yard organised into blocks, subdivided along a bay axis (horizontal) and a tier axis (vertical stacking levels). Rail-mounted gantry cranes (RMGCs)\footnote{RMGCs are rail-guided overhead cranes that span the full width of the yard and rail tracks. They are the most widespread crane type at rail--road terminals. The crane model used in this thesis operates at a gantry speed of 130\,m/min, a trolley speed of 70\,m/min, and a hoist speed of 28\,m/min, with a 30-second handling time per container (\cref{ch:system}).} pick containers from one location and place them at another. The combinatorial structure of stacking --- access to a lower-tier container requires first removing everything above it --- gives rise to the blocks relocation problem \cite{caserta2009binary}. The terminal model used in this work is presented in \cref{ch:system}.
+
+The operational challenge is to coordinate container placement, restacking, truck parking, and train loading under stochastic arrivals and hard departure deadlines. Containers arrive on trains or delivery trucks, are stored temporarily in the yard, and must later be loaded onto departing trains or picked up by collection trucks. A container transfer directly from train to truck (or vice versa) without intermediate yard storage is called a \emph{direct move}; when the recipient vehicle has not yet arrived, the container is routed through the yard in a \emph{split move} \cite{boysen2013container}. Each of these transfers corresponds to a discrete move type in the action space defined in \cref{sec:sys:actions}. \textcite{vis2003transshipment} show that the joint vehicle-scheduling-location problem --- dispatching vehicles to containers while simultaneously deciding storage positions --- is NP-hard \cite{bish2001dispatching}, motivating the use of heuristic and learning-based approaches.
+
+Inland intermodal terminals differ from maritime port terminals in several important ways. The primary high-volume interface is rail rather than quay cranes, and the yard footprint is typically smaller, making stacking efficiency and crane coordination proportionally more important \cite{caserta2009binary}. \textcite{boysen2013container} describe the typical layout of a rail--road transshipment yard: parallel tracks, a driving lane and parking lane for trucks, an intermediate storage area, and one or more gantry cranes spanning all three zones. Multiple cranes sharing a single track face non-crossing constraints that must be integrated into scheduling \cite{boysen2013container}. The N\"urnberg TriCon terminal modelled in this work follows this standard layout, as described in \cref{ch:system}.
+
+\section{Reinforcement Learning Foundations}
+\label{sec:bg:rl}
+
+\subsection{Markov Decision Processes}
+\label{sec:bg:rl:mdp}
+
+The standard framework for sequential decision-making under uncertainty is the Markov decision process (MDP), defined as a tuple $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$ where $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $P(\state' \mid \state, \action)$ is the transition function, $R(\state, \action, \state')$ is the reward function, and $\gamma \in [0, 1)$ is the discount factor \cite{suttonbarto2018}. The Markov property requires that the transition probability depends only on the current state and action, not on the history of prior states. This property holds for the container terminal when the state representation captures all operationally relevant information, a condition that the unified spatial tensor described in \cref{ch:state} is designed to satisfy.
+
+The objective is to find a policy $\policy(\action \mid \state)$ that maximises the expected discounted return $G_t = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1}$. The discount factor $\gamma \in [0, 1)$ controls the trade-off between immediate and future rewards: values close to 1.0 encourage long-horizon planning (e.g.\ anticipating train departures), while lower values bias decisions toward short-term gains \cite{suttonbarto2018}. The optimal action-value function $\qfunc^*$ satisfies the Bellman optimality equation \cite{bellman1957}
+\begin{equation}
+\label{eq:bellman}
+\qfunc^*(\state, \action) = \expect\bigl[R_{t+1} + \gamma \max_{\action'} \qfunc^*(\state', \action') \;\big|\; \state_t = \state,\; \action_t = \action\bigr],
+\end{equation}
+which recursively decomposes the value of taking action $\action$ in state $\state$ into the immediate reward plus the discounted value of acting optimally thereafter. This recursion is the foundation of all value-based methods used in this work \cite{suttonbarto2018}.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{mdp_loop}
+  \caption{The agent--environment interaction loop instantiated for the container terminal domain. The agent observes a spatial state tensor, selects a source--destination move via its two-head CNN architecture, and receives a reward from the terminal simulation.}
+  \label{fig:bg:mdp_loop}
+\end{figure}
+
+\subsection{Value-Based Methods}
+\label{sec:bg:rl:value}
+
+Value-based methods learn $\qfunc^*(\state, \action)$ and derive a greedy policy $\policy(\state) = \arg\max_\action \qfunc^*(\state, \action)$ \cite{suttonbarto2018}. Temporal-difference (TD) learning\footnote{TD learning updates value estimates from the difference between the current estimate and a one-step lookahead target, rather than waiting for the full episode return as in Monte Carlo methods.} updates Q-values toward a bootstrapped target \cite{sutton1988td}:
+\begin{equation}
+\label{eq:td}
+\qfunc(\state_t, \action_t) \leftarrow \qfunc(\state_t, \action_t) + \alpha \bigl[\reward_{t+1} + \gamma \max_{\action'} \qfunc(\state_{t+1}, \action') - \qfunc(\state_t, \action_t)\bigr],
+\end{equation}
+where $\alpha$ is the learning rate and the bracketed quantity is the TD error $\delta_t$. Q-learning \cite{watkinsdayan1992} is the off-policy\footnote{An \emph{off-policy} algorithm can learn from transitions generated by any policy (including random exploration), not only from those generated by the current policy being optimised. This is what makes experience replay possible.} specialisation that maximises over next-state actions regardless of the behaviour policy. During training, $\varepsilon$-greedy exploration\footnote{$\varepsilon$-greedy selects a random action with probability $\varepsilon$ and the greedy action otherwise, balancing exploration of new strategies with exploitation of learned knowledge.} balances exploration and exploitation.
+
+$n$-step returns \cite{sutton1988td} bootstrap after $n$ transitions rather than one, interpolating between TD learning and Monte Carlo estimation:
+\begin{equation}
+\label{eq:nstep}
+G_t^{(n)} = \sum_{k=0}^{n-1} \gamma^k \reward_{t+k+1} + \gamma^n \max_{\action'} \qfunc(\state_{t+n}, \action').
+\end{equation}
+Larger $n$ reduces bootstrap bias at the cost of higher variance. This work uses $n = 3$ to propagate reward information across the short action chains that characterise individual container moves (\cref{sec:agent:training:loss}).
+
+\subsection{Deep Q-Networks}
+\label{sec:bg:rl:dqn}
+
+When the state space is large or continuous, tabular storage of $\qfunc$ becomes infeasible. Deep Q-Networks (DQN) \cite{mnih2015dqn} approximate $\qfunc(\state, \action; \theta)$ with a neural network parameterised by weights $\theta$, trained to minimise the TD error between predicted and target Q-values. The key insight is that a convolutional neural network can extract spatial features directly from high-dimensional observations, learning an implicit state representation that supports value estimation without manual feature engineering.
+
+Two mechanisms stabilise DQN training. Experience replay \cite{lin1992} stores transitions $(\state_t, \action_t, \reward_{t+1}, \state_{t+1})$ in a buffer and samples mini-batches uniformly at random, breaking the temporal correlation between consecutive training samples that would otherwise destabilise stochastic gradient descent. A target network $\qfunc(\cdot; \theta^-)$ provides the bootstrap target and is updated slowly, either by periodic copying or by Polyak averaging\footnote{Polyak averaging (also called exponential moving average) blends the online weights into the target weights at each step: $\theta^- \leftarrow \tau \theta + (1 - \tau) \theta^-$, where $\tau \ll 1$. This produces smoother target evolution than periodic hard replacement.} with a small coefficient $\tau$. The delayed update prevents the moving target problem where the network chases its own rapidly changing predictions \cite{mnih2015dqn}.
+
+Double DQN \cite{hasselt2016ddqn} addresses the overestimation bias inherent in the max operator of \cref{eq:td} by decoupling action selection (online network: $\action^* = \arg\max_{\action'} \qfunc(\state', \action'; \theta)$) from evaluation (target network: $\qfunc(\state', \action^*; \theta^-)$). This correction is particularly important in domains with large masked action spaces, where few valid actions can amplify the overestimation effect.
+
+Prioritised experience replay (PER) \cite{schaul2016per} replaces uniform sampling with a distribution that favours transitions with large TD errors: sampling probability is proportional to $(|\delta_i| + \epsilon)^\alpha$. Importance-sampling weights\footnote{Without correction, prioritised sampling distorts the expected gradient. Importance-sampling weights $w_i = (N \cdot p_i)^{-\beta}$ compensate for this bias, with $\beta$ annealing toward 1.0 over training.} correct the resulting distributional bias. Transitions that surprise the network receive more frequent updates, accelerating learning on rare but informative events such as train departures.
+
+\subsection{Factored and Multi-Head Action Spaces}
+\label{sec:bg:rl:factored}
+
+When the action space is a Cartesian product of discrete dimensions, flat enumeration becomes intractable. A factored decomposition selects each dimension sequentially, reducing the effective count from $|\mathcal{A}_1| \times |\mathcal{A}_2|$ to $|\mathcal{A}_1| + |\mathcal{A}_2|$, with each selection conditioned on the previous ones \cite{suttonbarto2018}. The two-head\footnote{A \emph{head} is an output branch of a neural network. A multi-head architecture shares a common feature extractor (the backbone) but splits into separate output layers, each producing predictions for a different sub-task.} architecture in this work applies this principle: source selection followed by conditioned destination selection (\cref{sec:agent:unified:heads}).
+
+A complementary decomposition operates along the value dimension. The dueling architecture \cite{wang2016dueling} separates the Q-value into a state-value stream $V(\state)$, which captures how good it is to be in a given state regardless of the action taken, and an advantage stream $A(\state, \action)$, which captures the relative benefit of each action: $\qfunc(\state, \action) = V(\state) + A(\state, \action) - \frac{1}{|\mathcal{A}|}\sum_{\action'} A(\state, \action')$. This separation is useful when many actions in a state have similar values and the critical information lies in the few that deviate from the mean.
+
+\section{Convolutional Neural Networks for Spatial Domains}
+\label{sec:bg:cnn}
+
+Convolutional neural networks (CNNs) extract spatial features from grid-structured inputs through learned filters\footnote{A convolutional filter (or kernel) is a small weight matrix that is applied at every position of the input via element-wise multiplication and summation. Each filter learns to detect a specific local pattern --- e.g.\ an edge, a texture, or, in this work, a stacking configuration.} that slide across the input dimensions \cite{lecun1998}. Translation equivariance\footnote{A pattern detected at one spatial position is recognised equally at any other position, because the same filter weights are applied everywhere.} ensures that stacking relationships and proximity patterns are recognised regardless of bay position \cite{goodfellow2016}. Stacking multiple layers increases the effective receptive field\footnote{The receptive field is the region of the input that influences a given neuron's output. Deeper layers have larger receptive fields because each layer aggregates information from a local neighbourhood, and these neighbourhoods compose across layers.}, allowing deeper layers to capture progressively larger spatial relationships.
+
+Group normalisation \cite{wu2020groupnorm} is preferred over batch normalisation in RL because the small batch sizes (typically 32 transitions) make batch statistics unreliable; group normalisation normalises within fixed channel groups independently of batch size.
+
+The DQN approach to Atari demonstrated that multi-channel spatial tensors serve as effective CNN inputs for RL \cite{mnih2015dqn}. Each channel encodes a different semantic attribute (occupancy, type, urgency) at every position. When the domain has three physical dimensions, 3D convolutions \cite{ji20133dcnn} learn features along all axes simultaneously. The specific tensor layout used in this work is described in \cref{ch:state}.
+
+\section{Curriculum Learning}
+\label{sec:bg:curriculum}
+
+Curriculum learning presents tasks in order of increasing difficulty \cite{bengio2009curriculum}. Starting with easier examples guides the optimiser into favourable regions of parameter space from which harder examples can be learned more efficiently, improving both convergence speed and final performance.
+
+In reinforcement learning, the curriculum takes the form of progressively harder environments. The agent masters basic skills before encountering the full target complexity \cite{bengio2009curriculum}. This is particularly valuable when the target task has sparse or delayed rewards that make learning from scratch impractical, because simpler stages provide denser feedback that bootstraps useful behaviours. The explicit curriculum used in this work --- 33 tutorial scenarios across 14 difficulty tiers (\cref{ch:curriculum}) --- directly addresses the feasibility question of \cref{sec:intro:rqs}: each tier combines sub-tasks into progressively more complex compositions, building from single-move primitives to near-production terminal operations.

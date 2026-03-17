@@ -1,0 +1,70 @@
+% chapters/appendix_a_scenarios.tex
+\chapter{Tutorial Scenario Reference}
+\label{app:scenarios}
+
+% Complete reference table for all 33 scenarios across 14 tiers
+
+\begin{table}[H]
+\centering
+\caption{Complete tutorial scenario specification.}
+\label{tab:scenarios}
+\small
+\begin{tabularx}{\textwidth}{c c l l c X}
+\toprule
+\textbf{ID} & \textbf{Tier} & \textbf{Name} & \textbf{Move Types} & \textbf{Steps} & \textbf{Description} \\
+\midrule
+S1  & 0 & park\_truck             & PK        & 15 & Park one waiting truck \\
+S2  & 0 & train\_import           & T2Y       & 15 & Import one container from train \\
+S3  & 0 & yard\_to\_truck         & Y2T       & 15 & Load one container onto truck \\
+S4  & 0 & yard\_to\_train         & Y2TR      & 15 & Load one container onto train \\
+\midrule
+S5  & 1 & import\_and\_export     & T2Y, Y2TR & 25 & Import + export (different containers) \\
+S6  & 1 & park\_then\_import      & PK, TK2Y  & 25 & Park delivery truck, unload \\
+S26 & 1 & train\_to\_truck\_direct & PK, T2T  & 25 & Direct transfer from train to truck \\
+S27 & 1 & truck\_to\_train\_direct & PK, TK2TR & 25 & Direct transfer from truck to train \\
+\midrule
+S7  & 2 & full\_chain\_truck      & PK, T2Y, Y2T  & 35 & Full import chain (same container) \\
+S8  & 2 & delivery\_to\_train     & PK, TK2Y, Y2TR & 35 & Full export chain (same container) \\
+\midrule
+S9  & 3 & unbury\_for\_truck      & Y2Y, Y2T  & 25 & Restack blocker, load truck \\
+S10 & 3 & unbury\_for\_train      & Y2Y, Y2TR & 25 & Restack blocker, load train \\
+\midrule
+S11 & 4 & random\_import\_chain   & PK, T2Y, Y2T  & 35 & S7 with random sizes + distractors \\
+S12 & 4 & random\_export\_chain   & PK, TK2Y, Y2TR & 35 & S8 with random sizes + distractors \\
+\midrule
+S13 & 5 & multi\_truck\_serving   & Y2T       & 35 & Serve 3 pickup trucks \\
+S14 & 5 & deep\_unbury            & Y2Y, Y2T  & 30 & 2 blockers deep, then load \\
+\midrule
+S25 & 6 & basic\_tt\_dispatch     & PK, Y2T   & 15 & Park TT and dispatch swap body \\
+S22 & 6 & tt\_cant\_carry\_regular & PK, Y2T  & 15 & TT cannot carry regular containers \\
+S23 & 6 & regular\_truck\_preferred & PK, Y2T & 20 & Prefer regular truck over TT \\
+S24 & 6 & tt\_only\_option        & PK, Y2T   & 30 & TT is only option for swap body \\
+\midrule
+S15 & 7 & multi\_delivery\_park   & PK, TK2Y  & 45 & Park and unload 3 delivery trucks \\
+S16 & 7 & delivery\_to\_train\_pipeline & PK, TK2Y, Y2TR & 55 & 2 delivery trucks to train \\
+\midrule
+S17 & 8 & bidirectional\_train\_simple & T2Y, Y2TR, Y2T & 35 & 1 import + 1 export, pre-parked truck \\
+\midrule
+S18 & 9 & concurrent\_import\_export & PK, T2Y, Y2TR, Y2T & 65 & 2+2 bidirectional with parking \\
+S19 & 9 & mixed\_fleet\_dispatch  & PK, T2Y, TK2Y, Y2TR, Y2T & 75 & 4 trucks, all action types \\
+\midrule
+S20 & 10 & crowded\_yard\_pickup   & PK, Y2T   & 60 & 12 distractors, 3 targets \\
+S21 & 10 & full\_mini\_day         & PK, T2Y, TK2Y, Y2TR, Y2T & 100 & 5 trucks, 1 train, surplus \\
+\midrule
+S28 & 11 & full\_train\_unload     & T2Y       & 40 & Unload 6 imports from train to yard \\
+S29 & 11 & full\_train\_load       & Y2Y, Y2TR & 60 & Load 6 exports onto train (3 buried) \\
+\midrule
+S30 & 12 & multi\_truck\_to\_train & PK, TK2Y, Y2TR & 80 & 3 delivery trucks feed single train \\
+S31 & 12 & full\_bidirectional\_day & PK, T2Y, TK2Y, Y2TR, Y2T & 100 & Full bidirectional: imports, exports, deliveries \\
+\midrule
+S32 & 13 & batch\_train\_loading   & Y2TR, Y2Y  & 60 & Load 10 exports onto urgent train (90-min departure) \\
+S33 & 13 & mixed\_urgency\_ops     & PK, T2Y, TK2Y, Y2TR & 80 & 5 exports + 5 imports + 3 truck parks simultaneously \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.5em}
+\footnotesize
+Move type abbreviations: PK = Park Truck, T2Y = Train to Yard, TK2Y = Truck to Yard,
+Y2TR = Yard to Train, Y2T = Yard to Truck, Y2Y = Yard to Yard (restack),
+T2T = Train to Truck (direct), TK2TR = Truck to Train (direct).
+\end{table}

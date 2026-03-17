@@ -1,0 +1,141 @@
+% main.tex — Master's Thesis
+% Learning to Orchestrate Intermodal Terminals:
+% A CNN-Augmented Deep Reinforcement Learning Approach for
+% Crane Scheduling, Truck Parking and Train Loading
+%
+% Compile: pdflatex main && biber main && pdflatex main && pdflatex main
+
+\documentclass[12pt, a4paper, twoside, openany]{report}
+
+% ══════════════════════════════════════════════════════════════════════
+% Packages
+% ══════════════════════════════════════════════════════════════════════
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[margin=2.5cm, bindingoffset=0.5cm]{geometry}
+
+% Typography
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{setspace}
+\onehalfspacing
+
+% Mathematics
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+
+% Figures & tables
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Algorithms & code
+\usepackage[ruled, vlined, linesnumbered]{algorithm2e}
+\usepackage{listings}
+\usepackage{xcolor}
+
+% References & links
+\usepackage[backend=biber, style=numeric-comp, sorting=none, maxbibnames=99]{biblatex}
+\addbibresource{references.bib}
+\usepackage[hidelinks, pdfusetitle]{hyperref}
+\usepackage[capitalise, noabbrev]{cleveref}
+
+% Misc
+\usepackage{enumitem}
+\usepackage{glossaries}
+\usepackage{tikz}
+\usepackage{csquotes}
+\usetikzlibrary{positioning, arrows.meta, calc, fit, backgrounds}
+
+% ══════════════════════════════════════════════════════════════════════
+% Metadata
+% ══════════════════════════════════════════════════════════════════════
+\title{Learning to Orchestrate Intermodal Terminals:\\
+       A CNN-Augmented Deep Reinforcement Learning Approach\\
+       for Crane Scheduling, Truck Parking and Train Loading}
+\author{Franko Jolić}
+\date{\today}
+
+% ══════════════════════════════════════════════════════════════════════
+% Custom commands
+% ══════════════════════════════════════════════════════════════════════
+\newcommand{\ie}{i.\,e.}
+\newcommand{\eg}{e.\,g.}
+\newcommand{\etal}{et~al.}
+\newcommand{\wrt}{w.\,r.\,t.}
+\newcommand{\state}{\mathbf{s}}
+\newcommand{\action}{\mathbf{a}}
+\newcommand{\reward}{r}
+\newcommand{\qfunc}{Q}
+\newcommand{\policy}{\pi}
+\newcommand{\expect}{\mathbb{E}}
+\newcommand{\reals}{\mathbb{R}}
+\newcommand{\loss}{\mathcal{L}}
+
+% Listing style
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!50!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left, numberstyle=\tiny\color{gray},
+  frame=single, framesep=3pt,
+  breaklines=true,
+  tabsize=4,
+}
+
+% ══════════════════════════════════════════════════════════════════════
+% Document
+% ══════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ------------------------------------------------------------------
+% Front matter
+% ------------------------------------------------------------------
+\pagenumbering{Roman}
+
+\include{chapters/titlepage}
+\include{chapters/abstract}
+\include{chapters/acknowledgements}
+\include{chapters/declaration}
+
+\tableofcontents
+\listoffigures
+\listoftables
+\listofalgorithms
+
+\clearpage
+\pagenumbering{arabic}
+
+% ------------------------------------------------------------------
+% Main chapters
+% ------------------------------------------------------------------
+\include{chapters/01_introduction}
+\include{chapters/02_background}
+\include{chapters/03_related_work}
+\include{chapters/04_system_design}
+\include{chapters/05_state_representation}
+\include{chapters/06_agent_architecture}
+\include{chapters/07_curriculum_training}
+\include{chapters/08_experimental_setup}
+\include{chapters/09_results}
+\include{chapters/10_discussion}
+\include{chapters/11_conclusion}
+
+% ------------------------------------------------------------------
+% Back matter
+% ------------------------------------------------------------------
+\printbibliography[heading=bibintoc, title={References}]
+
+\appendix
+\include{chapters/appendix_b_hyperparameters}
+\include{chapters/appendix_c_reward}
+
+\end{document}
+

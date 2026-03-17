@@ -1,0 +1,203 @@
+% chapters/04_system_design.tex
+\chapter{System Design}
+\label{ch:system}
+
+This chapter presents the simulation platform, the data foundation that drives it, and the action and reward formulations that connect the environment to the reinforcement learning agent.
+
+\section{System Overview}
+\label{sec:sys:overview}
+
+The system follows a four-layer architecture, shown in \cref{fig:sys:architecture}. The bottom layer is the data foundation: scenario definitions, train schedules, and truck arrival generators derived from operational records. Above it, the environment layer implements a discrete-event simulation of an intermodal container terminal with storage yards, rail tracks, a parking area, and rail-mounted gantry cranes (RMGCs). The agent layer contains the unified spatial DQN that selects source and destination positions for container moves. The top layer is a curriculum trainer that orchestrates multi-day episodes, adjusts scenario difficulty, and manages the replay buffer. Each layer communicates through well-defined interfaces. The agent architecture is described in \cref{ch:agent}, the state representation in \cref{ch:state}, and the curriculum training strategy in \cref{ch:curriculum}.
+
+\begin{figure}[H]
+  \centering
+  \resizebox{0.95\textwidth}{!}{\input{figures/system_architecture.tex}}
+  \caption{System architecture showing the four layers (Training, Environment, Agent, Data) and their class dependencies. Dashed arrows indicate data flow: the state tensor $(14, 15, 1{,}160, 5)$ flows from the state encoder to the agent, which returns a source--destination action pair.}
+  \label{fig:sys:architecture}
+\end{figure}
+
+A single simulation step proceeds as follows. The environment first processes pending arrivals and departures, collecting event-driven rewards such as train departure bonuses or truck waiting penalties. It then identifies all idle cranes, encodes the terminal state into a multi-channel spatial tensor, passes it to the agent, and receives back a source and destination position. The \texttt{TerminalLogisticsManager} validates and executes the resulting container move, the \texttt{TerminalRMGC} computes the crane travel cost in metres and seconds, and an immediate reward is assembled from a type-specific bonus plus distance and time penalties. When multiple cranes act within the same step, the simulation clock advances by the longest individual crane duration, reflecting parallel operation.
+
+\section{Simulation Environment}
+\label{sec:sys:env}
+
+\subsection{Terminal Model}
+\label{sec:sys:env:model}
+
+The physical terminal is represented by the \texttt{StorageYard}, which models a block-stacking yard with 5 rows, 58 bays, and 5 tiers. Each bay is subdivided by a split factor of 20, yielding sub-slots of 2 feet each ($58 \times 20 = 1{,}160$ split positions per row). This sub-bay granularity allows containers of seven standardised lengths (20, 22, 23, 24, 30, 40, and 45 feet) to share bays without wasted space, following the binary encoding principle of \cite{caserta2009binary}. The primary data structure is a 3D NumPy integer array of shape \texttt{(n\_tiers, n\_rows, total\_splits)} that maps each coordinate to a container index, enabling O(1) occupancy lookups.
+
+The rail infrastructure (\texttt{RailYard}) manages 7 tracks. Each train maps to a track through a slot object that records an anchor bay position, linking the train's location to the yard's coordinate system. The parking infrastructure (\texttt{ParkingArea}) uses the same bay-and-split grid. The state representation arranges all regions into 15 contiguous rows, detailed in \cref{ch:state}. \Cref{fig:sys:terminal_layout} shows the spatial arrangement of all facility regions, including the crane zones.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{terminal_layout}
+  \caption{Bird's-eye view of the terminal layout. The 58-bay axis runs horizontally. Rows 0--6 are rail tracks, row~7 is parking, rows~8--12 are the storage yard, and rows~13--14 are the truck queue. Two cranes (blue dashed, red dashed) operate in overlapping zones with a 4-bay overlap region (amber).}
+  \label{fig:sys:terminal_layout}
+\end{figure}
+
+\subsection{Container and Vehicle Models}
+\label{sec:sys:env:entities}
+
+Every container is characterised by a direction (Import or Export), physical dimensions, a goods type (Regular, Reefer, or DangerousGoods), and arrival and departure dates. Reefer containers require powered positions at the yard's outer bays, dangerous goods must be placed in designated central zones, and swap bodies are restricted to ground-level storage. These constraints are enforced through Boolean masks baked into the yard at initialisation, ensuring that the agent can only place containers in valid positions.
+
+A \texttt{Train} consists of wagons, each capable of holding multiple containers up to its length capacity, and carries a pickup manifest listing container IDs to collect before departure. The train lifecycle progresses through arriving, waiting, loading, departing, and departed. The \texttt{TrainScheduler} assigns trains to tracks using a best-fit decreasing heuristic, sorted by dwell duration.
+
+A \texttt{Truck} either delivers export containers or arrives with a pickup manifest to collect imports. Truck arrival times are sampled from day-of-week-specific KDE\footnote{Kernel density estimation: a non-parametric method that estimates a continuous probability distribution from discrete data points by placing a smooth kernel (here Gaussian) at each observation.} models, producing the bimodal peak pattern (morning and afternoon surges) observed at real terminals.
+
+\subsection{Logistics and Planning Layer}
+\label{sec:sys:env:logistics}
+
+The \texttt{LogisticsManager} constructs daily traffic plans by querying KDE-based arrival distributions for truck counts and timings, while train arrivals follow a weekly schedule parsed from a driving plan JSON. The export-to-import ratio defaults to 0.75, drawn from N\"urnberg TriCon statistics, with a daily cap of 220 import containers via rail.
+
+The \texttt{ContainerFactory} samples container lengths and goods types from operator-specific probability tables fitted to the N\"urnberg dataset. The \texttt{TerminalLogisticsManager} is the move execution engine: it validates agent-selected source--destination pairs against the current terminal state, updates entity positions, and returns a success or failure flag.
+
+\subsection{Crane Movement Model}
+\label{sec:sys:env:rmgc}
+
+The \texttt{TerminalRMGC} computes the physical cost of every crane operation. Given source and destination positions, it resolves each to 3D coordinates (X along bays, Y across rows, Z for tier height) and computes travel time with a trapezoidal motion profile for each axis independently. The critical-path time is the maximum across the three axes, plus a fixed 30-second handling time for container lock and unlock, consistent with the positioning time reported by \textcite{stahlbock2008operations} for RMG operations. The total cost feeds directly into the reward function.
+
+The 58-bay gantry axis is partitioned into overlapping zones (one per crane, 4-bay overlap) for concurrent multi-crane operation. When multiple idle cranes are dispatched within a single step, a per-step blacklist prevents one crane from reversing a move made by another in the same step (\cref{sec:state:masking:blacklist}).
+
+\subsection{Time Model}
+\label{sec:sys:env:time}
+
+The simulation uses an operation-driven time model. When multiple cranes execute moves within a single \texttt{step\_all\_cranes()} call, the clock advances by the \emph{longest} individual crane duration rather than their sum, reflecting the physical reality that cranes in separate zones work simultaneously. A typical two-crane step advances the clock by 120 to 300 seconds. When no valid moves exist and all cranes are idle, a fixed 30-second increment allows pending arrivals or departures to resolve.
+
+A day begins with \texttt{env.reset()}, which loads a traffic plan with optional carryover entities from the previous day. The day ends when the clock reaches 23:59 or the step count reaches 5{,}000. End-of-day penalties are applied for stacking inversions and leftover containers, and unfinished trains or trucks carry over to the next day.
+
+\section{Data Foundation}
+\label{sec:sys:data}
+
+The simulation is calibrated to operational data from the N\"urnberg TriCon intermodal terminal. The dataset contains container arrival patterns, dwell time distributions, the mix of container sizes across operators, goods-type frequencies, and weekly train schedules. Truck arrival profiles are derived from timestamped gate logs stratified by day of week. Gaussian kernel density estimates fitted to these logs produce stochastic arrivals that are statistically consistent with reality yet never identical across episodes, providing the variation needed for robust policy training.
+
+\section{Action Space Design}
+\label{sec:sys:actions}
+
+\subsection{Move Types}
+\label{sec:sys:actions:types}
+
+The simulation supports nine operational move types plus a learnable \texttt{IDLE} action, summarised in \cref{tab:sys:move_types}. Eight of these are \emph{container} move types involving crane operations; the ninth (\texttt{YARD\_TO\_T.TRUCK}) dispatches containers to terminal trucks and is exercised only in Phase~1 tutorials. The move type is not an explicit agent decision but is inferred deterministically from the spatial regions of the selected source and destination through a fixed lookup table.
+
+\begin{table}[H]
+  \centering
+  \caption{Move types supported by the simulation. Each type is inferred from the source and destination regions of the agent's spatial selection.}
+  \label{tab:sys:move_types}
+  \begin{tabular}{@{} l l l l @{}}
+    \toprule
+    \textbf{Move Type} & \textbf{Source} & \textbf{Destination} & \textbf{Description} \\
+    \midrule
+    \texttt{PARK\_TRUCK}      & Queue   & Parking & Park a truck in a free spot \\
+    \texttt{TRAIN\_TO\_YARD}  & Rail    & Yard    & Unload import from wagon \\
+    \texttt{TRUCK\_TO\_YARD}  & Parking & Yard    & Transfer export from truck \\
+    \texttt{YARD\_TO\_YARD}   & Yard    & Yard    & Restack within the yard \\
+    \texttt{YARD\_TO\_TRAIN}  & Yard    & Rail    & Load export onto train \\
+    \texttt{YARD\_TO\_TRUCK}  & Yard    & Parking & Place import onto pickup truck \\
+    \texttt{TRAIN\_TO\_TRUCK} & Rail    & Parking & Direct transfer, bypasses yard \\
+    \texttt{TRUCK\_TO\_TRAIN} & Parking & Rail    & Direct transfer, bypasses yard \\
+    \texttt{YARD\_TO\_T.TRUCK}& Yard    & Queue   & Dispatch to terminal truck \\
+    \midrule
+    \texttt{IDLE}             & \multicolumn{2}{l}{Learnable source position} & Deliberate wait \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{move_types_layout}
+  \caption{View of the terminal layout showing the four facility regions and the nine move types as directed arrows. Solid arrows represent productive container transfers; the circular IDLE action represents a deliberate wait.}
+  \label{fig:sys:move_types}
+\end{figure}
+
+\subsection{Unified Source--Destination Formulation}
+\label{sec:sys:actions:unified}
+
+The agent's action consists of two sequential decisions: select a source position (row, split, tier) in the unified 15-row grid, then select a destination in the same coordinate space. This replaces a naive flat enumeration that would yield $15 \times 1{,}160 \times 5 = 87{,}000$ positions per decision.
+
+Both decisions are constrained by dynamic masks that encode the full logistics logic of the terminal, as described next.
+
+\section{Source and Destination Masking}
+\label{sec:state:masking}
+
+The masks are the mechanism through which domain constraints enter the action space. Invalid action masking \cite{huang2022masking} sets the Q-values of physically impossible actions to $-\infty$ before selection, ensuring the agent never wastes experience on impossible moves and every exploratory action produces a meaningful transition.
+
+\subsection{Source Mask Construction}
+\label{sec:state:masking:source}
+
+The source mask is a boolean tensor of shape $(R_\text{uni}, S, T)$ that marks every position from which the agent may select a source entity. In the yard rows, a position is marked if the container is accessible (topmost in its stack) and the position is the container's start split. On rail rows, only Import containers are marked, using the container's immutable \texttt{direction} attribute as described in \cref{sec:state:channels:structure}. In the parking row, only delivery trucks carrying Export containers are marked. In the queue rows, all waiting trucks are marked as valid sources for the parking action.
+
+\subsection{Destination Mask Function}
+\label{sec:state:masking:dest}
+
+The destination mask is not a static tensor but a function of the selected source position. The environment pre-computes a yard validity mask that checks occupancy, support conditions, and contiguous free space for each possible placement, along with a parking free-slot mask. The closure \texttt{\_make\_dest\_mask\_fn()} then applies region-dependent logic based on where the source was selected.
+
+If the source is in the queue rows, valid destinations are free parking positions. If the source is on a rail row or in the parking row, valid destinations are open yard positions that satisfy the container's goods-type placement rules. If the source is in the yard, valid destinations include other yard positions for restacking, plus direction-dependent vehicle targets. For Export yard containers, the mask includes rail wagon positions on tracks where a train has requested that specific container and has space for it. For Import yard containers, the mask includes parking positions of trucks whose pickup manifest contains that container's ID. This conditional masking encodes the full logistics logic of the terminal directly into the action space, relieving the agent from learning which region combinations are valid through trial and error.
+
+\subsection{Anti-Reversal Blacklist}
+\label{sec:state:masking:blacklist}
+
+In a multi-crane terminal, two cranes operating within the same \texttt{step\_all\_cranes()} call could reverse each other's moves. Crane 1 might move container A from the yard to a rail wagon, and crane 2 might immediately move it back. The anti-reversal blacklist prevents this by maintaining a per-step set of container IDs that have been moved during the current step. Before the second crane's source mask is computed, the blacklist is applied to zero out positions occupied by recently moved containers.
+
+The blacklist is scoped to a single step rather than an entire episode. A container moved in step $n$ becomes available again in step $n + 1$ because the intervening time may change the operational context and make the container a legitimate target. This per-step scope was chosen after the multi-crane reversal bug was discovered during tutorial scenario debugging, where bidirectional train flows (Tier 7 and above) repeatedly triggered the reversal pattern. The resolution is discussed in \cref{sec:disc:engineering}.
+
+\section{Reward Engineering}
+\label{sec:sys:reward}
+
+\subsection{Immediate Move Rewards}
+\label{sec:sys:reward:immediate}
+
+Every executed move receives an immediate reward composed of a type-specific bonus and a distance-plus-time cost. The bonuses, listed in \cref{tab:sys:move_rewards}, encode operational priority. The distance component applies $-0.001$ per metre of crane travel and the time component adds $-0.0005$ per second, deliberately small relative to type bonuses to create a gradient toward efficient placements without overriding the priority signal.
+
+\begin{table}[H]
+  \centering
+  \caption{Immediate move rewards. Higher bonuses reflect higher operational urgency.}
+  \label{tab:sys:move_rewards}
+  \begin{tabular}{@{} l r l @{}}
+    \toprule
+    \textbf{Move Type} & \textbf{Bonus} & \textbf{Rationale} \\
+    \midrule
+    \texttt{YARD\_TO\_TRAIN}  & $+7.0$ & Most time-critical (delays departure) \\
+    \texttt{TRUCK\_TO\_TRAIN} & $+7.0$ & Direct export, same urgency \\
+    \texttt{TRAIN\_TO\_TRUCK} & $+5.0$ & Direct import, bypasses yard \\
+    \texttt{YARD\_TO\_TRUCK}  & $+3.0$ & Customer service (truck waiting) \\
+    \texttt{TRAIN\_TO\_YARD}  & $+2.5$ & Import unloading \\
+    \texttt{TRUCK\_TO\_YARD}  & $+0.8$ & Export staging \\
+    \texttt{PARK\_TRUCK}      & $+0.1$ & Low priority, plus proximity bonus$^{*}$ \\
+    \texttt{YARD\_TO\_YARD}   & $-0.2$ & Discourages unnecessary reshuffling \\
+    \texttt{IDLE}             & $-0.1$ & Penalises inaction \\
+    \midrule
+    Distance cost             & \multicolumn{2}{l}{$-0.001$ per metre of crane travel} \\
+    Time cost                 & \multicolumn{2}{l}{$-0.0005$ per second of crane time} \\
+    \bottomrule
+    \multicolumn{3}{@{}l}{\footnotesize $^{*}$Up to $+0.5$ additional, decaying linearly over 5 bays from the cargo's zone anchor.}
+  \end{tabular}
+\end{table}
+
+\subsection{Event-Driven Rewards}
+\label{sec:sys:reward:events}
+
+Event-driven rewards are issued at key milestones, summarised in \cref{tab:sys:event_rewards}. A continuous per-truck-per-minute waiting penalty was initially included but was disabled after evaluation revealed it overwhelmed the learning signal (see \cref{app:reward:corrections}). The reward magnitudes were calibrated iteratively during development: the ordering reflects operational priority, and the absolute values were tuned so that multi-step sequences yield net positive return only when they complete a meaningful logistics chain.
+
+\begin{table}[H]
+  \centering
+  \caption{Event-driven rewards issued at milestones during the simulation.}
+  \label{tab:sys:event_rewards}
+  \begin{tabular}{@{} l r l @{}}
+    \toprule
+    \textbf{Event} & \textbf{Reward} & \textbf{Condition} \\
+    \midrule
+    Train departure (success)   & $+10.0$ & All manifest containers loaded \\
+    Train departure (per miss)  & $-3.0$  & Per manifest container not loaded \\
+    Truck served promptly       & $+2.0$  & Service within 60 minutes \\
+    Truck served late           & $+2.0 \to 0.0$ & Linear decay, 60--180 min \\
+    \midrule
+    Stacking inversion (end-of-day) & $-0.5$ & Per inversion in yard \\
+    Overdue container (end-of-day) & $-0.3$ & Per container past departure date \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The reward hierarchy mirrors the operational phasing documented by \textcite{boysen2013container}: shortly after a train's arrival, direct moves from train to waiting trucks are processed first (rewarded at $+5.0$ for \texttt{TRAIN\_TO\_TRUCK}); next, wagon-to-storage moves predominate ($+2.5$ for \texttt{TRAIN\_TO\_YARD}); finally, storage-to-truck retrieval completes the chain ($+3.0$ for \texttt{YARD\_TO\_TRUCK}). The $+7.0$ bonus for \texttt{YARD\_TO\_TRAIN} reflects the operational reality that export loading is the most time-critical move type, since unfinished loads delay train departures. The negative reward for \texttt{YARD\_TO\_YARD} ($-0.2$) reflects the finding that reshuffles are ``unproductive container movements'' \cite{vis2003transshipment} --- necessary to unlock buried containers but costly in crane time and therefore to be minimised. The full reward specification is given in \cref{app:reward}.
+
+\medskip
+
+Together, the simulation environment, data foundation, action formulation, and reward design form the Markov decision process that the reinforcement learning agent must solve. The next two chapters describe how this MDP is observed (\cref{ch:state}: the spatial state tensor) and acted upon (\cref{ch:agent}: the two-head DQN architecture).

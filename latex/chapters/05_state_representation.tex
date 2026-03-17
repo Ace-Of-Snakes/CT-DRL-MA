@@ -1,0 +1,102 @@
+% chapters/05_state_representation.tex
+\chapter{Unified Spatial State Representation}
+\label{ch:state}
+
+At each decision step the agent receives a single snapshot of the entire terminal: every container, truck, train wagon, and queue position encoded as a multi-channel spatial tensor. This chapter describes the design of that tensor --- the rationale behind the unified grid, its geometric layout, the 14 channels that populate it, and the region-specific rules that translate domain objects into activations. The masking logic that constrains action selection is described alongside the action space in \cref{sec:state:masking}.
+
+\section{Design Rationale}
+\label{sec:state:rationale}
+
+The operational decisions in a container terminal are fundamentally spatial. A train at bay~10 is relevant to a container at bay~12 and a truck parked at bay~11, because loading that container requires minimal crane travel when the three entities are close together. Flat feature vectors destroy this structure by collapsing all positions into an unordered list. A spatial tensor preserves geometric relationships and allows convolutional filters to learn local patterns such as proximity, alignment, and blocking.
+
+The key design principle is \emph{unification}. Rather than encoding trains, trucks, yard containers, and queued vehicles in separate data structures, the encoder places every entity into a single three-dimensional grid sharing the same bay, split, and tier axes. The CNN's cross-region kernel (\cref{sec:agent:unified:cnn}) can then bridge adjacent rows in a single forward pass, discovering associations such as the relationship between an export container in the yard and the train wagon that needs it one row above. An earlier architecture (version~6, \cref{sec:disc:architecture_evolution}) used Gaussian heat maps in separate per-region encodings to signal demand from trains and trucks, forcing the CNN to reconstruct spatial relationships from blurred overlays. The unified grid is simpler, requires fewer channels, and gives the network direct access to every entity's position.
+
+\section{Tensor Layout}
+\label{sec:state:layout}
+
+The state tensor has shape $(C, R, S, T) = (14, 15, 1160, 5)$, using the terminal geometry described in \cref{sec:sys:env:model}. The 15 rows follow the region ordering from \cref{fig:sys:terminal_layout}: rail tracks (rows 0--6), parking (row~7), yard (rows 8--12), and queue (rows 13--14). This ordering is deliberate: regions that interact most frequently are spatial neighbours, so the cross-region kernel (\cref{sec:agent:unified:cnn}) can detect patterns between rail and yard or between parking and yard within a single receptive field.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{state_tensor_visualization}
+  \caption{Left: the four-dimensional state tensor with region assignments along the row axis. Right: example channel activations for four representative channels.}
+  \label{fig:state:tensor_viz}
+\end{figure}
+
+\section{Channel Design}
+\label{sec:state:channels}
+
+The 14 channels can be understood as answering four questions that the agent must resolve at every decision step: \emph{What is here?} (structure), \emph{How urgent is it?} (priority), \emph{Where should it go?} (demand), and \emph{What is the global context?} (coordination). \Cref{tab:state:channels} provides a compact reference; the remainder of this section explains the reasoning behind each group.
+
+\begin{table}[H]
+\centering
+\caption{Summary of the 14 state tensor channels, grouped by function.}
+\label{tab:state:channels}
+\small
+\begin{tabularx}{\textwidth}{c l l X}
+\toprule
+\textbf{Idx} & \textbf{Channel} & \textbf{Range} & \textbf{Description} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Structure --- what is here?}} \\
+\addlinespace[2pt]
+0  & OCCUPANCY            & $\{0, 1\}$    & 1 if split is occupied by a container or vehicle \\
+1  & CONTAINER\_START     & $\{0, 1\}$    & 1 at the leftmost split of each container \\
+2  & CONTAINER\_TYPE      & $[0, 1]$      & Goods type: regular=0.25, reefer=0.50, DG=0.75, swap=1.0 \\
+3  & ACCESSIBLE           & $\{0, 1\}$    & 1 if container is topmost in its stack (accessible) \\
+6  & DIRECTION            & $\{0, 0.5, 1\}$ & Import=0, terminal truck=0.5, Export=1 \\
+7  & CONTAINER\_HASH      & $[0.1, 1.0]$  & Unique per-container identifier (stable across steps) \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Priority --- how urgent is it?}} \\
+\addlinespace[2pt]
+4  & DEPARTURE\_URGENCY   & $[0, 1]$      & Normalised time until departure (trucks: wait hours/4) \\
+5  & BLOCKS\_URGENT       & $[0, 1]$      & Stacking inversion score (blocks a more urgent container) \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Demand --- where should it go?}} \\
+\addlinespace[2pt]
+8  & TRUCK\_DEMAND        & $[0, 1]$      & Yard positions wanted by a parked pickup truck \\
+9  & TRAIN\_DEMAND        & $[0, 1]$      & Yard positions wanted by a docked train (value = normalised anchor bay) \\
+13 & EXPORT\_PICKUP\_DEMAND & $[0, 1]$    & Urgency-weighted flag for containers on trains' pickup lists \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Coordination --- what is the global context?}} \\
+\addlinespace[2pt]
+10 & CRANE\_PROXIMITY     & $[0, 1]$      & Triangular decay from crane's current bay position \\
+11 & TRAIN\_DEPARTURE\_URG & $[0, 1]$     & Time remaining / total stay duration for each train \\
+12 & TIME\_PROGRESS       & $[0, 1]$      & Seconds since midnight / 86\,400 (global clock signal) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Structure (channels 0--3, 6--7).}
+\label{sec:state:channels:structure}
+The first group tells the network what occupies each position. The binary \texttt{OCCUPANCY} mask (ch.~0) provides the coarsest signal. \texttt{CONTAINER\_START} (ch.~1) refines it by marking only the leftmost split of each container, letting the CNN distinguish two adjacent containers from a single multi-split one. \texttt{CONTAINER\_TYPE} (ch.~2) encodes the goods category as a categorical float (regular\,=\,0.25, reefer\,=\,0.50, dangerous goods\,=\,0.75, swap body\,=\,1.0), since placement constraints depend on goods type (\cref{sec:sys:env:entities}). \texttt{ACCESSIBLE} (ch.~3) flags containers that are topmost in their stack and can be picked up without restacking. The CNN can overlay this information with the demand channels to identify which wanted containers are immediately reachable and which require a restack first.
+
+\texttt{DIRECTION} (ch.~6) encodes the container's flow direction: Import\,=\,0, Export\,=\,1. Terminal trucks, which shuttle containers internally and have no intrinsic import/export direction, receive the midpoint value~0.5, distinguishing them from pickup trucks~(0) and delivery trucks~(1) in the parking and queue rows. This channel drives the destination masking logic (\cref{sec:state:masking:dest}): Export containers may target rail wagons, Import containers may target pickup trucks. Importantly, the encoding uses the container's immutable \texttt{direction} attribute. Finally, \texttt{CONTAINER\_HASH} (ch.~7) provides a deterministic identity value in~$[0.1, 1.0]$ computed from the entity~ID, allowing the CNN to track an individual container across steps even when it moves to a new position.
+
+\paragraph{Priority (channels 4--5).}
+\label{sec:state:channels:priority}
+Two channels encode temporal urgency. \texttt{DEPARTURE\_URGENCY} (ch.~4) normalises the time remaining before an entity must leave: \newline $\min(1.0,\; \text{days\_remaining} / 30.0)$ for containers and $\min(1.0,\; \text{wait\_hours} / 4.0)$ for trucks. A value near~0 signals an imminent deadline. \texttt{BLOCKS\_URGENT} (ch.~5) captures stacking inversions: when a container at tier~$t$ sits above a more urgent container at tier~$t{-}1$, the channel records the urgency difference $u_t - u_{t{-}1}$, quantifying how badly the stack needs reshuffling. Together, these two channels let the network decide both \emph{which} containers to prioritise and \emph{which stacks} to fix first.
+
+\paragraph{Demand (channels 8--9, 13).}
+\label{sec:state:channels:demand}
+The demand group answers ``where should this container go?''\ by painting target signals onto yard positions. \texttt{TRUCK\_DEMAND} (ch.~8) lights up every yard position that a parked pickup truck wants to collect (1.0 at each demanded split). \texttt{TRAIN\_DEMAND} (ch.~9) does the same for trains, but encodes the value as the normalised anchor bay of the requesting train rather than a flat~1.0 --- this provides both a demand flag and a spatial hint about the train's location, so the cross-region kernel can learn directional loading patterns.
+
+\texttt{EXPORT\_PICKUP\_DEMAND} (ch.~13) complements channel~9 by adding urgency weighting: $\max(0.1,\; 1.0 - \min(1.0,\; \text{hours\_until\_departure} / H_\text{max}))$. Where channel~9 tells the agent \emph{which} containers a train wants, channel~13 tells it \emph{how urgently} each is needed. A container demanded by a train departing in 30 minutes will have a near-1.0 activation, while one for a train with hours to spare stays near~0.1. The combination of these three channels replaced an earlier Gaussian heat map approach with exact, position-accurate demand signals.
+
+\paragraph{Coordination (channels 10--12).}
+\label{sec:state:channels:coord}
+The final group provides global context that no single entity carries. \texttt{CRANE\_PROXIMITY} (ch.~10) encodes a triangular decay from each crane's current bay position (1.0 at the crane, linearly decaying to~0.0 at the terminal edges). Because both cranes share a single channel, the CNN receives an implicit coordination signal: positions between the two cranes have overlapping activations, while positions near one crane but far from the other do not. This allows the network to learn a soft spatial partitioning without explicit crane assignment logic.
+
+\texttt{TRAIN\_DEPARTURE\_URG} (ch.~11) gives a per-rail-row countdown: $\text{time\_remaining} / \text{total\_stay}$, where 1.0 means a train has just arrived and 0.0 means departure is imminent. Unlike the per-container urgency in channel~4, this is a row-wide broadcast that signals the train as a whole. \texttt{TIME\_PROGRESS} (ch.~12) broadcasts $\text{seconds\_since\_midnight} / 86{,}400$ uniformly across all positions, providing the only absolute temporal reference in the tensor. Since truck arrival patterns are time-of-day dependent, this channel allows the agent to implicitly learn scheduling heuristics (e.g.\ prioritise parking in the morning when truck arrivals peak).
+
+\section{Region-Specific Encoding}
+\label{sec:state:regions}
+
+The 14 channels are shared across all regions, but each region fills them according to its own physical semantics. The mapping from domain objects to tensor activations follows the terminal geometry described in \cref{sec:sys:env:model}.
+
+\textbf{Rail rows (0--6).} Each wagon is mapped to its bay position via the train's anchor bay plus the wagon's offset. All rail containers are marked accessible (no stacking on wagons). The demand channels mark requested containers at their \emph{yard} positions while the rail row signals the train's anchor, forming a spatial correspondence that the cross-region kernel can learn to bridge.
+
+\textbf{Parking row (7).} Parked trucks are encoded at their allocated bay positions. The direction channel uses the actual container direction for delivery trucks and defaults to Import for pickup trucks. Departure urgency is repurposed to encode truck waiting time, creating an implicit ``serve me soon'' signal that grows over time.
+
+\textbf{Yard rows (8--12).} The occupancy array is transposed from the yard's internal $(T, R, S)$ layout to the tensor's $(R, S, T)$ ordering so that the tier axis aligns with the CNN's depth dimension. Per-container channels are filled from the yard's records, with demand overlays from truck and train manifests applied on top. This is the most information-dense region: all 14 channels are active.
+
+\textbf{Queue rows (13--14).} Trucks that have arrived but not yet been parked are placed at their preferred bay position (median bay of wanted containers for pickups, goods-type zone anchor for deliveries). When multiple trucks target the same bay, they stack across both queue rows. This gives the CNN a preview of incoming demand \emph{before} the parking decision is made --- a key advantage of the unified grid over separate region encodings, as the spatial proximity between a queued truck and its target containers is directly visible in the tensor.
